@@ -1,0 +1,60 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Tenancy — TenantReactivated
+  version: 1.0.0
+  description: |
+    Published when a SUSPENDED tenant is restored.
+
+    - Domain: Tenancy + Billing (`chora_tenancy` DB)
+    - Topic: `chora.tenancy.tenant.reactivated.v1`
+    - Source proto: `proto/events/tenancy/tenant.proto`
+       message `chora.tenancy.v1.TenantReactivated`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  tenantReactivated:
+    address: chora.tenancy.tenant.reactivated.v1
+    messages:
+      tenantReactivated:
+        $ref: '#/components/messages/TenantReactivated'
+
+operations:
+  publishTenantReactivated:
+    action: send
+    channel:
+      $ref: '#/channels/tenantReactivated'
+    messages:
+      - $ref: '#/channels/tenantReactivated/messages/tenantReactivated'
+
+  consumeTenantReactivated:
+    action: receive
+    channel:
+      $ref: '#/channels/tenantReactivated'
+    description: |
+      Consumers: ALL surfaces (restore write capability),
+      Notifications (welcome-back), Identity (re-allow logins).
+    messages:
+      - $ref: '#/channels/tenantReactivated/messages/tenantReactivated'
+
+components:
+  messages:
+    TenantReactivated:
+      name: TenantReactivated
+      title: Tenant Reactivated
+      summary: A previously-suspended Tenant has been restored
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/tenancy/tenant.proto#/chora.tenancy.v1.TenantReactivated'

@@ -1,0 +1,617 @@
+// =============================================================================
+// Chora Content Creation — AI Assist orchestration events
+// =============================================================================
+//
+// AI Assist is the chora-creation domain's hub-spoke between the
+// AIAssistService and the downstream LLM call routed through the
+// ai_kernel_orchestrator (Python LangGraph) Vertex AI Agent Engine.
+//
+// DISTINCT FROM the two adjacent event families in this domain:
+//
+//   - chora.creation.qgen.*       — qgen_pipeline crew internal lifecycle
+//                                   (assurance_rejected / evaluation_rejected /
+//                                    batch_completed / single_completed /
+//                                    provenance_recorded — emitted by the
+//                                    QGen crew itself; see qgen.proto).
+//   - chora.creation.question.*   — CR-driven question authoring lifecycle
+//                                   (authored / generation_requested /
+//                                    generation_completed / generated /
+//                                    evaluated — see question.proto +
+//                                    qgen.proto).
+//   - chora.creation.ai_assist.*  — this file — emitter is the
+//                                   ai_kernel_orchestrator Python LangGraph
+//                                   engine; semantics are AI Assist hub-spoke
+//                                   (started / completed / refused).
+//
+// Why the topic lives in the `creation` domain (not `ai_kernel`): the
+// artefact produced is a creation atom draft / question candidate. The
+// emitter being in AI Kernel does NOT determine the topic domain — the topic
+// domain follows the affected aggregate root.
+//
+// Per ADR-141 (IMDA dimension labels): every event SHOULD carry an
+// envelope.chora_imda_dimension. "accountability" (D1) for started + completed;
+// "safety_and_robustness" (D3) for refused (since refusal evidence is gating).
+//
+// Aggregate root : ai_assist_invocations (chora_creation database;
+//                  projection of orchestrator session state for the AI Assist
+//                  paths)
+// Owning domain  : Content Creation (chora_creation)
+// Owning team    : Team 1 (Content)
+// Topic prefix   : chora.creation.ai_assist.*
+// Surface (admin): A+ Creator mode
+//
+// Subscribers:
+//   - chora-creation       — state-update (write AI Assist invocation row;
+//                            on completed/refused, update author projection)
+//   - chora-observability  — D1 accountability evidence; D3 safety evidence
+//                            on refused
+//   - chora-governance     — refused-only (D3 IMDA Safety & Robustness ledger)
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.creation.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/creation/v1;creationv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// Per-question-type quota for a mixed-type batch (AiAssistStarted.type_plan).
+// A value object — the chora-creation domain validates invariants (count >= 0,
+// 0 <= max_images <= count, sum(count) <= MAX_BATCH) before publish.
+message GenerationTypeQuota {
+  // "mcq" | "oe" (the known question types; extensible to future types).
+  string question_type = 1;
+
+  // How many questions of this type to generate (>= 1 in a valid plan).
+  int32 count = 2;
+
+  // <= count. How many questions of this type MAY receive an AI-generated
+  // image. The generator decides which questions + placement (stem|answer);
+  // 0 disables images for this type. This is the "AI decides" budget.
+  int32 max_images = 3;
+
+  // -- Additions 2026-06-22 (CHO-1825 2b): deterministic per-type author image
+  //    opt-in (additive within v1; optional scalars default false → buf-clean).
+  //
+  // Per-type mirror of the single-candidate AiAssistStarted.image_for_stem /
+  // image_for_answer. When true, EVERY question of this type MUST carry an
+  // image on that placement (deterministic, AUTHOR-selected) — distinct from
+  // the model-decided max_images budget above. When BOTH are false the type
+  // falls back to the max_images "AI decides" budget (byte-for-byte unchanged).
+  bool image_for_stem = 4;
+  bool image_for_answer = 5;
+}
+
+// Re-render ONE image for an existing draft candidate (job_kind="image_regen").
+// Routed through the chora-model-gateway chokepoint so Model Armor screening +
+// mana metering are preserved — chora-creation never calls the model directly.
+message ImageRegenSpec {
+  // Draft candidate id within the originating question job.
+  string draft_id = 1;
+
+  // "stem" | "answer" — which image on the candidate to (re)generate.
+  string placement = 2;
+
+  // Optional author-edited image prompt. Empty ⇒ reuse the candidate's stored
+  // image_spec source for this placement.
+  string prompt = 3;
+
+  // "scene" | "mermaid" — render path. Empty ⇒ reuse the stored spec mode.
+  string mode = 4;
+
+  // -- Additions 2026-06-22 (I2): author's CURRENT edited question context
+  //    (additive within v1; optional scalars default "" → buf-breaking clean).
+  //
+  // The author may regenerate an image AFTER editing the draft in the review
+  // UI but BEFORE saving. These carry the in-flight edited context so the
+  // regenerate prompt reflects the unsaved question — without them the image
+  // would re-render against the stale stored candidate. Empty ⇒ the
+  // orchestrator falls back to the candidate's stored context (byte-identical
+  // to a pre-I2 producer).
+  //
+  // The current edited question stem the image should illustrate.
+  string current_stem = 5;
+
+  // The current edited model answer (drives "answer"-placement regeneration).
+  string current_model_answer = 6;
+
+  // The original grounding source / reference text the question was authored
+  // from, biasing the regenerate prompt toward the same material.
+  string original_source = 7;
+
+  // -- Addition 2026-07-01 (Tier 1 image-to-image, ADR-210 / CHO-1982) --
+  //
+  // gs:// OBJECT PATH of the CURRENT rendered image for this placement — the
+  // canonical persisted object (a durable chora-atom-media ref for a saved
+  // atom, or the transient render ref stamped at generation for an in-review
+  // candidate), NEVER a signed URL parsed back into a gs://. When set, the
+  // orchestrator fetches the bytes and sends them to the model as an inline
+  // image part alongside the refinement prompt so gemini-2.5-flash-image edits
+  // the existing image natively (true image-to-image) instead of regenerating
+  // from scratch. Empty ⇒ text-to-image (byte-identical to a pre-Tier-1
+  // producer; proto3 default-elision). When set but the object is unavailable
+  // (GC'd / IAM / missing), the orchestrator FAILS LOUD (ai_assist.refused.v1
+  // with an explicit author message) — never a silent text-redraw (ADR-210 D3).
+  string original_image_gcs_uri = 8;
+}
+
+// Role-tagged grounding-file reference for multi-file batch jobs (Lane 1c).
+// The crew downloads every blob and inlines each as a Gemini multimodal
+// `inlineData` part; role="rubric" files are presented to the model as the
+// mark-scheme / rubric context (distinct prompt framing from role="source").
+message SourceFileRef {
+  // gs:// URI of the uploaded file.
+  string blob_uri = 1;
+
+  // MIME type (application/pdf, image/png, image/jpeg, image/webp,
+  // text/markdown, text/plain, DOCX, ...). Drives the inlineData mimeType.
+  string mime_type = 2;
+
+  // File role: "source" (question material, ≤5 per job) | "rubric"
+  // (mark-scheme / grading rubric, ≤1 per job).
+  string role = 3;
+}
+
+// -----------------------------------------------------------------------------
+// AiAssistStartedV2 — chora.creation.ai_assist.started.v2
+// -----------------------------------------------------------------------------
+//
+// ADR-195 WS7 (D7): the .v2 of ai_assist.started. Drops the `job_kind`
+// orchestration discriminant ("" | "single" | "batch" | "image_regen") and
+// carries the unified compose model explicitly — {operation:"compose", intent,
+// input_kind}. The agent layer is UNCHANGED (ADR-195 D2): the orchestrator's
+// QGenRunnerRouter routes on (intent, input_kind, plan) instead of job_kind,
+// mapping to the SAME composer TaskContextQuestion fields.
+//
+// Topic: chora.creation.ai_assist.started.v2
+//
+// CROSS-SERVICE CONSUMER: chora-ai-kernel-orchestrator. Per ADR-195 D2 ("agent
+// layer unchanged") chora-creation PARALLEL-PUBLISHES v1 (with job_kind) AND v2
+// during cutover; the orchestrator keeps reading v1.job_kind until it migrates
+// to v2.intent/input_kind, then v1 is drained + retired (ADR-195 D7 §5.6).
+//
+// Wire-compat with v1: every retained field keeps its v1 tag. Tag 15 is
+// RESERVED (was job_kind) so it is never reused; the new compose trio takes
+// tags 23-25 (after the last v1 tag, regen=22).
+message AiAssistStartedV2 {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — the AI Assist invocation aggregate root id (== the compose job_id).
+  string assist_id = 2;
+
+  // Tenant context (also in envelope.tenant_id; duplicated for filter-friendly
+  // tenant-sharded subscribers).
+  string tenant_id = 3;
+
+  // The author who initiated the AI Assist call. Same as envelope.gcid.
+  string author_gcid = 4;
+
+  // Optional UUIDv7 of the parent LearningAtom. Empty for atom-creation flows.
+  string atom_id = 5;
+
+  // Content type discriminator (Phyllis scope: "mcq" | "oe"; "mixed" for a
+  // multi-type plan). Drives the downstream prompt template + candidate schema.
+  string content_type = 6;
+
+  // The author's prompt (truncated to ≤ 2 KiB for envelope-size hygiene).
+  string prompt = 7;
+
+  // How many candidates the author requested. 1 for single-candidate paths;
+  // the count ALWAYS drives the plan now (ADR-195 D1 — no SetMode).
+  int32 requested_count = 8;
+
+  // Difficulty hint (1..5 cefr-like). 0 = unspecified.
+  int32 difficulty = 9;
+
+  google.protobuf.Timestamp started_at = 10;
+
+  // Quality-loop budget for the qgen crew (generator + critic). 0 = no retries.
+  int32 max_retries = 11;
+
+  // Free-form metadata biasing the generator + critic prompts (stable keys:
+  // "category" / "subject" / "cognitive_level").
+  map<string, string> metadata = 12;
+
+  // Author opt-in for a generated image on the QUESTION stem. Default false.
+  bool image_for_stem = 13;
+
+  // Author opt-in for a generated image on the MODEL-ANSWER part. Default false.
+  bool image_for_answer = 14;
+
+  // Tag 15 was `job_kind` (the retired orchestration discriminant). Reserved so
+  // it is never reused; its information is now carried by `intent` +
+  // `input_kind` + the presence of `type_plan` (ADR-195 D1/D7).
+  reserved 15;
+  reserved "job_kind";
+
+  // How the uploaded source material constrains generation:
+  //   "" | "starting_point" — seed / springboard (default).
+  //   "strict"              — generate ONLY from facts in the material.
+  string grounding_mode = 16;
+
+  // gs:// URI of the (first) uploaded grounding material. Canonical multi-file
+  // list rides in source_files; this mirrors source_files[0] for back-compat.
+  string source_blob_uri = 17;
+
+  // MIME type of source_blob_uri. Empty when source_blob_uri is empty.
+  string source_mime_type = 18;
+
+  // Optional learner Growth-Edge concept_key values to bias the generator.
+  repeated string target_growth_edges = 19;
+
+  // ALL grounding files for this job, role-tagged (≤5 source + ≤1 rubric).
+  repeated SourceFileRef source_files = 20;
+
+  // Mixed-type generation plan. EMPTY ⇒ single-type path (content_type +
+  // requested_count). NON-EMPTY ⇒ mixed batch (sum(count) == requested_count).
+  repeated GenerationTypeQuota type_plan = 21;
+
+  // intent="image_regen" only: re-render ONE image for an existing draft
+  // candidate through the chora-model-gateway chokepoint. See ImageRegenSpec.
+  ImageRegenSpec regen = 22;
+
+  // -- ADR-195 WS7 compose model (replaces the retired job_kind discriminant) --
+
+  // Operation discriminant. Always "compose" (ADR-195 D1).
+  string operation = 23;
+
+  // The compose Intent: "new_question" | "model_answer_fill" | "image_regen".
+  // Replaces job_kind ("single"/"batch" → new_question; "image_regen" →
+  // image_regen). The single-vs-batch distinction is now carried by the plan
+  // (requested_count / type_plan), not the discriminant (ADR-195 D1).
+  string intent = 24;
+
+  // The compose Input kind: "prompt" | "source_files" | "by_hand".
+  string input_kind = 25;
+
+  // intent="model_answer_fill" only: the author's CURRENT question content the
+  // qgen crew fills a model answer against (preserving the author's stem +
+  // rubric/options). JSON object:
+  //   {"stem": str,
+  //    "mcq_options": [{"option_id","label","is_correct"}],   // MCQ fill
+  //    "oe_rubric":   [{"criterion","weight"}],               // OE fill
+  //    "model_answer": str}                                   // OE optional
+  // Empty for every other intent. JSON-encoded (NOT a nested message) for the
+  // same reason AiAssistCompleted.candidate_payload_json (field 11) is: the
+  // author-question + rubric shape iterates with the OpenAPI Question schema, so
+  // keeping it a string holds the proto stable. The orchestrator json-decodes it
+  // into input_obj["existing_question"]; reasoning_engine_executor reads stem /
+  // mcq_options / oe_rubric / model_answer into the qgen agent's author_*
+  // session keys. Producer: chora-creation question_subscriber.runModelAnswer.
+  string existing_question_json = 26;
+}
+
+// -----------------------------------------------------------------------------
+// AiAssistCompleted — chora.creation.ai_assist.completed.v1
+// -----------------------------------------------------------------------------
+//
+// Emitted on SUCCESSFUL completion of an AI Assist orchestration — the
+// LangGraph engine has produced candidate(s), passed Cloud Model Armor
+// post-screening, and the chora-creation projection is ready for the
+// author's review.
+//
+// Topic: chora.creation.ai_assist.completed.v1
+// Consumers: chora-creation (transition ai_assist_invocations row to
+//            COMPLETED; surface candidates to the author via the A+ Creator
+//            mode UI), chora-observability (D1 IMDA accountability evidence
+//            + cost telemetry).
+message AiAssistCompleted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — matches AiAssistStarted.assist_id (use envelope.correlation_id
+  // for trace correlation; this field is the direct subscriber filter key).
+  string assist_id = 2;
+
+  // Number of candidates produced (1..requested_count).
+  int32 generated_count = 3;
+
+  // Cloud Model Armor + content-screening final decision. One of:
+  //   "allow"   — passes all checks, candidates are clean
+  //   "rewrite" — soft signal; engine re-prompted internally and recovered
+  //   "refuse"  — should not appear on a completed event (use AiAssistRefused
+  //               instead); included as a value for forward compatibility
+  //               where the engine downgrades a refuse to a partial completion.
+  string screening_decision = 4;
+
+  // Human-readable explanation (safe to surface in UI). Example:
+  //   "All 5 MCQ candidates passed Cloud Model Armor; 1 was auto-rewritten
+  //   to neutralise a borderline phrasing."
+  string screening_explanation = 5;
+
+  // Model attribution for D2 IMDA transparency. Examples:
+  //   "gemini-3-flash-preview" | "gemini-3.1-pro-preview" |
+  //   "vertex-endpoint:gemma-4-tenant-{tenant_id}"
+  string model_used = 6;
+
+  // Token accounting (canonical billing ledger in TokenUsageLedger; these
+  // are the event-level breakdown for observability).
+  int32 input_token_count = 7;
+  int32 output_token_count = 8;
+
+  // Mana actually charged for this completed invocation (mirrors the
+  // chora-consumption mana_quoter pattern — quote at started, finalize at
+  // completed/refused). May differ from the up-front debit when the engine
+  // produced fewer candidates than requested.
+  int32 mana_charged = 9;
+
+  google.protobuf.Timestamp completed_at = 10;
+
+  // -- Additions 2026-05-17 (additive within v1; no break) --
+  // qgen 2-agent crew (generator + critic) outputs. The full candidate
+  // shape matches AiAssistCandidate in chora-contracts/openapi/creation-
+  // questions.yaml — JSON-encoded here so the proto stays stable while
+  // the OpenAPI schema iterates. Subscribers parse with the OpenAPI-
+  // generated AiAssistCandidate type. Maximum size ~32 KiB.
+  string candidate_payload_json = 11;
+
+  // Serialised []PipelineTraceStep (per OpenAPI). Used by chora-creation
+  // to populate ai_assist_jobs.pipeline_trace for IMDA D2 transparency
+  // evidence + the agent-trace widget on the FE.
+  string pipeline_trace_json = 12;
+
+  // True when the critic agent rejected on every attempt up to max_retries.
+  // The candidate_payload_json carries the LAST attempt (best-effort) and
+  // critic_notes explains the residual concerns. The job is still in the
+  // COMPLETED terminal state — quality_warning is a soft signal, not a
+  // refusal (refusals route through AiAssistRefused instead).
+  bool quality_warning = 13;
+
+  // Total generation attempts (≥1 once the graph starts running). Equals
+  // (max_retries + 1) when quality_warning is true.
+  int32 attempt_count = 14;
+
+  // Qualitative critique from the qgen_critic agent. Populated when
+  // quality_warning is true; MAY be populated on accepted candidates as
+  // an explanation of residual-but-acceptable concerns.
+  string critic_notes = 15;
+
+  // -- Additions 2026-06-21: honest generation summary (additive within v1 —
+  //    message default empty → buf-clean) --
+  //
+  // Per-type breakdown of requested vs generated, plus the strict-mode
+  // shortfall reason. generated_count (field 3) MUST equal
+  // generation_summary.generated_total. shortfall_reason is non-empty ONLY on
+  // a LEGAL strict shortfall (grounding_mode="strict" and the source could not
+  // support the full count); any other under-generation is a fail-loud refusal
+  // (AiAssistRefused), never a silent short set.
+  GenerationSummary generation_summary = 16;
+}
+
+// Honest accounting of a (possibly mixed-type) generation run
+// (AiAssistCompleted.generation_summary). The candidate payloads themselves
+// stay JSON-in-string (candidate_payload_json) because their shape is
+// polymorphic; this fixed-shape summary is first-class typed.
+message GenerationSummary {
+  // Total questions the author requested (sum of type_plan counts, or
+  // requested_count on the legacy single-type path).
+  int32 requested_total = 1;
+
+  // Total questions actually produced. Equals
+  // AiAssistCompleted.generated_count.
+  int32 generated_total = 2;
+
+  // Per-question-type produced count, e.g. {"mcq": 6, "oe": 1}.
+  map<string, int32> generated_per_type = 3;
+
+  // Human-safe explanation when generated_total < requested_total under strict
+  // grounding (e.g. "Source supported 6 distinct MCQ concepts and 1 OE
+  // prompt."). Empty when the full count was produced.
+  string shortfall_reason = 4;
+}
+
+// -----------------------------------------------------------------------------
+// AiAssistRefused — chora.creation.ai_assist.refused.v1
+// -----------------------------------------------------------------------------
+//
+// Emitted when Cloud Model Armor (pre- or post-screen) or a downstream policy
+// REFUSES the AI Assist invocation. The author is notified with a non-leaky
+// user_facing_message and mana IS still charged (per design §3 — the
+// chora-consumption mana_quoter pattern bills for refused calls when the
+// cost was incurred by the model invocation; tenants can opt-out via
+// tenancy.config_overrides.refund_armor_refusals).
+//
+// MANDATORY model_armor_verdict per BE-agent handoff §2 row 12 — the verdict
+// is the gating evidence for D3 IMDA Safety & Robustness audits.
+//
+// Topic: chora.creation.ai_assist.refused.v1
+// Consumers: chora-creation (transition ai_assist_invocations to REFUSED;
+//            surface user_facing_message to the author), chora-observability
+//            (D3 IMDA Safety & Robustness evidence + cost telemetry for
+//            refused-but-charged invocations), chora-governance (refusal
+//            ledger — every refusal is auditable).
+message AiAssistRefused {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — matches AiAssistStarted.assist_id.
+  string assist_id = 2;
+
+  // Refusal reason taxonomy — snake_case. Examples:
+  //   "model_armor_blocked" | "policy_violation" | "tenant_policy_block" |
+  //   "pii_leak" | "jailbreak_attempt"
+  string refusal_reason = 3;
+
+  // MANDATORY — Cloud Model Armor verdict tag describing which template / rule
+  // tripped. Short tag set; NEVER raw template name or detected PII.
+  // Examples: "armor:harassment_block", "armor:pii_high_risk_block",
+  //           "armor:jailbreak_attempt", "armor:hate_speech_block",
+  //           "armor:tenant_dlp_redact_exceeded".
+  // Empty string is INVALID — at minimum carry "armor:unspecified" when the
+  // upstream verdict is missing (so D3 IMDA evidence is never absent).
+  string model_armor_verdict = 4;
+
+  // AGID(s) of the refusing components — semicolon-separated when multiple
+  // components contributed (e.g., orchestrator AGID + inner agent AGID that
+  // tripped policy). Examples:
+  //   "agent:ai_kernel_orchestrator/v1.0"
+  //   "agent:ai_kernel_orchestrator/v1.0;agent:qgen_generation/v1.2"
+  string refusing_agent_id = 5;
+
+  // Short, non-leaky message rendered to the author. Examples:
+  //   "Your prompt couldn't be processed — it may conflict with our content
+  //   guidelines. Please rephrase and try again."
+  // NEVER includes detected PII or the raw guardrail trace.
+  string user_facing_message = 6;
+
+  // Mana still charged on refusal (default behaviour per design §3 — the
+  // model invocation incurred real cost). Tenant policy MAY zero this via
+  // refund_armor_refusals (see chora-consumption mana_quoter). 0 when the
+  // refusal happened BEFORE the LLM call (pre-screen reject).
+  int32 mana_charged = 7;
+
+  google.protobuf.Timestamp refused_at = 8;
+
+  // -- Additions 2026-05-17 (additive within v1; no break) --
+  // Best-effort serialised AiAssistCandidate from the last attempt before
+  // refusal (may be empty on pre-screen blocks where no candidate was
+  // produced). Matches the OpenAPI AiAssistCandidate schema. Useful for
+  // FE to display "we tried but here's why it failed" affordances.
+  string last_candidate_payload_json = 9;
+
+  // Total attempts made before refusal. 0 on pre-screen blocks. ≥1 when a
+  // candidate was produced but the post-screen guardrail tripped.
+  int32 attempt_count = 10;
+}
+
+// -----------------------------------------------------------------------------
+// AiAssistProgress — chora.creation.ai_assist.progress.v1
+// -----------------------------------------------------------------------------
+//
+// Emitted MID-RUN, once per qgen graph node, by the ai_kernel_orchestrator
+// LangGraph engine (the single / ai_draft runner). Carries the cumulative-
+// so-far pipeline_trace so chora-creation can stream the live "AI pipeline
+// trace" to the A+ author DURING generation (IMDA D2 transparency, progressive)
+// instead of a stale "please wait" placeholder.
+//
+// EPHEMERAL + loss-tolerant: the AUTHORITATIVE final trace always arrives on
+// chora.creation.ai_assist.completed.v1 (field 12). A lost / duplicated / out-
+// of-order progress event is harmless — chora-creation applies it ONLY when
+// step_index advances (monotonic) AND the job is still RUNNING, so the terminal
+// completed.v1 always wins.
+//
+// DEDICATED topic (NOT a partial completed.v1) so the governance + observability
+// completed-consumers never project a half-finished run into the IMDA D1/D2
+// accountability ledgers — those own the terminal event only.
+//
+// Per ADR-141: envelope.chora_imda_dimension SHOULD = "accountability" (D1).
+//
+// Topic: chora.creation.ai_assist.progress.v1
+// Consumers: chora-creation ONLY (UPDATE ai_assist_jobs.pipeline_trace on the
+//            RUNNING job; the question-jobs poll then serves the growing trace).
+//            NOT consumed by governance / observability — this is ephemeral
+//            in-flight telemetry, not terminal accountability evidence.
+message AiAssistProgress {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — matches AiAssistStarted.assist_id (== the question-generation
+  // job_id). The subscriber's correlation + RLS-scoping key.
+  string assist_id = 2;
+
+  // Tenant context (also in envelope.tenant_id; duplicated for filter-friendly
+  // tenant-sharded subscribers + the RLS-scoped UPDATE).
+  string tenant_id = 3;
+
+  // The author who initiated the AI Assist call. Same as envelope.gcid.
+  string author_gcid = 4;
+
+  // Serialised []PipelineTraceStep (per OpenAPI) — the CUMULATIVE trace up to
+  // and including the node that just completed. SAME shape as
+  // AiAssistCompleted.pipeline_trace_json (field 12), just partial.
+  string pipeline_trace_json = 5;
+
+  // Monotonic step counter == len(pipeline_trace). The subscriber applies a
+  // progress event ONLY when step_index exceeds the stored trace length, making
+  // out-of-order / duplicate delivery (the dev+prod outbox double-dispatch)
+  // idempotent at the SQL layer.
+  int32 step_index = 6;
+
+  // The graph node that just completed (e.g. "generate", "render_image") — the
+  // latest pipeline_trace row's name. Surfaced for live "now running X" UX.
+  string step_name = 7;
+
+  // That node's status for this step (e.g. "ACCEPTED", "COMPLETED", "WARNING").
+  string step_status = 8;
+
+  google.protobuf.Timestamp progress_at = 9;
+}
+
+// -----------------------------------------------------------------------------
+// AiAssistChunkCompleted - chora.creation.ai_assist.chunk_completed.v1
+// -----------------------------------------------------------------------------
+//
+// ADR-251 D5 (CHO-2398): incremental publishing for the set lane's graph chunk
+// loop. Emitted by the orchestrator's publish_chunk node when chunk k of a
+// multi-chunk job finishes (generate -> critique -> gate -> render), carrying
+// that chunk's candidates in PUBLISHED shape: image/render specs stripped,
+// per-candidate quality_warning + critic_notes included, exactly the shape the
+// terminal AiAssistCompleted.candidate_payload_json entries take. The terminal
+// completed.v1 still carries the authoritative FULL set: a consumer that
+// ignores chunk events loses nothing but progressiveness (ADR-251 D5, the
+// owner-rejected shortcut of riding progress.v1 is recorded in the ADR; one
+// event, one meaning - progress.v1 stays trace-only).
+//
+// Idempotency: envelope.idempotency_key =
+// "ai_assist.chunk_completed.{chunk_index}.{assist_id}". Delivery is
+// at-least-once and unordered, so the chora-creation consumer persists
+// idempotently and MONOTONICALLY by chunk_index per job (a duplicate or
+// stale chunk event contributes nothing).
+//
+// Per ADR-141: envelope.chora_imda_dimension SHOULD = "accountability" (D1).
+//
+// Topic: chora.creation.ai_assist.chunk_completed.v1
+// Consumers: chora-creation ONLY (persist the chunk's candidates into the
+//            RUNNING ai_assist_jobs row; the question-jobs poll then serves
+//            questions-so-far while the job is still running). NOT consumed
+//            by governance / observability: the terminal event remains the
+//            accountability record.
+message AiAssistChunkCompleted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 - matches AiAssistStarted.assist_id (== the question-generation
+  // job_id). The subscriber's correlation + RLS-scoping key.
+  string assist_id = 2;
+
+  // Tenant context (also in envelope.tenant_id; duplicated for filter-friendly
+  // tenant-sharded subscribers + the RLS-scoped write).
+  string tenant_id = 3;
+
+  // The author who initiated the AI Assist call. Same as envelope.gcid.
+  string author_gcid = 4;
+
+  // 0-based ordinal of the chunk that completed. The consumer applies a chunk
+  // event ONLY when it has not already persisted this chunk_index for the job
+  // (idempotent + monotonic; out-of-order delivery safe).
+  int32 chunk_index = 5;
+
+  // Total planned chunks for the job (from plan_chunks). Lets the consumer
+  // and the jobs API report "k of n chunks" without waiting for the terminal.
+  int32 chunk_count = 6;
+
+  // Serialised JSON array of this chunk's candidates in PUBLISHED shape (per
+  // OpenAPI AiAssistCandidate; specs stripped, quality_warning + critic_notes
+  // included). JSON-in-string for the same reason as
+  // AiAssistCompleted.candidate_payload_json: the candidate shape is
+  // polymorphic and iterates in OpenAPI while the proto stays stable.
+  string candidates_payload_json = 7;
+
+  // Number of candidates in candidates_payload_json (consumer sanity check;
+  // a mismatch is a fail-loud NACK, never a partial apply).
+  int32 candidate_count = 8;
+
+  google.protobuf.Timestamp chunk_completed_at = 9;
+
+  // Per-chunk counts (ADR-251 D5 locked payload). warned_count is how many of
+  // this chunk's candidates ship WITH a quality_warning (critic rejections
+  // exhausted their regen budget; included, never refused, per the locked
+  // exhausted semantics). The image tallies mirror the render node's honest
+  // accounting (CHO-2395/2399): rendered / dropped over per-type budget /
+  // failed fail-soft / skipped for critic-rejected or exhausted candidates.
+  // All are direct counts, not derivable from candidates_payload_json (the
+  // published candidates carry no image_specs).
+  int32 warned_count = 10;
+  int32 images_rendered = 11;
+  int32 images_dropped = 12;
+  int32 images_failed = 13;
+  int32 images_skipped = 14;
+}

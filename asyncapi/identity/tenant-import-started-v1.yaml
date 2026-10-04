@@ -1,0 +1,65 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Identity — TenantImportStarted
+  version: 1.0.0
+  description: |
+    Published when a confirmed tenant CSV mass-import job (ADR-221) begins
+    execution — after the mandatory dry-run + operator confirmation, BEFORE
+    the first tenant block or user row is written. The IMDA-D1
+    accountability record is the separate
+    `chora.governance.audit.tenant_import_executed.v1` (also pre-write).
+
+    - Domain: Identity (`chora_identity` DB — ImportJob aggregate)
+    - Topic: `chora.identity.tenant_import.started.v1`
+    - Source proto: `proto/events/identity/tenant_import.proto`
+       message `chora.identity.v1.TenantImportStarted`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  tenantImportStarted:
+    address: chora.identity.tenant_import.started.v1
+    messages:
+      tenantImportStarted:
+        $ref: '#/components/messages/TenantImportStarted'
+
+operations:
+  publishTenantImportStarted:
+    action: send
+    channel:
+      $ref: '#/channels/tenantImportStarted'
+    messages:
+      - $ref: '#/channels/tenantImportStarted/messages/tenantImportStarted'
+
+  consumeTenantImportStarted:
+    action: receive
+    channel:
+      $ref: '#/channels/tenantImportStarted'
+    description: |
+      Consumers: Observability (O+ job telemetry / import-history read
+      view — horizon), Notifications (P3 operator progress notice —
+      horizon).
+    messages:
+      - $ref: '#/channels/tenantImportStarted/messages/tenantImportStarted'
+
+components:
+  messages:
+    TenantImportStarted:
+      name: TenantImportStarted
+      title: Tenant CSV Import Started
+      summary: A confirmed ImportJob began chunked execution
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/identity/tenant_import.proto#/chora.identity.v1.TenantImportStarted'

@@ -1,0 +1,1970 @@
+openapi: "3.2.0"
+info:
+  title: "Chora Delivery Admin API"
+  version: "1.1.0"
+  description: |
+    Unified admin/instructor REST surface for the Content Delivery domain
+    (`chora-delivery` service, `chora_delivery` database, R+ Rhythm+ surface).
+    Owning team: Team 2 (Delivery).
+
+    Per ADR-129/130/131 collapse mandate (M11.6 review), this single spec
+    supersedes the legacy training-admin / classroom / examadmin / wbl /
+    campusops / survey OpenAPI services. All admin / instructor admin CRUD
+    for Content Delivery aggregates lives here.
+
+    Aggregates exposed:
+      - Course / Class
+      - Booking
+      - Roster
+      - Certification
+      - SkillsFutures claim
+      - ProjectGroup
+      - ProctoredExam
+      - WorkBasedLearning placement
+      - Survey
+      - CampusOps (rooms / equipment / incidents)
+
+    AP-01: This contract exists BEFORE implementation.
+
+    Cross-domain reads (atom content, learner profiles, etc.) are NOT served
+    here — Delivery never JOINs other domain databases. Admin/instructor reads
+    of related cross-domain data flow through Pub/Sub-fed local projections.
+  contact:
+    name: "Chora Platform Team"
+  license:
+    name: "Proprietary"
+
+servers:
+  - url: "http://localhost:8086"
+    description: "Local development"
+  - url: "https://api.chora.app"
+    description: "Production"
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Courses
+    description: "Course / Class aggregate — admin lifecycle"
+  - name: Bookings
+    description: "Booking aggregate — enrolment + confirmation + cancellation"
+  - name: Rosters
+    description: "Roster aggregate — instructor + learner assignment matrix"
+  - name: Certifications
+    description: "Certification aggregate — issue + revoke"
+  - name: SkillsFutures
+    description: "SkillsFuturesSubmission aggregate — SG SSG claim workflow"
+  - name: Project Groups
+    description: "ProjectGroup aggregate — cohort group work"
+  - name: Exams
+    description: "ProctoredExam aggregate — schedule + administer + grade"
+  - name: WBL Placements
+    description: "Work-Based Learning placement aggregate"
+  - name: Surveys
+    description: "Survey aggregate — distribute + close"
+  - name: Campus Ops
+    description: "Room / equipment / incident operations"
+  - name: Catalogue
+    description: |
+      Public Course catalogue (Phyllis MVP — Comic Ch5 P10 "Udemy moment").
+      Discovery / detail / instructor-create endpoints; same-identity
+      enrollment per Comic Ch4 P8.
+  - name: Enrollments
+    description: |
+      Same-identity enrollment (Comic Ch5 P10 P3). POST does NOT create a
+      new user — it adds a row linking gcid + course_id. Role context is
+      computed downstream by chora-identity.
+  - name: Health
+    description: "Service health check"
+
+paths:
+
+  # -----------------------------------------------------------------
+  # Courses
+  # -----------------------------------------------------------------
+
+  /api/v1/courses:
+    get:
+      operationId: listCourses
+      summary: "List courses"
+      tags: [Courses]
+      parameters:
+        - $ref: "#/components/parameters/PageOffset"
+        - $ref: "#/components/parameters/PageLimit"
+      responses:
+        "200":
+          description: "Courses returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CourseList"
+    post:
+      operationId: createCourse
+      summary: "Create a new course"
+      tags: [Courses]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCourseRequest"
+      responses:
+        "201":
+          description: "Course created"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Course"
+
+  /api/v1/courses/{course_id}:
+    parameters:
+      - $ref: "#/components/parameters/CourseId"
+    get:
+      operationId: getCourse
+      summary: "Get a course by ID"
+      tags: [Courses]
+      responses:
+        "200":
+          description: "Course returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Course"
+    patch:
+      operationId: updateCourse
+      summary: "Update course metadata"
+      tags: [Courses]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateCourseRequest"
+      responses:
+        "200":
+          description: "Course updated"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Course"
+    delete:
+      operationId: deleteCourse
+      summary: "Soft-delete a course"
+      tags: [Courses]
+      responses:
+        "204":
+          description: "Course soft-deleted"
+
+  /api/v1/courses/{course_id}/schedule:
+    parameters:
+      - $ref: "#/components/parameters/CourseId"
+    post:
+      operationId: scheduleCourse
+      summary: "Schedule a draft course (publish)"
+      tags: [Courses]
+      responses:
+        "200":
+          description: "Course scheduled — emits chora.delivery.course.scheduled.v1"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Course"
+
+  /api/v1/courses/{course_id}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/CourseId"
+    post:
+      operationId: cancelCourse
+      summary: "Cancel a course"
+      tags: [Courses]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CancelRequest"
+      responses:
+        "200":
+          description: "Course cancelled — emits chora.delivery.course.cancelled.v1"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Course"
+
+  /api/v1/courses/{course_id}/complete:
+    parameters:
+      - $ref: "#/components/parameters/CourseId"
+    post:
+      operationId: completeCourse
+      summary: "Mark a course as completed"
+      tags: [Courses]
+      responses:
+        "200":
+          description: "Course completed — emits chora.delivery.course.completed.v1"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Course"
+
+  # -----------------------------------------------------------------
+  # Bookings
+  # -----------------------------------------------------------------
+
+  /api/v1/bookings:
+    get:
+      operationId: listBookings
+      summary: "List bookings"
+      description: |
+        Returns the caller's tenant bookings as a BookingList ({items,total}).
+        DEPLOYED at `GET /api/bookings` (the live chora-delivery handler mount,
+        gateway-gated + RLS-isolated since 2026-06-01 — HANDOFF_RPLUS §6); the
+        `/api/v1/bookings` path in this block is the post-gateway-rationalization
+        target. The optional course_id/learner_gcid query filters below are not
+        yet wired server-side (tenant-scoped list only) — TODO before v1 cutover.
+      tags: [Bookings]
+      parameters:
+        - in: query
+          name: course_id
+          schema: { type: string, format: uuid }
+        - in: query
+          name: learner_gcid
+          schema: { type: string }
+        - $ref: "#/components/parameters/PageOffset"
+        - $ref: "#/components/parameters/PageLimit"
+      responses:
+        "200":
+          description: "Bookings returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BookingList"
+    post:
+      operationId: createBooking
+      summary: "Create a booking (PENDING)"
+      tags: [Bookings]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateBookingRequest"
+      responses:
+        "201":
+          description: "Booking created — emits chora.delivery.booking.created.v1"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Booking"
+
+  /api/v1/bookings/{booking_id}:
+    parameters:
+      - $ref: "#/components/parameters/BookingId"
+    get:
+      operationId: getBooking
+      summary: "Get a booking"
+      tags: [Bookings]
+      responses:
+        "200":
+          description: "Booking returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Booking"
+    delete:
+      operationId: deleteBooking
+      summary: "Soft-delete a booking"
+      tags: [Bookings]
+      responses:
+        "204":
+          description: "Booking soft-deleted"
+
+  /api/v1/bookings/{booking_id}/confirm:
+    parameters:
+      - $ref: "#/components/parameters/BookingId"
+    post:
+      operationId: confirmBooking
+      summary: "Confirm a booking"
+      tags: [Bookings]
+      responses:
+        "200":
+          description: "Booking confirmed — emits chora.delivery.booking.confirmed.v1"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Booking"
+
+  /api/v1/bookings/{booking_id}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/BookingId"
+    post:
+      operationId: cancelBooking
+      summary: "Cancel a booking"
+      tags: [Bookings]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CancelRequest"
+      responses:
+        "200":
+          description: "Booking cancelled — emits chora.delivery.booking.cancelled.v1"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Booking"
+
+  # -----------------------------------------------------------------
+  # Rosters
+  # -----------------------------------------------------------------
+
+  /api/v1/offerings/{id}/roster/bulk:
+    post:
+      operationId: bulkEnrollOfferingRoster
+      summary: "Atomically enrol many learners into an offering's attached course"
+      description: |
+        All-or-nothing batch enrol. Inserts every course_enrollments row AND
+        writes every chora.delivery.enrollment.created.v1 event inside ONE
+        transaction (true transactional outbox); a mid-batch failure rolls the
+        whole batch back and emits no partial event. Idempotent: already-active
+        learners are skipped (not re-counted, not re-emitted); duplicate gcids in
+        the batch are de-duplicated. Capacity is checked against the count of NEW
+        learners only. Auth mirrors the offering roster surface (X-Tenant-Id +
+        gcid + x-mesh-user-roles: instructor / admin / training-admin).
+      tags: [Rosters]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BulkEnrollRosterRequest" }
+      responses:
+        "201":
+          description: "Batch enrolled — emits chora.delivery.enrollment.created.v1 per new learner"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BulkEnrollRosterResult" }
+        "400": { description: "course_id not attached to the offering, empty/blank gcids, or invalid JSON" }
+        "403": { description: "Caller lacks instructor/admin/training-admin role" }
+        "404": { description: "Offering not found (or cross-tenant / soft-deleted)" }
+        "409": { description: "The batch of NEW enrolments would exceed the offering capacity" }
+
+  /api/v1/rosters/{course_id}:
+    parameters:
+      - $ref: "#/components/parameters/CourseId"
+    get:
+      operationId: getRoster
+      summary: "Get the roster for a course"
+      tags: [Rosters]
+      responses:
+        "200":
+          description: "Roster returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Roster"
+    post:
+      operationId: addRosterEntry
+      summary: "Add a learner to the roster"
+      tags: [Rosters]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddRosterEntryRequest"
+      responses:
+        "201":
+          description: "Learner added — emits chora.delivery.rostering.learner_rostered.v1"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Roster"
+    patch:
+      operationId: updateRoster
+      summary: "Bulk-update / finalize the roster"
+      tags: [Rosters]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateRosterRequest"
+      responses:
+        "200":
+          description: "Roster updated — emits chora.delivery.rostering.finalized.v1 if finalized"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Roster"
+
+  # -----------------------------------------------------------------
+  # Certifications
+  # -----------------------------------------------------------------
+
+  /api/v1/certifications:
+    get:
+      operationId: listCertifications
+      summary: "List certifications"
+      tags: [Certifications]
+      parameters:
+        - in: query
+          name: learner_gcid
+          schema: { type: string }
+        - in: query
+          name: course_id
+          schema: { type: string, format: uuid }
+        - $ref: "#/components/parameters/PageOffset"
+        - $ref: "#/components/parameters/PageLimit"
+      responses:
+        "200":
+          description: "Certifications returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CertificationList"
+    post:
+      operationId: issueCertification
+      summary: "Issue a certification"
+      tags: [Certifications]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IssueCertRequest"
+      responses:
+        "201":
+          description: "Cert issued — emits chora.delivery.certification.issued.v1"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Certification"
+
+  /api/v1/certifications/{cert_id}:
+    parameters:
+      - $ref: "#/components/parameters/CertId"
+    get:
+      operationId: getCertification
+      summary: "Get a certification"
+      tags: [Certifications]
+      responses:
+        "200":
+          description: "Certification returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Certification"
+
+  /api/v1/certifications/{cert_id}/revoke:
+    parameters:
+      - $ref: "#/components/parameters/CertId"
+    post:
+      operationId: revokeCertification
+      summary: "Revoke a certification"
+      tags: [Certifications]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RevokeCertRequest"
+      responses:
+        "200":
+          description: "Cert revoked — emits chora.delivery.certification.revoked.v1"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Certification"
+
+  # -----------------------------------------------------------------
+  # SkillsFutures claims
+  # -----------------------------------------------------------------
+
+  /api/v1/skillsfutures-claims:
+    get:
+      operationId: listSkillsFuturesClaims
+      summary: "List SkillsFutures claims"
+      tags: [SkillsFutures]
+      parameters:
+        - in: query
+          name: learner_gcid
+          schema: { type: string }
+        - in: query
+          name: claim_status
+          schema: { $ref: "#/components/schemas/ClaimStatus" }
+        - $ref: "#/components/parameters/PageOffset"
+        - $ref: "#/components/parameters/PageLimit"
+      responses:
+        "200":
+          description: "Claims returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SkillsFuturesClaimList"
+    post:
+      operationId: createSkillsFuturesClaim
+      summary: "Submit a SkillsFutures claim"
+      tags: [SkillsFutures]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSkillsFuturesClaimRequest"
+      responses:
+        "201":
+          description: "Claim submitted — emits chora.delivery.skillsfutures.claimed.v1"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SkillsFuturesClaim"
+
+  /api/v1/skillsfutures-claims/{claim_id}:
+    parameters:
+      - $ref: "#/components/parameters/ClaimId"
+    get:
+      operationId: getSkillsFuturesClaim
+      summary: "Get a claim"
+      tags: [SkillsFutures]
+      responses:
+        "200":
+          description: "Claim returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SkillsFuturesClaim"
+
+  /api/v1/skillsfutures-claims/{claim_id}/approve:
+    parameters:
+      - $ref: "#/components/parameters/ClaimId"
+    post:
+      operationId: approveSkillsFuturesClaim
+      summary: "Approve a SkillsFutures claim (admin or SSG callback)"
+      tags: [SkillsFutures]
+      responses:
+        "200":
+          description: "Claim approved — emits chora.delivery.skillsfutures.approved.v1"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SkillsFuturesClaim"
+
+  /api/v1/skillsfutures-claims/{claim_id}/reject:
+    parameters:
+      - $ref: "#/components/parameters/ClaimId"
+    post:
+      operationId: rejectSkillsFuturesClaim
+      summary: "Reject a SkillsFutures claim"
+      tags: [SkillsFutures]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RejectClaimRequest"
+      responses:
+        "200":
+          description: "Claim rejected — emits chora.delivery.skillsfutures.rejected.v1"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SkillsFuturesClaim"
+
+  # -----------------------------------------------------------------
+  # Project Groups
+  # -----------------------------------------------------------------
+
+  /api/v1/project-groups:
+    get:
+      operationId: listProjectGroups
+      summary: "List project groups"
+      tags: [Project Groups]
+      parameters:
+        - in: query
+          name: course_id
+          schema: { type: string, format: uuid }
+        - $ref: "#/components/parameters/PageOffset"
+        - $ref: "#/components/parameters/PageLimit"
+      responses:
+        "200":
+          description: "Project groups returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectGroupList"
+    post:
+      operationId: createProjectGroup
+      summary: "Form a new project group"
+      tags: [Project Groups]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateProjectGroupRequest"
+      responses:
+        "201":
+          description: "Group formed — emits chora.delivery.project_group.formed.v1"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectGroup"
+
+  /api/v1/project-groups/{group_id}:
+    parameters:
+      - $ref: "#/components/parameters/GroupId"
+    get:
+      operationId: getProjectGroup
+      summary: "Get a project group"
+      tags: [Project Groups]
+      responses:
+        "200":
+          description: "Project group returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectGroup"
+    delete:
+      operationId: deleteProjectGroup
+      summary: "Soft-delete a project group"
+      tags: [Project Groups]
+      responses:
+        "204":
+          description: "Project group soft-deleted"
+
+  /api/v1/project-groups/{group_id}/submit:
+    parameters:
+      - $ref: "#/components/parameters/GroupId"
+    post:
+      operationId: submitProjectGroup
+      summary: "Submit the project group's deliverable"
+      tags: [Project Groups]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubmitProjectRequest"
+      responses:
+        "200":
+          description: "Submitted — emits chora.delivery.project_group.submitted.v1"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectGroup"
+
+  /api/v1/project-groups/{group_id}/grade:
+    parameters:
+      - $ref: "#/components/parameters/GroupId"
+    post:
+      operationId: gradeProjectGroup
+      summary: "Grade a project group"
+      tags: [Project Groups]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GradeProjectRequest"
+      responses:
+        "200":
+          description: "Graded — emits chora.delivery.project_group.graded.v1"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectGroup"
+
+  # -----------------------------------------------------------------
+  # Exams
+  # -----------------------------------------------------------------
+
+  /api/v1/exams:
+    get:
+      operationId: listExams
+      summary: "List exams"
+      tags: [Exams]
+      parameters:
+        - in: query
+          name: course_id
+          schema: { type: string, format: uuid }
+        - in: query
+          name: candidate_gcid
+          schema: { type: string }
+        - $ref: "#/components/parameters/PageOffset"
+        - $ref: "#/components/parameters/PageLimit"
+      responses:
+        "200":
+          description: "Exams returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExamList"
+    post:
+      operationId: createExam
+      summary: "Create a new exam"
+      tags: [Exams]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateExamRequest"
+      responses:
+        "201":
+          description: "Exam created"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Exam"
+
+  /api/v1/exams/{exam_id}:
+    parameters:
+      - $ref: "#/components/parameters/ExamId"
+    get:
+      operationId: getExam
+      summary: "Get an exam"
+      tags: [Exams]
+      responses:
+        "200":
+          description: "Exam returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Exam"
+    delete:
+      operationId: deleteExam
+      summary: "Soft-delete an exam"
+      tags: [Exams]
+      responses:
+        "204":
+          description: "Exam soft-deleted"
+
+  /api/v1/exams/{exam_id}/schedule:
+    parameters:
+      - $ref: "#/components/parameters/ExamId"
+    post:
+      operationId: scheduleExam
+      summary: "Schedule an exam slot"
+      tags: [Exams]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScheduleExamRequest"
+      responses:
+        "200":
+          description: "Exam scheduled — emits chora.delivery.exam.scheduled.v1"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Exam"
+
+  /api/v1/exams/{exam_id}/administer:
+    parameters:
+      - $ref: "#/components/parameters/ExamId"
+    post:
+      operationId: administerExam
+      summary: "Mark exam as in-progress (proctoring active)"
+      tags: [Exams]
+      responses:
+        "200":
+          description: "Exam administered — emits chora.delivery.exam.administered.v1"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Exam"
+
+  /api/v1/exams/{exam_id}/grade:
+    parameters:
+      - $ref: "#/components/parameters/ExamId"
+    post:
+      operationId: gradeExam
+      summary: "Grade an exam"
+      tags: [Exams]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GradeExamRequest"
+      responses:
+        "200":
+          description: "Exam graded — emits chora.delivery.exam.graded.v1"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Exam"
+
+  # -----------------------------------------------------------------
+  # WBL Placements
+  # -----------------------------------------------------------------
+
+  /api/v1/wbl-placements:
+    get:
+      operationId: listWblPlacements
+      summary: "List WBL placements"
+      tags: [WBL Placements]
+      parameters:
+        - in: query
+          name: learner_gcid
+          schema: { type: string }
+        - in: query
+          name: host_org_id
+          schema: { type: string }
+        - $ref: "#/components/parameters/PageOffset"
+        - $ref: "#/components/parameters/PageLimit"
+      responses:
+        "200":
+          description: "Placements returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WblPlacementList"
+    post:
+      operationId: createWblPlacement
+      summary: "Create a WBL placement"
+      tags: [WBL Placements]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateWblPlacementRequest"
+      responses:
+        "201":
+          description: "Placement created — emits chora.delivery.wbl.placement_created.v1"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WblPlacement"
+
+  /api/v1/wbl-placements/{placement_id}:
+    parameters:
+      - $ref: "#/components/parameters/PlacementId"
+    get:
+      operationId: getWblPlacement
+      summary: "Get a WBL placement"
+      tags: [WBL Placements]
+      responses:
+        "200":
+          description: "Placement returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WblPlacement"
+    patch:
+      operationId: updateWblPlacement
+      summary: "Update a WBL placement (status, hours)"
+      tags: [WBL Placements]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateWblPlacementRequest"
+      responses:
+        "200":
+          description: "Placement updated"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WblPlacement"
+    delete:
+      operationId: deleteWblPlacement
+      summary: "Soft-delete a WBL placement"
+      tags: [WBL Placements]
+      responses:
+        "204":
+          description: "Placement soft-deleted"
+
+  # -----------------------------------------------------------------
+  # Surveys
+  # -----------------------------------------------------------------
+
+  /api/v1/surveys:
+    get:
+      operationId: listSurveys
+      summary: "List surveys"
+      tags: [Surveys]
+      parameters:
+        - in: query
+          name: course_id
+          schema: { type: string, format: uuid }
+        - $ref: "#/components/parameters/PageOffset"
+        - $ref: "#/components/parameters/PageLimit"
+      responses:
+        "200":
+          description: "Surveys returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SurveyList"
+    post:
+      operationId: createSurvey
+      summary: "Create a survey"
+      tags: [Surveys]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSurveyRequest"
+      responses:
+        "201":
+          description: "Survey created"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Survey"
+
+  /api/v1/surveys/{survey_id}:
+    parameters:
+      - $ref: "#/components/parameters/SurveyId"
+    get:
+      operationId: getSurvey
+      summary: "Get a survey"
+      tags: [Surveys]
+      responses:
+        "200":
+          description: "Survey returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Survey"
+    delete:
+      operationId: deleteSurvey
+      summary: "Soft-delete a survey"
+      tags: [Surveys]
+      responses:
+        "204":
+          description: "Survey soft-deleted"
+
+  /api/v1/surveys/{survey_id}/distribute:
+    parameters:
+      - $ref: "#/components/parameters/SurveyId"
+    post:
+      operationId: distributeSurvey
+      summary: "Distribute a survey to its respondent population"
+      tags: [Surveys]
+      responses:
+        "200":
+          description: "Survey distributed — emits chora.delivery.survey.distributed.v1"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Survey"
+
+  /api/v1/surveys/{survey_id}/close:
+    parameters:
+      - $ref: "#/components/parameters/SurveyId"
+    post:
+      operationId: closeSurvey
+      summary: "Close a survey"
+      tags: [Surveys]
+      responses:
+        "200":
+          description: "Survey closed — emits chora.delivery.survey.closed.v1"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Survey"
+
+  # -----------------------------------------------------------------
+  # Campus Ops
+  # -----------------------------------------------------------------
+
+  /api/v1/campusops/rooms:
+    get:
+      operationId: listRoomBookings
+      summary: "List room bookings"
+      tags: [Campus Ops]
+      parameters:
+        - $ref: "#/components/parameters/PageOffset"
+        - $ref: "#/components/parameters/PageLimit"
+      responses:
+        "200":
+          description: "Room bookings returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CampusBookingList"
+    post:
+      operationId: bookRoom
+      summary: "Book a room"
+      tags: [Campus Ops]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCampusBookingRequest"
+      responses:
+        "201":
+          description: "Room booked — emits chora.delivery.campusops.room_booked.v1"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CampusBooking"
+
+  /api/v1/campusops/equipment:
+    get:
+      operationId: listEquipmentBookings
+      summary: "List equipment reservations"
+      tags: [Campus Ops]
+      parameters:
+        - $ref: "#/components/parameters/PageOffset"
+        - $ref: "#/components/parameters/PageLimit"
+      responses:
+        "200":
+          description: "Equipment bookings returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CampusBookingList"
+    post:
+      operationId: reserveEquipment
+      summary: "Reserve equipment"
+      tags: [Campus Ops]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCampusBookingRequest"
+      responses:
+        "201":
+          description: "Equipment reserved — emits chora.delivery.campusops.equipment_reserved.v1"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CampusBooking"
+
+  /api/v1/campusops/incidents:
+    get:
+      operationId: listIncidents
+      summary: "List campus incidents"
+      tags: [Campus Ops]
+      parameters:
+        - in: query
+          name: severity
+          schema: { $ref: "#/components/schemas/IncidentSeverity" }
+        - $ref: "#/components/parameters/PageOffset"
+        - $ref: "#/components/parameters/PageLimit"
+      responses:
+        "200":
+          description: "Incidents returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IncidentList"
+    post:
+      operationId: reportIncident
+      summary: "Report a campus incident"
+      tags: [Campus Ops]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReportIncidentRequest"
+      responses:
+        "201":
+          description: "Incident reported — emits chora.delivery.campusops.incident_reported.v1"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Incident"
+
+  # -----------------------------------------------------------------
+  # Phyllis MVP — Public Catalogue + Enrollment (Comic Ch5 P10, Ch4 P8)
+  # -----------------------------------------------------------------
+
+  /courses:
+    get:
+      operationId: listPublicCourses
+      summary: "List public catalogue courses (Phyllis MVP)"
+      description: |
+        Public catalogue list (Comic Ch5 P10 — "300+ enrolled" headline).
+        Supports public/private filter, free-text search across title +
+        tags, and 1-indexed pagination.
+      tags: [Catalogue]
+      parameters:
+        - in: query
+          name: public
+          schema: { type: string, enum: [true, false] }
+        - in: query
+          name: q
+          schema: { type: string, maxLength: 256 }
+        - $ref: "#/components/parameters/CataloguePage"
+        - $ref: "#/components/parameters/CataloguePer"
+      responses:
+        "200":
+          description: "Catalogue page returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicCourseList"
+    post:
+      operationId: createPublicCourse
+      summary: "Create a public catalogue course (instructor-only)"
+      description: |
+        Creates a Course with marketplace metadata. The `gcid` header is
+        required and is recorded as the instructor identity. Emits
+        `chora.delivery.course.created.v1`.
+      tags: [Catalogue]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePublicCourseRequest"
+      responses:
+        "201":
+          description: "Course created — emits chora.delivery.course.created.v1"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicCourse"
+        "400":
+          description: "Invalid input"
+        "401":
+          description: "gcid header missing"
+
+  /courses/{course_id}:
+    parameters:
+      - $ref: "#/components/parameters/CourseId"
+    get:
+      operationId: getPublicCourse
+      summary: "Get a single public catalogue course"
+      tags: [Catalogue]
+      responses:
+        "200":
+          description: "Public course returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicCourse"
+        "404":
+          description: "Not found"
+
+  /enrollments:
+    post:
+      operationId: createEnrollment
+      summary: "Same-identity enrolment (Comic Ch4 P8)"
+      description: |
+        Stores an enrolment row linking gcid + course_id. Does NOT create
+        a new user account. Idempotent on (course_id, gcid): a duplicate
+        POST returns 200 with the existing row instead of 409. Emits
+        `chora.delivery.enrollment.created.v1` ONLY on a fresh insert.
+      tags: [Enrollments]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateEnrollmentRequest"
+      responses:
+        "201":
+          description: "Enrolment created — emits chora.delivery.enrollment.created.v1"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Enrollment"
+        "200":
+          description: "Idempotent retry — existing enrolment returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Enrollment"
+        "400":
+          description: "Missing gcid or course_id"
+        "404":
+          description: "Course not found"
+
+  /me/enrollments:
+    get:
+      operationId: listMyEnrollments
+      summary: "List the current user's enrolments (Comic Ch4 P3 dual-card)"
+      description: |
+        Returns every active enrolment row for the current gcid + tenant.
+        The dashboard uses this to render the dual-card view (CSPO →
+        Instructor / CSM-Prep → Learner) per Comic Ch4 P3.
+      tags: [Enrollments]
+      responses:
+        "200":
+          description: "Enrolments returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnrollmentList"
+        "401":
+          description: "gcid header missing"
+
+  # -----------------------------------------------------------------
+  # Courses by instructor (FE A6 instructor-roster surface)
+  # -----------------------------------------------------------------
+
+  /api/v1/instructors/{instructor_gcid}/courses:
+    parameters:
+      - in: path
+        name: instructor_gcid
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      operationId: listCoursesByInstructor
+      summary: "List courses authored by an instructor"
+      description: |
+        Returns the courses where `instructor_gcid` matches the path
+        parameter, scoped to the caller's tenant. RLS on the `courses`
+        table enforces the cross-tenant boundary.
+
+        Closes debt #4 / A6 per docs/m13/handoff-fe-to-be-service-2026-05-14.md:
+        FE expected a single by-instructor endpoint and was previously forced
+        to fetch the full catalogue + client-filter (expensive + leaky).
+
+        **Authorization**: caller must be either
+          - the instructor themselves (`gcid` claim equals `instructor_gcid` path), OR
+          - hold the `instructor` or `admin` role in the active tenant (read via
+            the `x-mesh-user-roles` header per Bucket 4 servicemesh convention).
+
+        Other authenticated callers receive `403`.
+
+        **Soft-delete**: rows with `deleted_at IS NOT NULL` are filtered out.
+        **Pagination**: 1-indexed page/per (mirrors `/courses` catalogue
+        list pagination). Results are stable-sorted by course_id (UUIDv7 ⇒
+        creation order, oldest first).
+      tags: [Catalogue]
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, minimum: 1, default: 1 }
+        - in: query
+          name: per
+          schema: { type: integer, minimum: 1, maximum: 200, default: 20 }
+      responses:
+        "200":
+          description: "Page of courses authored by the instructor"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicCourseList"
+        "401":
+          description: "X-Tenant-Id or gcid header missing"
+        "403":
+          description: "Caller is not the instructor and lacks the instructor/admin role"
+        "422":
+          description: "Path parameter not a valid UUID"
+
+  # -----------------------------------------------------------------
+  # Health
+  # -----------------------------------------------------------------
+
+  /api/v1/health:
+    get:
+      operationId: healthCheck
+      summary: "Service health check"
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: "Healthy"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: "OIDC JWT issued by Identity Platform."
+
+  parameters:
+    CourseId:
+      in: path
+      name: course_id
+      required: true
+      schema: { type: string, format: uuid }
+    BookingId:
+      in: path
+      name: booking_id
+      required: true
+      schema: { type: string, format: uuid }
+    CertId:
+      in: path
+      name: cert_id
+      required: true
+      schema: { type: string, format: uuid }
+    ClaimId:
+      in: path
+      name: claim_id
+      required: true
+      schema: { type: string, format: uuid }
+    GroupId:
+      in: path
+      name: group_id
+      required: true
+      schema: { type: string, format: uuid }
+    ExamId:
+      in: path
+      name: exam_id
+      required: true
+      schema: { type: string, format: uuid }
+    PlacementId:
+      in: path
+      name: placement_id
+      required: true
+      schema: { type: string, format: uuid }
+    SurveyId:
+      in: path
+      name: survey_id
+      required: true
+      schema: { type: string, format: uuid }
+    PageOffset:
+      in: query
+      name: offset
+      schema: { type: integer, minimum: 0, default: 0 }
+    PageLimit:
+      in: query
+      name: limit
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+    CataloguePage:
+      in: query
+      name: page
+      description: "1-indexed page number (Phyllis MVP catalogue)."
+      schema: { type: integer, minimum: 1, default: 1 }
+    CataloguePer:
+      in: query
+      name: per
+      description: "Items per page (Phyllis MVP catalogue)."
+      schema: { type: integer, minimum: 1, maximum: 200, default: 20 }
+
+  schemas:
+
+    # ---- Enums (mirrors of proto enums) -------------------------------
+
+    Modality:
+      type: string
+      enum: [MODALITY_IN_PERSON, MODALITY_ONLINE_SYNC, MODALITY_ONLINE_ASYNC, MODALITY_BLENDED]
+
+    BookingStatus:
+      type: string
+      enum: [BOOKING_STATUS_PENDING, BOOKING_STATUS_CONFIRMED, BOOKING_STATUS_CANCELLED, BOOKING_STATUS_NO_SHOW, BOOKING_STATUS_COMPLETED]
+
+    AssignmentType:
+      type: string
+      enum: [ASSIGNMENT_TYPE_MANUAL, ASSIGNMENT_TYPE_BULK_IMPORT, ASSIGNMENT_TYPE_AUTO_ALLOCATED]
+
+    CertType:
+      type: string
+      enum: [CERT_TYPE_COMPLETION, CERT_TYPE_COMPETENCY, CERT_TYPE_ACCREDITED, CERT_TYPE_MICRO_CREDENTIAL]
+
+    ClaimStatus:
+      type: string
+      enum: [CLAIM_STATUS_SUBMITTED, CLAIM_STATUS_UNDER_REVIEW, CLAIM_STATUS_APPROVED, CLAIM_STATUS_REJECTED, CLAIM_STATUS_DISBURSED]
+
+    ProctorMethod:
+      type: string
+      enum: [PROCTOR_METHOD_NONE, PROCTOR_METHOD_AUTO_AI, PROCTOR_METHOD_HUMAN_LIVE, PROCTOR_METHOD_HUMAN_RECORDED]
+
+    PassFail:
+      type: string
+      enum: [PASS_FAIL_PASS, PASS_FAIL_FAIL]
+
+    IncidentSeverity:
+      type: string
+      enum: [INCIDENT_SEVERITY_LOW, INCIDENT_SEVERITY_MEDIUM, INCIDENT_SEVERITY_HIGH, INCIDENT_SEVERITY_CRITICAL]
+
+    # ---- Course --------------------------------------------------------
+
+    Course:
+      type: object
+      required: [course_id, title, modality, status, created_at]
+      properties:
+        course_id: { type: string, format: uuid }
+        title: { type: string, minLength: 1, maxLength: 256 }
+        instructor_gcid: { type: string }
+        atom_path_id: { type: string }
+        modality: { $ref: "#/components/schemas/Modality" }
+        starts_at: { type: string, format: date-time }
+        ends_at: { type: string, format: date-time }
+        capacity: { type: integer }
+        status:
+          type: string
+          enum: [DRAFT, SCHEDULED, COMPLETED, CANCELLED]
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        deleted_at: { type: string, format: date-time, nullable: true }
+
+    CourseList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Course" }
+        total: { type: integer }
+
+    CreateCourseRequest:
+      type: object
+      required: [title, modality]
+      properties:
+        title: { type: string, minLength: 1, maxLength: 256 }
+        instructor_gcid: { type: string }
+        atom_path_id: { type: string }
+        modality: { $ref: "#/components/schemas/Modality" }
+        starts_at: { type: string, format: date-time }
+        ends_at: { type: string, format: date-time }
+        capacity: { type: integer, minimum: 0 }
+
+    UpdateCourseRequest:
+      type: object
+      properties:
+        title: { type: string, minLength: 1, maxLength: 256 }
+        instructor_gcid: { type: string }
+        atom_path_id: { type: string }
+        modality: { $ref: "#/components/schemas/Modality" }
+        starts_at: { type: string, format: date-time }
+        ends_at: { type: string, format: date-time }
+        capacity: { type: integer, minimum: 0 }
+
+    CancelRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason: { type: string, maxLength: 512 }
+
+    # ---- Booking -------------------------------------------------------
+
+    Booking:
+      type: object
+      required: [booking_id, course_id, learner_gcid, status, created_at]
+      properties:
+        booking_id: { type: string, format: uuid }
+        course_id: { type: string, format: uuid }
+        learner_gcid: { type: string }
+        status: { $ref: "#/components/schemas/BookingStatus" }
+        seat_number: { type: integer }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        deleted_at: { type: string, format: date-time, nullable: true }
+
+    BookingList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Booking" }
+        total: { type: integer }
+
+    CreateBookingRequest:
+      type: object
+      required: [course_id, learner_gcid]
+      properties:
+        course_id: { type: string, format: uuid }
+        learner_gcid: { type: string }
+        seat_number: { type: integer, minimum: 0 }
+
+    # ---- Roster --------------------------------------------------------
+
+    RosterEntry:
+      type: object
+      required: [learner_gcid, assignment_type]
+      properties:
+        learner_gcid: { type: string }
+        assignment_type: { $ref: "#/components/schemas/AssignmentType" }
+        rostered_at: { type: string, format: date-time }
+
+    Roster:
+      type: object
+      required: [roster_id, course_id, entries, finalized]
+      properties:
+        roster_id: { type: string, format: uuid }
+        course_id: { type: string, format: uuid }
+        entries:
+          type: array
+          items: { $ref: "#/components/schemas/RosterEntry" }
+        finalized: { type: boolean }
+        finalized_at: { type: string, format: date-time }
+
+    AddRosterEntryRequest:
+      type: object
+      required: [learner_gcid, assignment_type]
+      properties:
+        learner_gcid: { type: string }
+        assignment_type: { $ref: "#/components/schemas/AssignmentType" }
+
+    UpdateRosterRequest:
+      type: object
+      properties:
+        entries:
+          type: array
+          items: { $ref: "#/components/schemas/RosterEntry" }
+        finalize:
+          type: boolean
+          description: "Set true to finalize the roster — emits rostering.finalized.v1"
+
+    # ---- Certification ------------------------------------------------
+
+    Certification:
+      type: object
+      required: [cert_id, learner_gcid, course_id, cert_type, issued_at]
+      properties:
+        cert_id: { type: string, format: uuid }
+        learner_gcid: { type: string }
+        course_id: { type: string, format: uuid }
+        cert_type: { $ref: "#/components/schemas/CertType" }
+        issued_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time, nullable: true }
+        revoked_at: { type: string, format: date-time, nullable: true }
+        revocation_reason: { type: string, maxLength: 512, nullable: true }
+
+    CertificationList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Certification" }
+        total: { type: integer }
+
+    IssueCertRequest:
+      type: object
+      required: [learner_gcid, course_id, cert_type]
+      properties:
+        learner_gcid: { type: string }
+        course_id: { type: string, format: uuid }
+        cert_type: { $ref: "#/components/schemas/CertType" }
+        expires_at: { type: string, format: date-time }
+
+    RevokeCertRequest:
+      type: object
+      required: [revocation_reason]
+      properties:
+        revocation_reason: { type: string, maxLength: 512 }
+
+    # ---- SkillsFutures ------------------------------------------------
+
+    SkillsFuturesClaim:
+      type: object
+      required: [claim_id, learner_gcid, course_id, claim_amount, claim_status, ssg_reference_id]
+      properties:
+        claim_id: { type: string, format: uuid }
+        learner_gcid: { type: string }
+        course_id: { type: string, format: uuid }
+        claim_amount:
+          type: integer
+          description: "Amount in cents (e.g., 50000 = SGD 500.00)."
+        claim_status: { $ref: "#/components/schemas/ClaimStatus" }
+        ssg_reference_id: { type: string }
+        rejection_reason: { type: string, maxLength: 512, nullable: true }
+        claimed_at: { type: string, format: date-time }
+        approved_at: { type: string, format: date-time, nullable: true }
+        rejected_at: { type: string, format: date-time, nullable: true }
+        disbursed_at: { type: string, format: date-time, nullable: true }
+
+    SkillsFuturesClaimList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/SkillsFuturesClaim" }
+        total: { type: integer }
+
+    CreateSkillsFuturesClaimRequest:
+      type: object
+      required: [learner_gcid, course_id, claim_amount, ssg_reference_id]
+      properties:
+        learner_gcid: { type: string }
+        course_id: { type: string, format: uuid }
+        claim_amount: { type: integer, minimum: 0 }
+        ssg_reference_id: { type: string }
+
+    RejectClaimRequest:
+      type: object
+      required: [rejection_reason]
+      properties:
+        rejection_reason: { type: string, maxLength: 512 }
+
+    # ---- ProjectGroup -------------------------------------------------
+
+    ProjectGroup:
+      type: object
+      required: [group_id, course_id, member_gcids, status]
+      properties:
+        group_id: { type: string, format: uuid }
+        course_id: { type: string, format: uuid }
+        member_gcids:
+          type: array
+          items: { type: string }
+        status:
+          type: string
+          enum: [FORMED, SUBMITTED, GRADED]
+        submission_url: { type: string, format: uri, nullable: true }
+        grade: { type: integer, minimum: 0, maximum: 100, nullable: true }
+        formed_at: { type: string, format: date-time }
+        submitted_at: { type: string, format: date-time, nullable: true }
+        graded_at: { type: string, format: date-time, nullable: true }
+
+    ProjectGroupList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/ProjectGroup" }
+        total: { type: integer }
+
+    CreateProjectGroupRequest:
+      type: object
+      required: [course_id, member_gcids]
+      properties:
+        course_id: { type: string, format: uuid }
+        member_gcids:
+          type: array
+          items: { type: string }
+          minItems: 1
+
+    SubmitProjectRequest:
+      type: object
+      required: [submission_url]
+      properties:
+        submission_url: { type: string, format: uri }
+
+    GradeProjectRequest:
+      type: object
+      required: [grade]
+      properties:
+        grade: { type: integer, minimum: 0, maximum: 100 }
+
+    # ---- Exam ---------------------------------------------------------
+
+    Exam:
+      type: object
+      required: [exam_id, course_id, candidate_gcid, status]
+      properties:
+        exam_id: { type: string, format: uuid }
+        course_id: { type: string, format: uuid }
+        candidate_gcid: { type: string }
+        scheduled_for: { type: string, format: date-time, nullable: true }
+        proctor_method: { $ref: "#/components/schemas/ProctorMethod" }
+        score: { type: integer, minimum: 0, maximum: 100, nullable: true }
+        pass_fail: { $ref: "#/components/schemas/PassFail" }
+        status:
+          type: string
+          enum: [DRAFT, SCHEDULED, ADMINISTERED, GRADED]
+        graded_at: { type: string, format: date-time, nullable: true }
+
+    ExamList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Exam" }
+        total: { type: integer }
+
+    CreateExamRequest:
+      type: object
+      required: [course_id, candidate_gcid, proctor_method]
+      properties:
+        course_id: { type: string, format: uuid }
+        candidate_gcid: { type: string }
+        proctor_method: { $ref: "#/components/schemas/ProctorMethod" }
+
+    ScheduleExamRequest:
+      type: object
+      required: [scheduled_for]
+      properties:
+        scheduled_for: { type: string, format: date-time }
+
+    GradeExamRequest:
+      type: object
+      required: [score, pass_fail]
+      properties:
+        score: { type: integer, minimum: 0, maximum: 100 }
+        pass_fail: { $ref: "#/components/schemas/PassFail" }
+
+    # ---- WblPlacement -------------------------------------------------
+
+    WblPlacement:
+      type: object
+      required: [placement_id, learner_gcid, host_org_id, mentor_gcid, status]
+      properties:
+        placement_id: { type: string, format: uuid }
+        learner_gcid: { type: string }
+        host_org_id: { type: string }
+        mentor_gcid: { type: string }
+        scheduled_start: { type: string, format: date-time }
+        scheduled_end: { type: string, format: date-time }
+        hours_completed: { type: number, format: float, nullable: true }
+        status:
+          type: string
+          enum: [CREATED, STARTED, COMPLETED]
+        created_at: { type: string, format: date-time }
+        started_at: { type: string, format: date-time, nullable: true }
+        completed_at: { type: string, format: date-time, nullable: true }
+        deleted_at: { type: string, format: date-time, nullable: true }
+
+    WblPlacementList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/WblPlacement" }
+        total: { type: integer }
+
+    CreateWblPlacementRequest:
+      type: object
+      required: [learner_gcid, host_org_id, mentor_gcid, scheduled_start, scheduled_end]
+      properties:
+        learner_gcid: { type: string }
+        host_org_id: { type: string }
+        mentor_gcid: { type: string }
+        scheduled_start: { type: string, format: date-time }
+        scheduled_end: { type: string, format: date-time }
+
+    UpdateWblPlacementRequest:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [STARTED, COMPLETED]
+        hours_completed: { type: number, format: float, minimum: 0 }
+
+    # ---- Survey -------------------------------------------------------
+
+    Survey:
+      type: object
+      required: [survey_id, status]
+      properties:
+        survey_id: { type: string, format: uuid }
+        course_id: { type: string, nullable: true }
+        title: { type: string, minLength: 1, maxLength: 256 }
+        status:
+          type: string
+          enum: [DRAFT, DISTRIBUTED, CLOSED]
+        distributed_at: { type: string, format: date-time, nullable: true }
+        closed_at: { type: string, format: date-time, nullable: true }
+        deleted_at: { type: string, format: date-time, nullable: true }
+
+    SurveyList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Survey" }
+        total: { type: integer }
+
+    CreateSurveyRequest:
+      type: object
+      required: [title]
+      properties:
+        title: { type: string, minLength: 1, maxLength: 256 }
+        course_id: { type: string }
+
+    # ---- CampusOps ----------------------------------------------------
+
+    CampusBooking:
+      type: object
+      required: [booking_id, resource_id, starts_at, ends_at]
+      properties:
+        booking_id: { type: string, format: uuid }
+        resource_id: { type: string, format: uuid }
+        course_id: { type: string, nullable: true }
+        starts_at: { type: string, format: date-time }
+        ends_at: { type: string, format: date-time }
+
+    CampusBookingList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/CampusBooking" }
+        total: { type: integer }
+
+    CreateCampusBookingRequest:
+      type: object
+      required: [resource_id, starts_at, ends_at]
+      properties:
+        resource_id: { type: string, format: uuid }
+        course_id: { type: string }
+        starts_at: { type: string, format: date-time }
+        ends_at: { type: string, format: date-time }
+
+    Incident:
+      type: object
+      required: [booking_id, incident_severity, reported_at]
+      properties:
+        booking_id: { type: string, format: uuid }
+        resource_id: { type: string, nullable: true }
+        course_id: { type: string, nullable: true }
+        starts_at: { type: string, format: date-time, nullable: true }
+        ends_at: { type: string, format: date-time, nullable: true }
+        incident_severity: { $ref: "#/components/schemas/IncidentSeverity" }
+        description: { type: string, maxLength: 1024 }
+        reported_by_gcid: { type: string }
+        reported_at: { type: string, format: date-time }
+
+    IncidentList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Incident" }
+        total: { type: integer }
+
+    ReportIncidentRequest:
+      type: object
+      required: [incident_severity, description]
+      properties:
+        resource_id: { type: string }
+        course_id: { type: string }
+        starts_at: { type: string, format: date-time }
+        ends_at: { type: string, format: date-time }
+        incident_severity: { $ref: "#/components/schemas/IncidentSeverity" }
+        description: { type: string, maxLength: 1024 }
+
+    # ---- Phyllis MVP — Public Catalogue ------------------------------
+
+    PublicCourse:
+      type: object
+      description: |
+        Marketplace-facing read model for a Course (Phyllis MVP, Comic Ch5 P10).
+        InstructorName is a denormalised projection of the Identity record
+        for low-latency reads; it refreshes on identity-update events.
+      required:
+        - id
+        - tenant_id
+        - title
+        - instructor_gcid
+        - price_sgd_cents
+        - is_free
+        - public
+        - tags
+        - syllabus_outline_count
+        - enrolled_count
+        - created_at
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        title: { type: string, minLength: 1, maxLength: 256 }
+        instructor_gcid: { type: string }
+        instructor_name: { type: string }
+        price_sgd_cents: { type: integer, minimum: 0 }
+        is_free: { type: boolean }
+        public: { type: boolean }
+        sf_eligible: { type: boolean }
+        tags:
+          type: array
+          items: { type: string, maxLength: 64 }
+        syllabus_outline_count: { type: integer, minimum: 0 }
+        enrolled_count: { type: integer, minimum: 0 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        deleted_at: { type: string, format: date-time, nullable: true }
+
+    PublicCourseList:
+      type: object
+      required: [items, total, page, per]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/PublicCourse" }
+        total: { type: integer, minimum: 0 }
+        page: { type: integer, minimum: 1 }
+        per: { type: integer, minimum: 1 }
+
+    CreatePublicCourseRequest:
+      type: object
+      required: [title]
+      properties:
+        title: { type: string, minLength: 1, maxLength: 256 }
+        syllabus_outline:
+          type: array
+          items: { type: string, maxLength: 256 }
+        tags:
+          type: array
+          items: { type: string, maxLength: 64 }
+        price_sgd_cents: { type: integer, minimum: 0 }
+        public: { type: boolean }
+        sf_eligible: { type: boolean }
+        instructor_name: { type: string, maxLength: 256 }
+
+    # ---- Phyllis MVP — Enrollments -----------------------------------
+
+    BulkEnrollRosterRequest:
+      type: object
+      required: [course_id, gcids]
+      properties:
+        course_id: { type: string, format: uuid, description: "Must be one of the offering's attached courses" }
+        gcids:
+          type: array
+          minItems: 1
+          items: { type: string, format: uuid }
+    BulkEnrollRosterResult:
+      type: object
+      required: [course_id, requested_count, inserted_count, enrollment_ids]
+      properties:
+        course_id: { type: string, format: uuid }
+        requested_count: { type: integer, description: "Distinct gcids in the request after de-dup" }
+        inserted_count: { type: integer, description: "Newly enrolled (fresh or revived); excludes already-active" }
+        enrollment_ids:
+          type: array
+          items: { type: string, format: uuid }
+    Enrollment:
+      type: object
+      required: [id, tenant_id, course_id, gcid, enrolled_at]
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        course_id: { type: string, format: uuid }
+        gcid: { type: string }
+        enrolled_at: { type: string, format: date-time }
+        deleted_at: { type: string, format: date-time, nullable: true }
+
+    EnrollmentList:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Enrollment" }
+        total: { type: integer, minimum: 0 }
+
+    CreateEnrollmentRequest:
+      type: object
+      required: [course_id]
+      properties:
+        course_id: { type: string, format: uuid }
+        gcid:
+          type: string
+          description: |
+            Optional in body — falls back to the gcid header (auth-derived).
+            Same-identity invariant: never creates a new user; just stores
+            the (course_id, gcid) row.
+
+    # ---- Health -------------------------------------------------------
+
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [OK, DEGRADED]
+        version: { type: string }

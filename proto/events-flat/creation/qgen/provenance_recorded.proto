@@ -1,0 +1,86 @@
+// =============================================================================
+// GENERATED — DO NOT EDIT.
+// Source : events/creation/qgen.proto message QGenProvenanceRecorded
+// Tool   : chora-contracts/internal/protoflatten
+// Why    : GCP Pub/Sub Schema Registry rejects (a) schemas with `import`
+//          statements and (b) schemas with more than one top-level message.
+//          This flat copy contains exactly ONE top-level message;
+//          EventEnvelope + Timestamp + transitive deps are nested inside.
+// Path C : see chora-contracts/CHANGELOG.md and m10-data-plane main.tf.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.creation.v1;
+
+message QGenProvenanceRecorded {
+  // Inlined chora.common.v1.EventEnvelope (nested for self-contained schema).
+  message Envelope {
+    string event_id = 1;
+    string idempotency_key = 2;
+    string tenant_id = 3;
+    string gcid = 4;
+    Timestamp occurred_at = 5;
+    Timestamp published_at = 6;
+    string traceparent = 7;
+    string tracestate = 8;
+    string source_project = 9;
+    string source_service = 10;
+    int32 schema_version = 11;
+    string correlation_id = 12;
+    string causation_id = 13;
+    string chora_imda_dimension = 14;
+    string imda_lifecycle_stage = 15;
+  }
+
+  // Inlined google.protobuf.Timestamp (nested; wire-compatible).
+  message Timestamp {
+    int64 seconds = 1;
+    int32 nanos = 2;
+  }
+
+  // Inlined enum dep: ModelTier
+  enum ModelTier {
+    MODEL_TIER_UNSPECIFIED = 0;
+    MODEL_TIER_T1 = 1;
+    MODEL_TIER_T2 = 2;
+    MODEL_TIER_T3 = 3;
+  }
+
+  // Inlined enum dep: QgenAgentKind
+  enum QgenAgentKind {
+    QGEN_AGENT_KIND_UNSPECIFIED = 0;
+    QGEN_AGENT_KIND_ASSURANCE = 1;
+    QGEN_AGENT_KIND_FITNESS = 2;
+    QGEN_AGENT_KIND_GENERATION = 3;
+    QGEN_AGENT_KIND_EVALUATION = 4;
+    QGEN_AGENT_KIND_DELIVERY = 5;
+    QGEN_AGENT_KIND_DOC_PARSER_INGEST = 6;
+  }
+
+  // Inlined enum dep: QgenCrewKind
+  enum QgenCrewKind {
+    QGEN_CREW_KIND_UNSPECIFIED = 0;
+    QGEN_CREW_KIND_BATCH = 1;
+    QGEN_CREW_KIND_PER_QUESTION = 2;
+  }
+
+  Envelope envelope = 1;
+  string crew_run_id = 2;
+  QgenCrewKind crew_kind = 3;
+  QgenAgentKind agent_kind = 4;
+  ModelTier model_tier = 5;
+  string model_provider = 6;
+  string model_id = 7;
+  string model_location = 8;
+  string fallback_tier_used = 9;
+  int32 rows_count = 10;
+  int32 cited_count = 11;
+  int32 context_only_count = 12;
+  int32 redacted_count = 13;
+  int32 policy_dropped_count = 14;
+  float similarity_min = 15;
+  float similarity_max = 16;
+  float similarity_mean = 17;
+  Timestamp recorded_at = 18;
+}

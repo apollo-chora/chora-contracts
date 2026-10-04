@@ -1,0 +1,170 @@
+// =============================================================================
+// chora.identity.v1 — Global Chora ID (GCID) lifecycle events
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 2 D8
+// + .claude/rules/ddd-enforcement.md (Aggregate Invariants #9 — GCID opaque
+//   UUIDv7, never embeds tenant context)
+// + memory project_chora_data_plane.md
+//
+// Owning domain  : Identity (chora_identity database)
+// Owning team    : Team 3 (Platform)
+// Topic prefix   : chora.identity.gcid.*
+// Surface (admin): H+ Hub+ (Surface-5) — tenant admin / IdP
+//
+// GCID is a cross-tenant portable opaque UUIDv7 identifier; no tenant context
+// is embedded in the identifier itself (ADR-133). Tenant scope flows through
+// the EventEnvelope (envelope.tenant_id may be "platform" for cross-tenant
+// platform-level events).
+//
+// AGID (agent identity) is DISTINCT from GCID — agents emit events with the
+// AGID in envelope.gcid; AGID-scoped events live in agid.proto.
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.identity.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/identity/v1;identityv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// IdentityProvider — origin of the identity assertion when GCID was issued
+// or linked. Identity Platform is the platform-managed IdP that federates
+// external providers (Microsoft, Google, Singpass, generic SAML/OIDC).
+// -----------------------------------------------------------------------------
+enum IdentityProvider {
+  IDENTITY_PROVIDER_UNSPECIFIED = 0;
+  IDENTITY_PROVIDER_IDENTITY_PLATFORM_NATIVE = 1; // Native Identity Platform (WebAuthn / passkey)
+  IDENTITY_PROVIDER_MICROSOFT = 2;                // Microsoft Entra ID / Azure AD
+  IDENTITY_PROVIDER_GOOGLE = 3;                   // Google Workspace / consumer Google
+  IDENTITY_PROVIDER_SINGPASS = 4;                 // SG government Singpass
+  IDENTITY_PROVIDER_SAML_GENERIC = 5;             // Generic SAML 2.0 enterprise IdP
+  IDENTITY_PROVIDER_OIDC_GENERIC = 6;             // Generic OIDC enterprise IdP
+}
+
+// -----------------------------------------------------------------------------
+// GcidIssued — chora.identity.gcid.issued.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a brand-new GCID is minted (registration / first IdP login).
+// Consumers: Tenancy (membership eligibility), Notifications (welcome email),
+// Observability (registration funnel), AI Kernel (Companion persona seeding).
+message GcidIssued {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // The newly issued GCID (UUIDv7 — opaque, cross-tenant portable).
+  string gcid = 2;
+
+  // Optional initial tenant context — empty string for platform-level
+  // self-registration. The envelope.tenant_id carries authoritative scope.
+  string tenant_id = 3;
+
+  // Originating identity provider.
+  IdentityProvider identity_provider = 4;
+
+  // Provider-side subject identifier (e.g., OIDC `sub`). NOT a PII field
+  // by itself; pseudonymise on closure per ddd-enforcement closure saga.
+  string provider_subject = 5;
+
+  // When the GCID record was created in chora_identity DB.
+  google.protobuf.Timestamp issued_at = 6;
+}
+
+// -----------------------------------------------------------------------------
+// GcidMerged — chora.identity.gcid.merged.v1
+// -----------------------------------------------------------------------------
+//
+// Published when two GCIDs are merged into one (ADR-133 self-service or
+// admin-assisted account consolidation). The prior_gcid is retained as an
+// alias for audit + back-reference; all child entities re-point to gcid.
+//
+// Consumers: ALL domains holding GCID references (membership, posts,
+// sessions, certifications, billing, notifications).
+message GcidMerged {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // The surviving GCID after merge.
+  string gcid = 2;
+
+  // The retired GCID — must be treated as alias of `gcid` going forward.
+  string prior_gcid = 3;
+
+  // Optional tenant context — empty string for cross-tenant merges.
+  string tenant_id = 4;
+
+  // GCID of the actor who initiated the merge (self or admin).
+  string merged_by_gcid = 5;
+
+  // Free-text reason (e.g., "self-merge via H+", "admin-resolved duplicate").
+  string reason = 6;
+
+  google.protobuf.Timestamp merged_at = 7;
+}
+
+// -----------------------------------------------------------------------------
+// GcidLinked — chora.identity.gcid.linked.v1
+// -----------------------------------------------------------------------------
+//
+// Published when an existing GCID is linked to an additional IdP credential
+// (e.g., learner adds Singpass to a passkey-only GCID). Distinct from
+// GcidMerged — no GCID is retired; one GCID gains an additional provider link.
+message GcidLinked {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // The GCID gaining the new link.
+  string gcid = 2;
+
+  // Optional tenant context.
+  string tenant_id = 3;
+
+  // The newly linked identity provider.
+  IdentityProvider identity_provider = 4;
+
+  // Provider-side subject identifier for the new link.
+  string provider_subject = 5;
+
+  google.protobuf.Timestamp linked_at = 6;
+}
+
+// -----------------------------------------------------------------------------
+// GcidResolved — chora.identity.gcid.resolved.v1
+// -----------------------------------------------------------------------------
+//
+// Published each time chora-identity's POST /v1/identity/resolve handler
+// resolves a Firebase-validated identity to a GCID + its active tenant
+// membership set. Emitted by GCIDResolvedPublisher.PublishGCIDResolved as an
+// audit-trail event so downstream domains (Observability sign-in funnel,
+// Governance access audit) can attribute a resolution to a GCID + tenant.
+//
+// Idempotency: the producer supplies an idempotency_key derived from
+// sha256(email+firebase_uid) so subscribers dedupe on retry (see envelope).
+//
+// Producer: services/chora-identity/internal/adapter/events/gcid_resolved_publisher.go.
+// Class D contract paydown (event-fabric audit 2026-07-01): the code emitted
+// to this topic before any proto / schema / topic existed.
+message GcidResolved {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // The resolved GCID (UUIDv7 — opaque, cross-tenant portable).
+  string gcid = 2;
+
+  // Tenant the identity resolved into (empty for a platform-level resolve).
+  // The envelope.tenant_id carries authoritative scope.
+  string tenant_id = 3;
+
+  // Federated email address the resolution keyed on. PII — pseudonymise on
+  // closure per ddd-enforcement closure saga (chora_identity PII_Closure_Map).
+  string email = 4;
+
+  // Firebase Authentication UID the resolution keyed on (Identity Platform
+  // subject). Pseudonymise on closure alongside email.
+  string firebase_uid = 5;
+
+  // Count of active tenant memberships resolved for this GCID at resolve time.
+  int32 memberships_count = 6;
+}

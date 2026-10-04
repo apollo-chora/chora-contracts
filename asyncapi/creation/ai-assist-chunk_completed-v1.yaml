@@ -1,0 +1,146 @@
+asyncapi: "3.0.0"
+info:
+  title: "Chora Content Creation - ai_assist.chunk_completed.v1"
+  version: "1.0.0"
+  description: |
+    ADR-251 D5 (CHO-2398): incremental publishing for the AI Assist set lane's
+    graph chunk loop. Emitted by the chora-ai-kernel-orchestrator's
+    publish_chunk node when chunk k of a multi-chunk job finishes
+    (generate -> critique -> gate -> render), carrying that chunk's candidates
+    in PUBLISHED shape: image/render specs stripped, per-candidate
+    quality_warning + critic_notes included, exactly the shape the terminal
+    AiAssistCompleted.candidate_payload_json entries take.
+
+    ONE EVENT, ONE MEANING (owner-ruled in ADR-251, recorded rejected
+    shortcut): progress.v1 stays trace-only telemetry; this DEDICATED event is
+    the chunk-results channel. The terminal completed.v1 still carries the
+    authoritative FULL set: a consumer that ignores chunk events loses nothing
+    but progressiveness.
+
+    Idempotency: envelope.idempotency_key =
+    "ai_assist.chunk_completed.{chunk_index}.{assist_id}". Delivery is
+    at-least-once and unordered; the chora-creation consumer persists
+    idempotently and MONOTONICALLY by chunk_index per job.
+
+    Per ADR-141 (IMDA dimension labels): envelope.chora_imda_dimension SHOULD
+    be "accountability" (D1).
+
+    Why the topic lives in the `creation` domain (not `ai_kernel`): the
+    artefact produced is a creation question candidate. The emitter living in
+    AI Kernel does NOT determine the topic domain; the topic domain follows
+    the affected aggregate root.
+
+    Owning team    : Team 1 (Content)
+    Owning domain  : Content Creation (chora_creation database)
+    Surface (admin): A+ Creator mode
+
+    Source-of-truth: docs/architecture/adrs/adr-251-qgen-durable-chunked-set-
+    lane-incremental-publishing.md (D5) + proto/events/creation/ai_assist.proto
+    + .claude/rules/ddd-enforcement.md
+  contact:
+    name: "Chora Platform Team - Content Track"
+  license:
+    name: "Proprietary"
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  production:
+    host: "pubsub.googleapis.com"
+    protocol: googlepubsub
+    description: "Google Cloud Pub/Sub (production)"
+  emulator:
+    host: "localhost:8085"
+    protocol: googlepubsub
+    description: "Cloud Pub/Sub Emulator (local dev via PUBSUB_EMULATOR_HOST)"
+
+channels:
+  aiAssistChunkCompleted:
+    address: "chora.creation.ai_assist.chunk_completed.v1"
+    description: |
+      Pub/Sub topic for AiAssistChunkCompleted events. Topic resides in the
+      centralised platform host project (`chora-489812`) with a paired
+      dead-letter topic `chora.dlq.creation.ai_assist.chunk_completed.v1`.
+      Schema Registry validates the BINARY Protobuf payload at publish time
+      (flat schema: proto/events-flat/creation/ai_assist/chunk_completed.proto).
+      WIRING ORDER (house rule): the chora-creation consumer goes live BEFORE
+      the subscription is created; the subscription is created LAST (a topic
+      with no subscription discards every message).
+    messages:
+      aiAssistChunkCompleted:
+        $ref: "#/components/messages/AiAssistChunkCompleted"
+
+operations:
+  publishAiAssistChunkCompleted:
+    action: send
+    channel:
+      $ref: "#/channels/aiAssistChunkCompleted"
+    summary: "Publish one completed chunk's candidates while the job is still running"
+    description: |
+      Producer: chora-ai-kernel-orchestrator publish_chunk node (transactional
+      outbox, BINARY encode at the publish bridge) - emitted per chunk of a
+      multi-chunk set job, before finalize_set.
+      Consumers:
+        - chora-creation -> persist the chunk's candidates into the RUNNING
+          ai_assist_jobs row (idempotent + monotonic by chunk_index); the
+          question-jobs poll then serves questions-so-far.
+      NOT consumed by governance/observability: the terminal completed.v1
+      remains the accountability record.
+    messages:
+      - $ref: "#/channels/aiAssistChunkCompleted/messages/aiAssistChunkCompleted"
+
+components:
+  messages:
+    AiAssistChunkCompleted:
+      name: "AiAssistChunkCompleted"
+      title: "AI Assist Chunk Completed (v1)"
+      summary: "Chunk k of a multi-chunk AI Assist set job finished; carries that chunk's published-shape candidates"
+      description: |
+        Payload fields (proto/events/creation/ai_assist.proto ->
+        chora.creation.v1.AiAssistChunkCompleted). The leading `f{N}` is the
+        proto field tag.
+
+          f1  envelope (chora.common.v1.EventEnvelope)
+              Mandatory event envelope. idempotency_key =
+              "ai_assist.chunk_completed.{chunk_index}.{assist_id}";
+              chora_imda_dimension SHOULD = "accountability".
+
+          f2  assist_id (string)
+              UUIDv7 - matches AiAssistStarted.assist_id (== the question
+              generation job_id). The subscriber's correlation + RLS-scoping
+              key.
+
+          f3  tenant_id (string)
+              Tenant context (also in envelope.tenant_id; duplicated for
+              filter-friendly tenant-sharded subscribers + the RLS-scoped
+              write).
+
+          f4  author_gcid (string)
+              The author who initiated the AI Assist call. Same as
+              envelope.gcid.
+
+          f5  chunk_index (int32)
+              0-based ordinal of the chunk that completed. The consumer applies
+              a chunk event ONLY when it has not already persisted this
+              chunk_index for the job (idempotent + monotonic; out-of-order
+              delivery safe).
+
+          f6  chunk_count (int32)
+              Total planned chunks for the job (from plan_chunks). Lets the
+              consumer and the jobs API report "k of n chunks" without waiting
+              for the terminal.
+
+          f7  candidates_payload_json (string)
+              Serialised JSON array of this chunk's candidates in PUBLISHED
+              shape (per OpenAPI AiAssistCandidate; specs stripped,
+              quality_warning + critic_notes included). JSON-in-string for the
+              same reason as AiAssistCompleted.candidate_payload_json: the
+              candidate shape is polymorphic and iterates in OpenAPI while the
+              proto stays stable.
+
+          f8  candidate_count (int32)
+              Number of candidates in candidates_payload_json (consumer sanity
+              check; a mismatch is a fail-loud NACK, never a partial apply).
+
+          f9  chunk_completed_at (google.protobuf.Timestamp)
+              When the chunk finished rendering.

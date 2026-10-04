@@ -1,0 +1,168 @@
+// =============================================================================
+// Chora Model Broker — Router Service (gRPC)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 2 D6
+//   + .claude/skills/model-broker-3-services/SKILL.md
+//   + memory project_chora_data_plane.md
+//
+// One of THREE Model Broker services (Router + Gateway + Classifier).
+// LOCKED Tier 2 D6: NEVER fold these three into a single binary (god-object reject).
+//
+// Router responsibility: deterministic rules-based routing of model invocation
+// requests to the appropriate model + adapter, given tenant policy + per-agent
+// guardrail tier + cost budget + region pinning + A/B test selection.
+// Calls the Classifier Service ONLY when deterministic rules are ambiguous
+// (~10% of traffic).
+//
+// Pre-routing gate order (mandatory; reordering = code-review reject):
+//   1. Governance Gatekeeper override (sync call to Guardrail Service)
+//   2. A/B test selection
+//   3. Tenant/GCID quota check
+//   4. Tenant policy + region pinning
+//   5. Cost optimisation rules
+//   6. Classifier Service fuzzy fallback (rules ambiguous only)
+//
+// Caller flow: executor / orchestrator-node → Router (decide) → Gateway (execute).
+// Router is stateless. Cloud Run scale-to-zero in chora-489812 team-platform.
+// mTLS via Cloud Service Mesh; SPIFFE identity in mesh; W3C trace context in
+// gRPC metadata (handled outside this contract).
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.services.model_broker_router.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/model_broker_router/v1;model_broker_routerv1";
+
+import "google/protobuf/timestamp.proto";
+
+// -----------------------------------------------------------------------------
+// Service
+// -----------------------------------------------------------------------------
+
+service ModelBrokerRouter {
+  // Route a model invocation request. Given the calling agent's role + task
+  // kind + tenant context, return the chosen model_id, the applicable
+  // guardrail tier list, and a max-token ceiling derived from cost budget.
+  // Idempotent — retries are safe.
+  rpc Route(RouteRequest) returns (RouteResponse);
+}
+
+// -----------------------------------------------------------------------------
+// Domain enum (mirrors 11-domain Chora topology — see ddd-enforcement.md)
+// -----------------------------------------------------------------------------
+
+enum Domain {
+  DOMAIN_UNSPECIFIED = 0;
+
+  // 5 core Content {verb} domains
+  DOMAIN_CREATION = 1;
+  DOMAIN_CONSUMPTION = 2;
+  DOMAIN_DELIVERY = 3;
+  DOMAIN_SHARING = 4;
+  DOMAIN_A2A = 5;
+
+  // 6 supporting / platform domains
+  DOMAIN_IDENTITY = 6;
+  DOMAIN_TENANCY = 7;
+  DOMAIN_GOVERNANCE = 8;
+  DOMAIN_OBSERVABILITY = 9;
+  DOMAIN_NOTIFICATIONS = 10;
+  DOMAIN_AI_KERNEL = 11;
+}
+
+// Task kind — high-level shape of the LLM call. Used by Router rules + cost
+// modelling. Keep small and deliberate; new values are additive only.
+enum TaskKind {
+  TASK_KIND_UNSPECIFIED = 0;
+  TASK_KIND_CLASSIFY = 1;   // discrete-label output, small models preferred
+  TASK_KIND_GENERATE = 2;   // free-form generation
+  TASK_KIND_CRITIQUE = 3;   // evaluator / judge / scorer
+  TASK_KIND_EXTRACT = 4;    // structured extraction (JSON / schema-bound)
+  TASK_KIND_RANK = 5;       // ranking / re-ranking over candidates
+}
+
+// Model kind — coarse class returned to caller for observability + downstream
+// adapter selection in the Gateway. The chosen_model_id is the canonical
+// identifier; this enum is a hint, not a key.
+enum ModelKind {
+  MODEL_KIND_UNSPECIFIED = 0;
+  MODEL_KIND_GEMINI_FLASH = 1;
+  MODEL_KIND_GEMINI_PRO = 2;
+  MODEL_KIND_GEMMA_TENANT_LORA = 3;  // self-hosted Gemma 4 + per-tenant LoRA
+  MODEL_KIND_EMBEDDING = 4;
+  MODEL_KIND_CLASSIFIER = 5;          // small classifier head
+}
+
+// Guardrail tier (mirrors ai-runtime-guardrails skill — risk-tiered per-agent).
+// A request may carry multiple tiers (e.g., REGEX + DLP + MODEL_ARMOR).
+enum GuardrailTier {
+  GUARDRAIL_TIER_UNSPECIFIED = 0;
+  GUARDRAIL_TIER_REGEX = 1;             // regex baseline (cheap)
+  GUARDRAIL_TIER_DLP = 2;               // Cloud DLP scan
+  GUARDRAIL_TIER_MODEL_ARMOR = 3;       // Cloud Model Armor
+  GUARDRAIL_TIER_OUTPUT_VALIDATOR = 4;  // structured output validator
+}
+
+// -----------------------------------------------------------------------------
+// Route RPC
+// -----------------------------------------------------------------------------
+
+message RouteRequest {
+  // Tenant scope. Required (multi-tenant isolation enforced upstream by mesh).
+  string tenant_id = 1;
+
+  // Calling agent identity (AGID — distinct from user GCID).
+  // See ddd-enforcement aggregate-invariant #10.
+  string agid = 2;
+
+  // Calling agent's role (e.g., "creation-validator", "consumption-hint-author").
+  // Used by Router to look up per-agent YAML config.
+  string agent_role = 3;
+
+  // Domain context the call is being made in.
+  Domain domain = 4;
+
+  // Task kind — drives model class selection.
+  TaskKind task_kind = 5;
+
+  // Estimated prompt size in tokens (caller may approximate). Used by cost
+  // optimisation gate.
+  int32 prompt_size_tokens = 6;
+
+  // Caller's latency budget in milliseconds. Router rejects models whose
+  // expected p95 exceeds this budget.
+  int32 latency_budget_ms = 7;
+
+  // Caller's cost ceiling for this single invocation, in USD micros (1e-6).
+  // Router rejects models whose modelled cost exceeds this ceiling.
+  int64 cost_budget_micros = 8;
+}
+
+message RouteResponse {
+  // Canonical model identifier (e.g., "gemini-2.5-flash", "gemma-4-9b-tenant-{tenant_id}").
+  // The Gateway uses this to dispatch to the correct adapter.
+  string chosen_model_id = 1;
+
+  // Coarse class hint (observability + adapter selection).
+  ModelKind model_kind = 2;
+
+  // Guardrail tiers the Gateway MUST enforce for this invocation
+  // (input AND output unless tier semantics declare otherwise).
+  repeated GuardrailTier guardrail_tier_list = 3;
+
+  // Max output tokens the Gateway should request from the model.
+  // Derived from cost_budget_micros and the chosen model's per-token price.
+  int32 max_tokens = 4;
+
+  // Human-readable explanation of which gate decided this routing — used for
+  // explainability + debugging. Examples:
+  //   "rules: cost-optimisation chose gemini-flash"
+  //   "ab-test variant_a (weight 70) selected gemini-pro"
+  //   "classifier-fuzzy: intent=creative-generation, model=gemini-pro"
+  string reasoning_summary = 5;
+
+  // Decision timestamp (Router clock).
+  google.protobuf.Timestamp decided_at = 6;
+}

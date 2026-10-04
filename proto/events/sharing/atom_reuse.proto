@@ -1,0 +1,63 @@
+// =============================================================================
+// Chora Content Sharing — AtomReuse (reuse-consent lifecycle) events
+// =============================================================================
+//
+// Owning domain : Content Sharing (chora_sharing DB).
+// Owning team   : Team 1 (Content)
+// Topic prefix  : chora.sharing.atom_reuse.*
+//
+// ADR-229 Amendment A1 (CHO-2132): grants are NEVER revoked by a reuse-
+// visibility withdrawal — consumed-continuity is absolute. chora-sharing owns
+// the AtomUsageGrant table (the audit record of every reuse, written at
+// snapshot/arm time per ADR-229 D2), which makes it the authoritative
+// registry of granted consumers. When a withdrawal event
+// (reuse_visibility_changed.v1 narrowing, or atom.archived.v1) strands >=1
+// active grant, sharing publishes AtomReuseOrphanRequired; chora-creation
+// consumes it and materialises the SINGLETON orphan edition (per atom +
+// last-published-revision), answering with atom.orphan_created.v1, on which
+// sharing repoints the stranded grants. Cross-DB queries forbidden — this
+// two-leg saga is the only coupling.
+//
+// A withdrawal that strands ZERO grants emits nothing here (creation still
+// checks its own in-domain collection entries locally at withdrawal time).
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.sharing.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/sharing/v1;sharingv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// AtomReuseOrphanRequired — chora.sharing.atom_reuse.orphan_required.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a reuse-visibility withdrawal strands at least one active
+// AtomUsageGrant. chora-creation consumes it and mints the singleton orphan
+// edition (idempotent — duplicate deliveries and repeat withdrawals at the
+// same revision converge on the same orphan), then publishes
+// chora.creation.atom.orphan_created.v1.
+message AtomReuseOrphanRequired {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 of the withdrawn atom (chora_creation aggregate; opaque ref).
+  string atom_id = 2;
+
+  // The revision the sharing projection had pinned at detection time. A HINT
+  // for observability only — chora-creation mints against ITS OWN
+  // last-published revision (authoritative in-domain read).
+  string revision_id = 3;
+
+  // What withdrew the atom: "narrowed" | "unshared" | "archived".
+  string trigger = 4;
+
+  // Number of active grants stranded by this withdrawal at detection time
+  // (>=1 by construction; informational).
+  int32 stranded_grant_count = 5;
+
+  // When sharing detected the stranding.
+  google.protobuf.Timestamp detected_at = 6;
+}

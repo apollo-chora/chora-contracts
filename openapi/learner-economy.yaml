@@ -1,0 +1,1098 @@
+openapi: "3.2.0"
+info:
+  title: "Chora Learner Economy API"
+  version: "1.0.0"
+  description: |
+    Per-user economy REST API for the Identity supporting domain.
+
+    Covers per-user (learner / instructor) Companion subscription plans,
+    Mana balance + ledger, one-time top-ups, and KYC verification
+    (Singpass / SkillsFuture / manual document upload).
+
+    Owning domain : Identity (`chora_identity` database)
+    Owning team   : Team 3 (Platform)
+    Surface       : A+ (learner self-service) + H+ (admin read mirror)
+
+    All endpoints are scoped to the authenticated GCID (Bearer JWT). The
+    `/me/...` path prefix is the canonical user-self surface — admin
+    counterparts live in `identity-admin.yaml`.
+
+    AP-01: This contract exists BEFORE implementation. Mana is the 4th
+    real-money-backed currency (distinct from XP/Coins/Reputation per
+    `feedback_companion_vs_agent`). Mana persists across subscription
+    cycles — see ADR-142 for full semantics.
+
+    Source-of-truth: `docs/architecture/adrs/adr-142-per-user-economy-mana.md`
+  contact:
+    name: "Chora Platform Team (Team 3)"
+  license:
+    name: "Proprietary"
+
+servers:
+  - url: "https://api.chora.app"
+    description: "Production"
+  - url: "http://localhost:8080"
+    description: "Local development"
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Subscription
+    description: "Per-user Companion subscription management (3-tier plans)"
+  - name: Mana
+    description: "Mana wallet balance + ledger (4th currency, real-money-backed)"
+  - name: Topup
+    description: "One-time mana top-up purchases"
+  - name: KYC
+    description: "Identity verification (Singpass / SkillsFuture / manual document)"
+  - name: Marketplace
+    description: "Companion plan catalog + KYC pricing"
+  - name: Health
+    description: "Health check"
+
+paths:
+  /api/v1/me/subscriptions:
+    get:
+      operationId: listMySubscriptions
+      summary: "List the caller's current Companion subscriptions"
+      tags: [Subscription]
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: "Subscriptions listed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserSubscriptionListResponse"
+    post:
+      operationId: purchaseSubscription
+      summary: "Purchase a Companion subscription plan"
+      description: |
+        Creates a per-user Stripe Subscription against the caller's GCID
+        and grants the onboarding mana bonus + first monthly drip.
+        Idempotent on `Idempotency-Key` header.
+      tags: [Subscription]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PurchaseSubscriptionRequest"
+      responses:
+        "201":
+          description: "Subscription created + onboarding mana credited"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserSubscription"
+        "402":
+          $ref: "#/components/responses/PaymentRequired"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "423":
+          $ref: "#/components/responses/Locked"
+
+  /api/v1/me/subscriptions/{subscriptionId}:
+    parameters:
+      - $ref: "#/components/parameters/SubscriptionIdPath"
+    get:
+      operationId: getMySubscription
+      summary: "Get a specific subscription detail"
+      tags: [Subscription]
+      responses:
+        "200":
+          description: "Subscription found"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserSubscription"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: changeSubscriptionPlan
+      summary: "Change plan tier (upgrade or downgrade)"
+      description: |
+        Switches the subscription to a different tier. Stripe proration
+        applies per `proration_mode`. Mana grants follow the new tier
+        from the next billing cycle (existing balance preserved).
+      tags: [Subscription]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangeSubscriptionPlanRequest"
+      responses:
+        "200":
+          description: "Plan change accepted"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChangeSubscriptionPlanResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+    delete:
+      operationId: cancelSubscription
+      summary: "Cancel the subscription (mana persists)"
+      description: |
+        Cancels the subscription at the next billing boundary (or
+        immediately if `effective_at` is past). Mana balance is
+        PRESERVED — see ADR-142 prepaid-credit semantics. Returns the
+        subscription record with `cancelled_at` set.
+      tags: [Subscription]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CancelSubscriptionRequest"
+      responses:
+        "200":
+          description: "Cancellation accepted"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserSubscription"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/v1/me/mana:
+    get:
+      operationId: getMyMana
+      summary: "Get the caller's mana balance + subsidy breakdown"
+      tags: [Mana]
+      responses:
+        "200":
+          description: "Mana wallet snapshot"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserMana"
+
+  /api/v1/me/mana/ledger:
+    get:
+      operationId: listMyManaLedger
+      summary: "List the caller's append-only mana ledger entries"
+      description: |
+        Returns ledger entries (credit / debit / mint / refund / rollover)
+        scoped to the caller's GCID. Filters compose AND-style.
+      tags: [Mana]
+      parameters:
+        - name: from
+          in: query
+          required: false
+          description: "Inclusive ISO 8601 start (defaults to 30 days ago)"
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          description: "Exclusive ISO 8601 end (defaults to now)"
+          schema:
+            type: string
+            format: date-time
+        - name: direction
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/ManaDirection"
+        - name: reason
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/ManaReason"
+        - $ref: "#/components/parameters/Cursor"
+        - name: page_size
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        "200":
+          description: "Ledger entries returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManaLedgerListResponse"
+
+  /api/v1/me/mana/topup:
+    post:
+      operationId: topupMana
+      summary: "Purchase a one-time mana top-up"
+      description: |
+        Charges the caller's saved Stripe payment method and credits the
+        purchased mana to the user's personal balance with reason=`topup`.
+        Idempotent on `Idempotency-Key` header.
+      tags: [Topup]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ManaTopupRequest"
+      responses:
+        "201":
+          description: "Top-up successful + mana credited"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManaTopupResponse"
+        "402":
+          $ref: "#/components/responses/PaymentRequired"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "423":
+          $ref: "#/components/responses/Locked"
+
+  /api/v1/me/kyc/status:
+    get:
+      operationId: getMyKycStatus
+      summary: "Get the caller's KYC verification status"
+      tags: [KYC]
+      responses:
+        "200":
+          description: "KYC verification snapshot"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KycVerification"
+        "404":
+          description: "No KYC verification on file (caller may initiate)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/me/kyc/singpass:initiate:
+    post:
+      operationId: initiateSingpassKyc
+      summary: "Begin a Singpass MyInfo verification flow"
+      description: |
+        Returns a redirect URL to Singpass NDI. On successful callback,
+        the verification record transitions to `verified` and no fee is
+        charged (Singpass = $0). SkillsFuture entitlements auto-link
+        when the underlying NDI scope includes them.
+      tags: [KYC]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InitiateSingpassKycRequest"
+      responses:
+        "200":
+          description: "Singpass redirect URL issued"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InitiateSingpassKycResponse"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/v1/me/kyc/manual:
+    post:
+      operationId: submitManualKyc
+      summary: "Submit manual KYC documents (multipart upload)"
+      description: |
+        Accepts an identity document (front + optional back) plus an
+        optional biometric selfie. Charges the manual KYC fee per
+        ADR-142 (default $9.99). Verification SLA: ~24h. Status
+        transitions: `pending` -> `submitted` -> `verified`/`rejected`.
+      tags: [KYC]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/SubmitManualKycRequest"
+      responses:
+        "202":
+          description: "Documents accepted; verification queued"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KycVerification"
+        "402":
+          $ref: "#/components/responses/PaymentRequired"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /api/v1/me/marketplace/companion-plans:
+    get:
+      operationId: listCompanionPlans
+      summary: "Browse the 3-tier Companion plan catalog + KYC pricing"
+      description: |
+        Public catalog endpoint — does not require an authenticated
+        subscription but does require Bearer JWT (caller-aware so
+        regional pricing / promo codes can apply). Returns the 3 tiers
+        (`companion_basic`, `companion_standard`, `companion_premium`)
+        plus the KYC verification fee schedule.
+      tags: [Marketplace]
+      responses:
+        "200":
+          description: "Plan catalog returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompanionPlanCatalogResponse"
+
+  /healthz:
+    get:
+      operationId: healthCheck
+      summary: "Health check"
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: "Healthy"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: "JWT issued by Identity Platform"
+
+  parameters:
+    SubscriptionIdPath:
+      name: subscriptionId
+      in: path
+      required: true
+      description: "User subscription UUIDv7"
+      schema:
+        type: string
+        format: uuid
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      schema:
+        type: string
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: "Client-supplied idempotency key (UUIDv7 recommended)"
+      schema:
+        type: string
+        maxLength: 64
+
+  responses:
+    NotFound:
+      description: "Resource not found"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Conflict:
+      description: "Conflict — concurrent purchase, duplicate state, or invalid transition"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ValidationError:
+      description: "Validation failed"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    PaymentRequired:
+      description: |
+        Insufficient mana OR Stripe payment failure. The `details.upsell`
+        block carries upsell context: required units, recommended plan
+        upgrade, top-up suggestion.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/InsufficientManaErrorResponse"
+    Locked:
+      description: |
+        Account is locked from purchase / KYC due to compliance hold,
+        active grace period, or saga state (e.g., CLOSING / SUSPENDED /
+        PSEUDONYMIZED).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    SubscriptionStatus:
+      type: string
+      enum:
+        - pending_activation
+        - active
+        - paused
+        - cancelled
+        - expired
+        - grace
+      description: |
+        `pending_activation` = Stripe accepted but first invoice unpaid.
+        `active` = current period valid + paid.
+        `paused` = admin / compliance hold; mana frozen.
+        `cancelled` = user-initiated; runs until current_period_end.
+        `expired` = period ended without renewal.
+        `grace` = post-payment-failure grace window.
+
+    BillingPeriod:
+      type: string
+      enum: [monthly, annually]
+
+    CompanionTier:
+      type: string
+      enum: [companion_basic, companion_standard, companion_premium]
+      description: "Stable tier code per ADR-142"
+
+    CompanionPlan:
+      type: object
+      required:
+        - plan_code
+        - tier
+        - display_name
+        - monthly_price_cents
+        - annual_price_cents
+        - currency
+        - mana_monthly_units
+        - onboarding_bonus_units
+      properties:
+        plan_code:
+          type: string
+          description: "Stable plan code (`companion_basic` / `companion_standard` / `companion_premium`)"
+        tier:
+          $ref: "#/components/schemas/CompanionTier"
+        display_name:
+          type: string
+          maxLength: 128
+        description:
+          type: string
+          description: "Marketplace copy (Markdown allowed)"
+        monthly_price_cents:
+          type: integer
+          format: int64
+          minimum: 0
+        annual_price_cents:
+          type: integer
+          format: int64
+          minimum: 0
+          description: "Annual price (~17% off vs monthly per ADR-142)"
+        currency:
+          type: string
+          minLength: 3
+          maxLength: 3
+        mana_monthly_units:
+          type: integer
+          format: int64
+          minimum: 0
+          description: "Monthly mana grant (drip; annual plans drip monthly per ADR-142)"
+        onboarding_bonus_units:
+          type: integer
+          format: int64
+          minimum: 0
+          description: "One-time bonus mana credited at first activation"
+        cosmetic_skin_codes:
+          type: array
+          items:
+            type: string
+          description: "Optional cosmetic DigitalSkin grants (premium tier may include 2)"
+
+    UserSubscription:
+      type: object
+      required:
+        - subscription_id
+        - gcid
+        - tenant_id
+        - plan_code
+        - tier
+        - status
+        - billing_period
+        - current_period_start
+        - current_period_end
+        - created_at
+      properties:
+        subscription_id:
+          type: string
+          format: uuid
+        gcid:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+          description: "Active tenant context (membership scope) at time of purchase"
+        plan_code:
+          type: string
+        tier:
+          $ref: "#/components/schemas/CompanionTier"
+        status:
+          $ref: "#/components/schemas/SubscriptionStatus"
+        billing_period:
+          $ref: "#/components/schemas/BillingPeriod"
+        current_period_start:
+          type: string
+          format: date-time
+        current_period_end:
+          type: string
+          format: date-time
+        stripe_subscription_id:
+          type: string
+        cancelled_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    UserSubscriptionListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/UserSubscription"
+        next_cursor:
+          type: string
+          nullable: true
+
+    PurchaseSubscriptionRequest:
+      type: object
+      required: [plan_code, billing_period, payment_method_id]
+      properties:
+        plan_code:
+          type: string
+        billing_period:
+          $ref: "#/components/schemas/BillingPeriod"
+        payment_method_id:
+          type: string
+          description: "Stripe PaymentMethod ID (collected via Stripe Elements client-side)"
+        promo_code:
+          type: string
+          maxLength: 64
+          nullable: true
+
+    ChangeSubscriptionPlanRequest:
+      type: object
+      required: [target_plan_code, proration_mode]
+      properties:
+        target_plan_code:
+          type: string
+        target_billing_period:
+          $ref: "#/components/schemas/BillingPeriod"
+        proration_mode:
+          type: string
+          enum: [create_prorations, none]
+          description: |
+            `create_prorations` = Stripe `proration_behavior=create_prorations`
+            (mid-cycle credit/charge). `none` = honour new price next renewal.
+        effective_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: "ISO 8601; if set, scheduled via Stripe subscription_schedule"
+
+    ChangeSubscriptionPlanResponse:
+      type: object
+      required:
+        - subscription_id
+        - from_plan_code
+        - to_plan_code
+        - billing_delta_cents
+        - effective_at
+      properties:
+        subscription_id:
+          type: string
+          format: uuid
+        from_plan_code:
+          type: string
+        to_plan_code:
+          type: string
+        billing_delta_cents:
+          type: integer
+          format: int64
+          description: |
+            Net change in cents for current period. Positive = additional
+            charge (upgrade). Negative = credit (downgrade). Zero = no
+            proration applied.
+        effective_at:
+          type: string
+          format: date-time
+        schedule_id:
+          type: string
+          nullable: true
+          description: "Stripe subscription_schedule ID when scheduled"
+
+    CancelSubscriptionRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          maxLength: 512
+        effective_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: "ISO 8601; if null, cancels at current_period_end"
+
+    ManaDirection:
+      type: string
+      enum: [credit, debit, mint, refund, rollover]
+      description: |
+        `credit` = balance increases (subscription grant / topup / promo / subsidy).
+        `debit`  = balance decreases (companion action).
+        `mint`   = system-issued grant (admin / promo / migration).
+        `refund` = compensation for failed action (reverses a prior debit).
+        `rollover` = period boundary rollover (annual -> monthly drip carry).
+
+    ManaReason:
+      type: string
+      enum:
+        - subscription_grant
+        - companion_action
+        - refund
+        - account_closure
+        - promo
+        - tenant_subsidy
+        - topup
+        - rollover
+      description: |
+        Audit-grade reason code on each ledger entry. `tenant_subsidy`
+        denotes a credit sourced from a `TenantManaPool` allocation (see
+        tenancy-admin.yaml v1.2).
+
+    ManaSubsidySource:
+      type: string
+      enum: [tenant_subsidy, subscription, topup, promo, rollover]
+
+    ManaSubsidyBreakdown:
+      type: object
+      required: [units, source]
+      description: |
+        Per-source slice of the user's spendable mana balance. Subsidy
+        sources are listed FIRST in deterministic FIFO spend order
+        (`expires_at ASC NULLS LAST`, `allocated_at ASC` per ADR-142).
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: "Set only when source=tenant_subsidy"
+        units:
+          type: integer
+          format: int64
+          minimum: 0
+        source:
+          $ref: "#/components/schemas/ManaSubsidySource"
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    UserMana:
+      type: object
+      required: [balance_units, lifetime_earned, lifetime_spent]
+      properties:
+        gcid:
+          type: string
+          format: uuid
+        balance_units:
+          type: integer
+          format: int64
+          minimum: 0
+          description: "Total spendable units across all subsidies + personal balance"
+        lifetime_earned:
+          type: integer
+          format: int64
+          minimum: 0
+        lifetime_spent:
+          type: integer
+          format: int64
+          minimum: 0
+        last_credited_at:
+          type: string
+          format: date-time
+          nullable: true
+        subsidy_breakdown:
+          type: array
+          items:
+            $ref: "#/components/schemas/ManaSubsidyBreakdown"
+          description: "Per-source slices summing to balance_units"
+
+    ManaLedgerEntry:
+      type: object
+      required:
+        - entry_id
+        - gcid
+        - direction
+        - units
+        - reason
+        - recorded_at
+      properties:
+        entry_id:
+          type: string
+          format: uuid
+        gcid:
+          type: string
+          format: uuid
+        direction:
+          $ref: "#/components/schemas/ManaDirection"
+        units:
+          type: integer
+          format: int64
+          minimum: 0
+        reason:
+          $ref: "#/components/schemas/ManaReason"
+        source_subscription_id:
+          type: string
+          format: uuid
+          nullable: true
+        source_action_id:
+          type: string
+          nullable: true
+          description: "Action code (e.g., `companion_chat`, `question_generation`) when reason=companion_action"
+        source_allocation_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: "TenantManaAllocation UUID when reason=tenant_subsidy"
+        source_topup_id:
+          type: string
+          format: uuid
+          nullable: true
+        balance_after_units:
+          type: integer
+          format: int64
+          nullable: true
+          description: "Optional snapshot of post-entry balance for fast UI rendering"
+        recorded_at:
+          type: string
+          format: date-time
+
+    ManaLedgerListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ManaLedgerEntry"
+        next_cursor:
+          type: string
+          nullable: true
+
+    ManaTopupRequest:
+      type: object
+      required: [amount_cents, currency, payment_method_id]
+      properties:
+        amount_cents:
+          type: integer
+          format: int64
+          minimum: 100
+          description: "Charge amount in minor units (>= $1.00)"
+        currency:
+          type: string
+          minLength: 3
+          maxLength: 3
+        payment_method_id:
+          type: string
+          description: "Stripe PaymentMethod ID"
+        promo_code:
+          type: string
+          maxLength: 64
+          nullable: true
+
+    ManaTopupResponse:
+      type: object
+      required: [topup_id, gcid, units_credited, charged_cents, currency]
+      properties:
+        topup_id:
+          type: string
+          format: uuid
+        gcid:
+          type: string
+          format: uuid
+        units_credited:
+          type: integer
+          format: int64
+          minimum: 1
+        charged_cents:
+          type: integer
+          format: int64
+        currency:
+          type: string
+        stripe_payment_intent_id:
+          type: string
+        ledger_entry_id:
+          type: string
+          format: uuid
+          description: "ID of the mana_ledger row created by this top-up"
+        recorded_at:
+          type: string
+          format: date-time
+
+    KycMethod:
+      type: string
+      enum: [singpass, skillsfuture, manual_doc]
+
+    KycStatus:
+      type: string
+      enum: [pending, submitted, verified, rejected, expired]
+
+    KycAuditEntry:
+      type: object
+      required: [event, occurred_at]
+      properties:
+        event:
+          type: string
+          description: "Audit event code (e.g., `submitted`, `provider_callback`, `manual_review_passed`)"
+        actor_gcid:
+          type: string
+          format: uuid
+          nullable: true
+          description: "Reviewer GCID for manual events; null for system events"
+        notes:
+          type: string
+          maxLength: 1024
+        occurred_at:
+          type: string
+          format: date-time
+
+    KycVerification:
+      type: object
+      required: [verification_id, gcid, method, status]
+      properties:
+        verification_id:
+          type: string
+          format: uuid
+        gcid:
+          type: string
+          format: uuid
+        method:
+          $ref: "#/components/schemas/KycMethod"
+        status:
+          $ref: "#/components/schemas/KycStatus"
+        provider:
+          type: string
+          description: "Backend provider code (e.g., `ndi`, `skillsfuture_api`, `internal_review`)"
+        document_uri:
+          type: string
+          format: uri
+          nullable: true
+          description: "Cloud Storage URI of submitted document (manual_doc only)"
+        verified_at:
+          type: string
+          format: date-time
+          nullable: true
+        rejected_reason:
+          type: string
+          maxLength: 512
+          nullable: true
+        fee_charged_cents:
+          type: integer
+          format: int64
+          nullable: true
+          description: "$0 for singpass / skillsfuture; manual_doc default $9.99 per ADR-142"
+        currency:
+          type: string
+          nullable: true
+        audit_log:
+          type: array
+          items:
+            $ref: "#/components/schemas/KycAuditEntry"
+
+    InitiateSingpassKycRequest:
+      type: object
+      properties:
+        return_url:
+          type: string
+          format: uri
+          description: "URL Singpass redirects to on success/cancel"
+        request_skillsfuture_scope:
+          type: boolean
+          default: false
+          description: "If true, also request SkillsFuture entitlement scope"
+
+    InitiateSingpassKycResponse:
+      type: object
+      required: [redirect_url, state, verification_id]
+      properties:
+        redirect_url:
+          type: string
+          format: uri
+          description: "Singpass NDI authorisation URL"
+        state:
+          type: string
+          description: "Opaque state token (CSRF / replay protection)"
+        verification_id:
+          type: string
+          format: uuid
+          description: "Pending KycVerification UUID"
+
+    SubmitManualKycRequest:
+      type: object
+      required: [document_front, document_type]
+      description: |
+        Multipart form. `document_front` is required; `document_back` and
+        `selfie` are optional but boost auto-acceptance probability.
+      properties:
+        document_type:
+          type: string
+          enum: [passport, national_id, driving_licence]
+        document_front:
+          type: string
+          format: binary
+          description: "Front of the identity document (JPEG / PNG / PDF)"
+        document_back:
+          type: string
+          format: binary
+          description: "Back of the document (when applicable)"
+        selfie:
+          type: string
+          format: binary
+          description: "Optional biometric selfie for liveness check"
+        full_legal_name:
+          type: string
+          maxLength: 256
+        date_of_birth:
+          type: string
+          format: date
+        nationality:
+          type: string
+          minLength: 2
+          maxLength: 2
+          description: "ISO 3166-1 alpha-2"
+        payment_method_id:
+          type: string
+          description: "Stripe PaymentMethod ID for the manual KYC fee charge"
+
+    KycPricingEntry:
+      type: object
+      required: [method, fee_cents, currency]
+      properties:
+        method:
+          $ref: "#/components/schemas/KycMethod"
+        fee_cents:
+          type: integer
+          format: int64
+          minimum: 0
+        currency:
+          type: string
+        eligibility_note:
+          type: string
+          description: "Human-readable eligibility hint (e.g., `SG residents only`)"
+
+    CompanionPlanCatalogResponse:
+      type: object
+      required: [plans, kyc_pricing]
+      properties:
+        plans:
+          type: array
+          items:
+            $ref: "#/components/schemas/CompanionPlan"
+        kyc_pricing:
+          type: array
+          items:
+            $ref: "#/components/schemas/KycPricingEntry"
+
+    InsufficientManaUpsell:
+      type: object
+      required: [required_units, current_balance_units]
+      description: "Upsell context returned in 402 responses"
+      properties:
+        required_units:
+          type: integer
+          format: int64
+          minimum: 0
+        current_balance_units:
+          type: integer
+          format: int64
+          minimum: 0
+        recommended_plan_code:
+          type: string
+          nullable: true
+        recommended_topup_units:
+          type: integer
+          format: int64
+          nullable: true
+
+    InsufficientManaErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum: [insufficient_mana, payment_failed, payment_method_declined]
+            message:
+              type: string
+            correlation_id:
+              type: string
+              format: uuid
+            upsell:
+              $ref: "#/components/schemas/InsufficientManaUpsell"
+
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [healthy, degraded]
+        version:
+          type: string
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            correlation_id:
+              type: string
+              format: uuid
+            details:
+              type: object

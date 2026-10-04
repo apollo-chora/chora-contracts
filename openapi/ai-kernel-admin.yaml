@@ -1,0 +1,682 @@
+openapi: "3.2.0"
+info:
+  title: "Chora AI Kernel Admin API"
+  version: "1.0.0"
+  description: |
+    Admin-only REST API for the AI Kernel supporting domain.
+
+    Covers model invocation history, per-agent guardrail YAML config
+    management, crew composition snapshot, LoRA adapter management.
+
+    Owning domain : AI Kernel (`chora_ai_kernel` database)
+    Owning team   : Team 3 (Platform)
+    Surface       : O+ Observability+ (admin + auditor read-only)
+
+    Auditor role gets read-only access on every endpoint; only ADMIN /
+    OWNER may upload guardrail YAML, mutate crew composition, or
+    promote LoRA deployments.
+  contact:
+    name: "Chora Platform Team (Team 3)"
+  license:
+    name: "Proprietary"
+
+servers:
+  - url: "https://api.chora.app"
+    description: "Production"
+  - url: "http://localhost:8080"
+    description: "Local development"
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Invocation
+    description: "Model invocation history"
+  - name: Guardrail
+    description: "Per-agent guardrail YAML config"
+  - name: Crew
+    description: "Crew composition snapshots"
+  - name: Lora
+    description: "LoRA adapter management"
+  - name: Health
+    description: "Health check"
+
+paths:
+  /api/v1/admin/invocations:
+    get:
+      operationId: queryInvocations
+      summary: "Query model invocation history"
+      tags: [Invocation]
+      parameters:
+        - $ref: "#/components/parameters/AgidQuery"
+        - $ref: "#/components/parameters/ModelIdQuery"
+        - $ref: "#/components/parameters/ModelKindQuery"
+        - $ref: "#/components/parameters/InvocationStatusQuery"
+        - $ref: "#/components/parameters/FromQuery"
+        - $ref: "#/components/parameters/ToQuery"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: "Invocations listed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InvocationListResponse"
+
+  /api/v1/admin/invocations/{invocationId}:
+    parameters:
+      - name: invocationId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getInvocation
+      summary: "Get an invocation with linked guardrail evals + decisions"
+      tags: [Invocation]
+      responses:
+        "200":
+          description: "Invocation found"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InvocationDetail"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/admin/agents/{agid}/guardrail-config:
+    parameters:
+      - $ref: "#/components/parameters/AgidPath"
+    get:
+      operationId: getGuardrailConfig
+      summary: "Get the active guardrail YAML config for an agent"
+      tags: [Guardrail]
+      responses:
+        "200":
+          description: "Config retrieved"
+          content:
+            application/x-yaml:
+              schema:
+                type: string
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GuardrailConfigResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      operationId: uploadGuardrailConfig
+      summary: "Upload (replace) the per-agent guardrail YAML config"
+      description: |
+        Upload a new per-agent guardrail YAML declaring tier composition
+        (regex / DLP / Model Armor / output validators). New config is
+        validated then activated. Emits a PolicyPublished if applicable.
+      tags: [Guardrail]
+      requestBody:
+        required: true
+        content:
+          application/x-yaml:
+            schema:
+              type: string
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UploadGuardrailConfigRequest"
+      responses:
+        "200":
+          description: "Config activated"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GuardrailConfigResponse"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /api/v1/admin/crews:
+    get:
+      operationId: listCrews
+      summary: "List crew runs (snapshot)"
+      tags: [Crew]
+      parameters:
+        - $ref: "#/components/parameters/CrewKindQuery"
+        - $ref: "#/components/parameters/DomainQuery"
+        - $ref: "#/components/parameters/FromQuery"
+        - $ref: "#/components/parameters/ToQuery"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: "Crews listed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CrewListResponse"
+
+  /api/v1/admin/crews/{crewId}:
+    parameters:
+      - name: crewId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getCrew
+      summary: "Get a crew composition snapshot with member history"
+      tags: [Crew]
+      responses:
+        "200":
+          description: "Crew detail"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CrewDetail"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/admin/lora/adapters:
+    get:
+      operationId: listLoraAdapters
+      summary: "List LoRA adapters (filtered)"
+      tags: [Lora]
+      parameters:
+        - $ref: "#/components/parameters/TenantIdQuery"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: "Adapters listed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoraAdapterListResponse"
+
+  /api/v1/admin/lora/adapters/{adapterId}:
+    parameters:
+      - name: adapterId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getLoraAdapter
+      summary: "Get a LoRA adapter with deployment history"
+      tags: [Lora]
+      responses:
+        "200":
+          description: "Adapter found"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoraAdapterDetail"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/admin/lora/adapters/{adapterId}/deployments:
+    parameters:
+      - name: adapterId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: deployLoraAdapter
+      summary: "Promote a deployment to a target"
+      tags: [Lora]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeployLoraAdapterRequest"
+      responses:
+        "201":
+          description: "Deployment promoted"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoraDeployment"
+
+  /api/v1/admin/lora/adapters/{adapterId}/retire:
+    parameters:
+      - name: adapterId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: retireLoraAdapter
+      summary: "Retire a LoRA adapter"
+      tags: [Lora]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RetireLoraAdapterRequest"
+      responses:
+        "200":
+          description: "Adapter retired"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoraAdapterDetail"
+
+  /healthz:
+    get:
+      operationId: healthCheck
+      summary: "Health check"
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: "Healthy"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    AgidPath:
+      name: agid
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    AgidQuery:
+      name: agid
+      in: query
+      required: false
+      schema:
+        type: string
+        format: uuid
+    ModelIdQuery:
+      name: model_id
+      in: query
+      required: false
+      schema:
+        type: string
+    ModelKindQuery:
+      name: model_kind
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [GEMINI_FLASH, GEMINI_PRO, GEMMA_TENANT_LORA, EMBEDDING, CLASSIFIER]
+    InvocationStatusQuery:
+      name: status
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [INVOKED, COMPLETED, FAILED]
+    CrewKindQuery:
+      name: crew_kind
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [FIXED_CORE_PER_DOMAIN, DYNAMIC_SPECIALIST]
+    DomainQuery:
+      name: domain
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [creation, consumption, delivery, sharing, a2a]
+    TenantIdQuery:
+      name: tenant_id
+      in: query
+      required: false
+      schema:
+        type: string
+        format: uuid
+    FromQuery:
+      name: from
+      in: query
+      required: false
+      schema:
+        type: string
+        format: date-time
+    ToQuery:
+      name: to
+      in: query
+      required: false
+      schema:
+        type: string
+        format: date-time
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      schema:
+        type: string
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+
+  responses:
+    NotFound:
+      description: "Resource not found"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ValidationError:
+      description: "Validation failed"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    Invocation:
+      type: object
+      required: [invocation_id, agid, model_id, model_kind, status]
+      properties:
+        invocation_id:
+          type: string
+          format: uuid
+        agid:
+          type: string
+          format: uuid
+        model_id:
+          type: string
+        model_kind:
+          type: string
+          enum: [GEMINI_FLASH, GEMINI_PRO, GEMMA_TENANT_LORA, EMBEDDING, CLASSIFIER]
+        status:
+          type: string
+          enum: [INVOKED, COMPLETED, FAILED]
+        latency_ms:
+          type: integer
+          format: int64
+        tokens_in:
+          type: integer
+          format: int64
+        tokens_out:
+          type: integer
+          format: int64
+        invoked_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+        error_code:
+          type: string
+          nullable: true
+
+    InvocationListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Invocation"
+        next_cursor:
+          type: string
+          nullable: true
+
+    InvocationDetail:
+      allOf:
+        - $ref: "#/components/schemas/Invocation"
+        - type: object
+          properties:
+            guardrail_evals:
+              type: array
+              items:
+                $ref: "#/components/schemas/GuardrailEvalSummary"
+            agent_decisions:
+              type: array
+              items:
+                type: object
+                properties:
+                  decision_id:
+                    type: string
+                    format: uuid
+                  decision_kind:
+                    type: string
+                    enum: [CLASSIFY, ROUTE, GENERATE, CRITIQUE, REFINE, BLOCK]
+
+    GuardrailEvalSummary:
+      type: object
+      required: [eval_id, tier, result]
+      properties:
+        eval_id:
+          type: string
+          format: uuid
+        tier:
+          type: string
+          enum: [REGEX, DLP, MODEL_ARMOR, OUTPUT_VALIDATOR]
+        result:
+          type: string
+          enum: [PASS, BLOCK, REDACT, FLAG]
+        violation_type:
+          type: string
+        latency_ms:
+          type: integer
+          format: int64
+
+    GuardrailConfigResponse:
+      type: object
+      required: [agid, version, yaml]
+      properties:
+        agid:
+          type: string
+          format: uuid
+        version:
+          type: string
+        yaml:
+          type: string
+          description: "Verbatim YAML config text"
+        activated_at:
+          type: string
+          format: date-time
+
+    UploadGuardrailConfigRequest:
+      type: object
+      required: [yaml]
+      properties:
+        yaml:
+          type: string
+        comment:
+          type: string
+          maxLength: 512
+
+    Crew:
+      type: object
+      required: [crew_id, crew_kind, domain, member_agids]
+      properties:
+        crew_id:
+          type: string
+          format: uuid
+        crew_kind:
+          type: string
+          enum: [FIXED_CORE_PER_DOMAIN, DYNAMIC_SPECIALIST]
+        domain:
+          type: string
+        member_agids:
+          type: array
+          items:
+            type: string
+            format: uuid
+        composed_at:
+          type: string
+          format: date-time
+        executed_at:
+          type: string
+          format: date-time
+          nullable: true
+        outcome:
+          type: string
+
+    CrewListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Crew"
+        next_cursor:
+          type: string
+          nullable: true
+
+    CrewDetail:
+      allOf:
+        - $ref: "#/components/schemas/Crew"
+        - type: object
+          properties:
+            swap_history:
+              type: array
+              items:
+                type: object
+                properties:
+                  removed_agid:
+                    type: string
+                    format: uuid
+                  added_agid:
+                    type: string
+                    format: uuid
+                  reason:
+                    type: string
+                  swapped_at:
+                    type: string
+                    format: date-time
+            invocation_count:
+              type: integer
+            total_cost_micros:
+              type: integer
+              format: int64
+
+    LoraAdapter:
+      type: object
+      required: [adapter_id, tenant_id, base_model_id, version, status]
+      properties:
+        adapter_id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        base_model_id:
+          type: string
+        version:
+          type: string
+        status:
+          type: string
+          enum: [TRAINED, DEPLOYED, RETIRED]
+        eval_score:
+          type: number
+          format: float
+        weights_uri:
+          type: string
+        trained_at:
+          type: string
+          format: date-time
+
+    LoraAdapterListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/LoraAdapter"
+        next_cursor:
+          type: string
+          nullable: true
+
+    LoraAdapterDetail:
+      allOf:
+        - $ref: "#/components/schemas/LoraAdapter"
+        - type: object
+          properties:
+            deployments:
+              type: array
+              items:
+                $ref: "#/components/schemas/LoraDeployment"
+            successor_adapter_id:
+              type: string
+              format: uuid
+              nullable: true
+
+    LoraDeployment:
+      type: object
+      required: [deployment_target, deployment_resource_name, deployed_at]
+      properties:
+        deployment_target:
+          type: string
+          enum: [VERTEX_ENDPOINT, CLOUD_RUN_GPU, AUTOPILOT_GPU]
+        deployment_resource_name:
+          type: string
+        deployed_at:
+          type: string
+          format: date-time
+        retired_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    DeployLoraAdapterRequest:
+      type: object
+      required: [deployment_target]
+      properties:
+        deployment_target:
+          type: string
+          enum: [VERTEX_ENDPOINT, CLOUD_RUN_GPU, AUTOPILOT_GPU]
+
+    RetireLoraAdapterRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          maxLength: 512
+        successor_adapter_id:
+          type: string
+          format: uuid
+          nullable: true
+
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            correlation_id:
+              type: string
+              format: uuid

@@ -1,0 +1,88 @@
+// =============================================================================
+// chora.tenancy.v1 — Tenant external web-egress policy events
+// =============================================================================
+//
+// Source-of-truth : PLAN.md §4.2.4 "Egress governance model" (resolved 2026-07-11)
+// ADRs            : ADR-220 D4 (tenant gating; franchise default OFF)
+//                   ADR-231 D6 (fail-closed gateway egress gate + O+ kill-switch)
+// Story           : CHO-2148
+//
+// Owning domain : Tenancy + Billing (chora_tenancy database)
+// Owning team   : Team 3 (Platform)
+// Topic prefix  : chora.tenancy.external_egress_policy.*
+//
+// WHY THIS EVENT EXISTS — it is the ONLY bridge between two databases.
+//
+// chora-tenancy owns the external-egress entitlement (deterministic tenant
+// administration; the Tenant Admin sets it in H+). The model-gateway, however,
+// must consult it fail-closed on EVERY grounded-search call, and it reads from
+// chora_observability.external_egress_policy — a different database.
+//
+// Cross-DB queries and writes are FORBIDDEN (13-DB topology,
+// .claude/rules/ddd-enforcement.md), so chora-tenancy CANNOT write that table.
+// It publishes this event instead, and a chora-observability subscriber projects
+// it into the read-copy. Break this event and the gateway silently keeps serving
+// a stale entitlement — which is why the projection carries `version` (below).
+//
+// SAFETY POSTURE — default-deny. A tenant with NO row in either database is OFF.
+// Franchise tenants (schools, minors) therefore need no seeding: absence IS the
+// denial. This event never needs to be published to keep a tenant OFF.
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.tenancy.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/tenancy/v1;tenancyv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// ExternalEgressPolicyUpdated — chora.tenancy.external_egress_policy.updated.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a Tenant Admin changes their tenant's external web-egress
+// entitlement (opt in, opt out, or retune the daily grounded-call ceiling).
+//
+// Published ONLY on a REAL change — an identical write is a no-op in the
+// aggregate and emits nothing, so this topic carries decisions, not noise.
+//
+// Consumers:
+//   - chora-observability — PROJECTS this into external_egress_policy (the
+//     read-copy the model-gateway consults per grounded call) and records the
+//     audit trail from the actor + before/after fields below.
+message ExternalEgressPolicyUpdated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string tenant_id = 2;
+
+  // The new state.
+  bool  egress_enabled     = 3;
+  int32 daily_call_ceiling = 4;
+
+  // MONOTONIC VERSION — the stale-event guard. Increments only on a real change.
+  //
+  // Pub/Sub is at-least-once and NOT order-preserving, so a slow retry of an
+  // older change can arrive AFTER a newer one. The projection MUST compare this
+  // against the version it has already applied and DISCARD anything that is not
+  // strictly newer. Without this, a redelivered "egress ON" could silently
+  // resurrect an entitlement the tenant has since turned OFF — the exact
+  // failure the fail-closed posture exists to prevent.
+  int64 version = 5;
+
+  // The admin who made the change. External web egress is governance-sensitive:
+  // every change names its actor so the trail can always answer "who turned this
+  // on, for which tenant, when" (IMDA D1 accountability).
+  string updated_by_gcid = 6;
+
+  // Before-state, carried so the consumer can write a complete audit row without
+  // a cross-DB read back into chora_tenancy. On the FIRST opt-in (no prior row)
+  // these carry the default-deny defaults: previous_egress_enabled = false.
+  bool  previous_egress_enabled     = 7;
+  int32 previous_daily_call_ceiling = 8;
+
+  google.protobuf.Timestamp updated_at = 9;
+}

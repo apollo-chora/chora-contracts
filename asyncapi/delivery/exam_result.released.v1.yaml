@@ -1,0 +1,97 @@
+asyncapi: "3.0.0"
+info:
+  title: "chora.delivery.exam_result.released.v1"
+  version: "1.0.0"
+  description: |
+    Published when a candidate's ExamResult is FINALISED against a
+    revision-pinned, exposure-locked ExamForm (the pure cut-score → PASS/FAIL
+    verdict). The Delivery-side outcome-event contract (ADR-190 D1) — the
+    outcome-spine / certificate seam (W6). FK-less; the durable exam_results row
+    is the source of truth. No consumer yet (cert-from-exam is unbuilt).
+
+    DISTINCT from `chora.delivery.exam.graded.v1` (ExamGraded): that is the seed
+    proctored-exam admin lifecycle keyed by candidate_gcid; THIS is the W4
+    ExamForm/ExamResult bounded context (ADR-190 D2) keyed by candidate_ref +
+    exam_form_id, carrying the exact scoring facts (raw/max/cut).
+
+    Companion to `proto/events/delivery/exam_result.proto` message
+    `ExamResultReleased`.
+  contact: { name: "Chora Platform Team" }
+  license: { name: "Proprietary" }
+
+defaultContentType: application/x-protobuf
+
+servers:
+  local: { host: "localhost:8085", protocol: googlepubsub, description: "Pub/Sub Emulator" }
+  production: { host: "pubsub.googleapis.com", protocol: googlepubsub, description: "Google Cloud Pub/Sub" }
+
+channels:
+  examResultReleased:
+    address: chora.delivery.exam_result.released.v1
+    description: |
+      Carries ExamResultReleased Protobuf payload.
+
+      Downstream consumers (future — none wired yet):
+        - chora-delivery (cert issuer) : trigger cert flow on PASS
+        - chora-consumption            : per-learner transcript / path completion
+        - chora-notifications          : result notification
+    messages:
+      examResultReleased:
+        $ref: "#/components/messages/ExamResultReleased"
+
+operations:
+  publishExamResultReleased:
+    action: send
+    channel: { $ref: "#/channels/examResultReleased" }
+    summary: "Publish ExamResultReleased"
+    messages: [ { $ref: "#/channels/examResultReleased/messages/examResultReleased" } ]
+  consumeExamResultReleased:
+    action: receive
+    channel: { $ref: "#/channels/examResultReleased" }
+    summary: "Consume ExamResultReleased"
+    messages: [ { $ref: "#/channels/examResultReleased/messages/examResultReleased" } ]
+
+components:
+  messages:
+    ExamResultReleased:
+      name: ExamResultReleased
+      title: "Exam Result Released"
+      summary: "A candidate's exam result was finalised (PASS/FAIL)."
+      contentType: application/x-protobuf
+      payload:
+        type: object
+        description: "Mirrors chora.delivery.v1.ExamResultReleased."
+        properties:
+          envelope: { $ref: "#/components/schemas/EventEnvelope" }
+          result_id: { type: string, format: uuid }
+          exam_id: { type: string, format: uuid }
+          exam_form_id: { type: string, format: uuid }
+          candidate_ref: { type: string, format: uuid }
+          tenant_id: { type: string }
+          outcome: { $ref: "#/components/schemas/ExamResultOutcome" }
+          raw_score: { type: integer, minimum: 0 }
+          max_score: { type: integer, minimum: 0 }
+          cut_score: { type: integer, minimum: 0 }
+          scored_at: { type: string, format: date-time }
+  schemas:
+    EventEnvelope:
+      type: object
+      description: "Mirrors chora.common.v1.EventEnvelope."
+      required: [event_id, idempotency_key, tenant_id, occurred_at, published_at, traceparent, source_project, source_service, schema_version]
+      properties:
+        event_id: { type: string, format: uuid }
+        idempotency_key: { type: string }
+        tenant_id: { type: string }
+        gcid: { type: string }
+        occurred_at: { type: string, format: date-time }
+        published_at: { type: string, format: date-time }
+        traceparent: { type: string }
+        tracestate: { type: string }
+        source_project: { type: string }
+        source_service: { type: string }
+        schema_version: { type: integer }
+        correlation_id: { type: string }
+        causation_id: { type: string }
+    ExamResultOutcome:
+      type: string
+      enum: [EXAM_RESULT_OUTCOME_UNSPECIFIED, EXAM_RESULT_OUTCOME_PASS, EXAM_RESULT_OUTCOME_FAIL]

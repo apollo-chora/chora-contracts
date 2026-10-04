@@ -1,0 +1,130 @@
+// =============================================================================
+// Chora Agent-to-Agent — ExternalAgentIdentity events
+// =============================================================================
+//
+// Aggregate root: ExternalAgentIdentity (registered external agent).
+// Owning domain : Agent-to-Agent (chora_a2a DB).
+// Owning team   : Team 3 (Platform)
+// Topic prefix  : chora.a2a.external_agent.*
+//
+// Source-of-truth:
+//   - docs/architecture/adrs/adr-132-a2a-protocol-integration.md (§2, §3)
+//   - .claude/skills/domain-a2a/SKILL.md
+//
+// IDENTITY MODEL:
+//   - external_agid is an AGID (UUIDv7), NOT a GCID.
+//   - The owning organization is identified by name + domain (verified DNS).
+//   - public_key is Ed25519 PEM — used to verify JWS signatures on every
+//     A2A invocation per ADR-132 §8.
+//   - Trust level is platform-managed; trust transitions emit fresh events.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.a2a.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/a2a/v1;a2av1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// TrustLevel — trust ladder for an ExternalAgent.
+// -----------------------------------------------------------------------------
+//
+// UNTRUSTED — default for newly registered agents; can call only public
+//             read-only capabilities. Rate-limited aggressively.
+// BASIC     — DNS-domain-verified org. Can call low-sensitivity contracts.
+// VERIFIED  — platform_ops manually approved. Standard partner contracts.
+// PARTNER   — strategic partner. Highest trust + elevated rate limits +
+//             priority queue.
+enum TrustLevel {
+  TRUST_LEVEL_UNSPECIFIED = 0;
+  TRUST_LEVEL_UNTRUSTED = 1;
+  TRUST_LEVEL_BASIC = 2;
+  TRUST_LEVEL_VERIFIED = 3;
+  TRUST_LEVEL_PARTNER = 4;
+}
+
+// -----------------------------------------------------------------------------
+// ExternalAgentRegistered — chora.a2a.external_agent.registered.v1
+// -----------------------------------------------------------------------------
+//
+// Published after a successful registration handshake. Initial trust_level
+// is always UNTRUSTED — promotion requires platform_ops action which emits
+// a follow-up registered event with the new trust level (additive within v1).
+message ExternalAgentRegistered {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — the AGID assigned to this external agent.
+  string external_agid = 2;
+
+  // Owner organization display name (max 200 chars).
+  string owner_org_name = 3;
+
+  // Verified DNS domain of the owner org (e.g., "acme.edu").
+  string owner_org_domain = 4;
+
+  // Ed25519 public key in PEM format for JWS signature verification.
+  string public_key = 5;
+
+  // SHA-256 hex fingerprint of public_key (denormalised for fast lookups).
+  string public_key_fingerprint = 6;
+
+  TrustLevel trust_level = 7;
+
+  google.protobuf.Timestamp registered_at = 8;
+}
+
+// -----------------------------------------------------------------------------
+// ExternalAgentDeregistered — chora.a2a.external_agent.deregistered.v1
+// -----------------------------------------------------------------------------
+//
+// Published when an external agent is permanently removed (soft-delete).
+// All open A2AInvocations involving the agent are force-FAILED; all
+// A2AContracts pinned to it transition to REVOKED automatically.
+message ExternalAgentDeregistered {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string external_agid = 2;
+  string owner_org_name = 3;
+  string owner_org_domain = 4;
+
+  // GCID of the platform_ops actor performing the deregistration. Empty
+  // when triggered by an automated rule (envelope.gcid carries rule AGID).
+  string deregistered_by_gcid = 5;
+
+  // UPPER_SNAKE_CASE reason code: "PARTNER_REQUEST", "POLICY_VIOLATION",
+  // "DOMAIN_LAPSED", "OPERATIONAL_KILL_SWITCH".
+  string reason_code = 6;
+
+  google.protobuf.Timestamp deregistered_at = 7;
+}
+
+// -----------------------------------------------------------------------------
+// ExternalAgentSuspended — chora.a2a.external_agent.suspended.v1
+// -----------------------------------------------------------------------------
+//
+// Published when an external agent is temporarily suspended (reversible).
+// In SUSPENDED state, all invocations are rejected at the A2A Gateway; the
+// AGID + key remain on file. Suspension has no automatic TTL — explicit
+// reinstatement event TBD v2.
+message ExternalAgentSuspended {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string external_agid = 2;
+  string owner_org_name = 3;
+
+  // GCID of the suspending actor (platform_ops human or automated rule).
+  string suspended_by_gcid = 4;
+
+  // UPPER_SNAKE_CASE suspension reason. Examples:
+  // "ABUSE_DETECTED", "RATE_LIMIT_BREACH", "GUARDRAIL_PATTERN",
+  // "PARTNER_REVIEW_REQUESTED", "PAYMENT_LAPSE".
+  string suspension_reason = 5;
+
+  // Optional sanitised detail (max 1024 chars).
+  string detail = 6;
+
+  google.protobuf.Timestamp suspended_at = 7;
+}

@@ -1,0 +1,80 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Consumption - daily dose recommendation (request + result)
+  version: 1.0.0
+  description: |
+    ADR-254 D1/D4 (R1): the dose recommender is dispatched through the kennel on the
+    recommend lane, never dialled over HTTP. chora-consumption publishes the request on
+    the ADR-244 trigger or a learner opening the dose, renders "preparing", and applies
+    the recommended atoms on the result. JSON-wire; envelope.idempotency_key =
+    dose_request_id. Source proto: `proto/events/consumption/dose_recommendation.proto`.
+  contact:
+    name: Chora Content Team (Team 1)
+  license:
+    name: Proprietary
+
+defaultContentType: application/json
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  doseRecommendationRequested:
+    address: chora.consumption.dose_recommendation.requested.v1
+    messages:
+      doseRecommendationRequested:
+        $ref: '#/components/messages/DoseRecommendationRequested'
+  doseRecommendationCompleted:
+    address: chora.consumption.dose_recommendation.completed.v1
+    messages:
+      doseRecommendationCompleted:
+        $ref: '#/components/messages/DoseRecommendationCompleted'
+
+operations:
+  publishDoseRecommendationRequested:
+    action: send
+    channel:
+      $ref: '#/channels/doseRecommendationRequested'
+    description: chora-consumption outbox.
+    messages:
+      - $ref: '#/channels/doseRecommendationRequested/messages/doseRecommendationRequested'
+  consumeDoseRecommendationRequested:
+    action: receive
+    channel:
+      $ref: '#/channels/doseRecommendationRequested'
+    description: the kennel generic workflow (subscription chora-ai-kernel-orchestrator.consumption-dose-recommendation-requested).
+    messages:
+      - $ref: '#/channels/doseRecommendationRequested/messages/doseRecommendationRequested'
+  publishDoseRecommendationCompleted:
+    action: send
+    channel:
+      $ref: '#/channels/doseRecommendationCompleted'
+    description: the kennel; status OK | FAILED | REJECTED.
+    messages:
+      - $ref: '#/channels/doseRecommendationCompleted/messages/doseRecommendationCompleted'
+  consumeDoseRecommendationCompleted:
+    action: receive
+    channel:
+      $ref: '#/channels/doseRecommendationCompleted'
+    description: chora-consumption (subscription chora-consumption.dose-recommendation-completed).
+    messages:
+      - $ref: '#/channels/doseRecommendationCompleted/messages/doseRecommendationCompleted'
+
+components:
+  messages:
+    DoseRecommendationRequested:
+      name: DoseRecommendationRequested
+      contentType: application/json
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/consumption/dose_recommendation.proto#/chora.consumption.v1.DoseRecommendationRequested'
+    DoseRecommendationCompleted:
+      name: DoseRecommendationCompleted
+      contentType: application/json
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/consumption/dose_recommendation.proto#/chora.consumption.v1.DoseRecommendationCompleted'

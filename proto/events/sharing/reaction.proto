@@ -1,0 +1,83 @@
+// =============================================================================
+// Chora Content Sharing — Reaction events
+// =============================================================================
+//
+// Aggregate root: Reaction (atomic positive feedback on a Post).
+// Owning domain : Content Sharing (chora_sharing DB).
+// Owning team   : Team 1 (Content)
+// Topic prefix  : chora.sharing.reaction.*
+// Surface       : C+ Connect+
+//
+// Reactions intentionally do NOT include "dislike" / "downvote" — the
+// Curiosity-Reward-Social engagement loop biases towards positive signals.
+// Negative feedback flows through PostFlagged + the moderation queue.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.sharing.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/sharing/v1;sharingv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// ReactionType — five positive-feedback emoji slots.
+// -----------------------------------------------------------------------------
+//
+// LIKE        — generic affirmation.
+// INSIGHTFUL  — "this taught me something new".
+// CURIOUS     — "this made me curious to dig deeper" (key SP-01 signal).
+// CHEER       — encouragement / support.
+// CELEBRATE   — milestone / achievement recognition.
+enum ReactionType {
+  REACTION_TYPE_UNSPECIFIED = 0;
+  REACTION_TYPE_LIKE = 1;
+  REACTION_TYPE_INSIGHTFUL = 2;
+  REACTION_TYPE_CURIOUS = 3;
+  REACTION_TYPE_CHEER = 4;
+  REACTION_TYPE_CELEBRATE = 5;
+}
+
+// -----------------------------------------------------------------------------
+// ReactionAdded — chora.sharing.reaction.added.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a learner reacts to a Post. Idempotent: a learner has at
+// most one active reaction per (post_id, reaction_type); re-adding is a no-op.
+// Consumers: Notifications (notify post author), Sharing (XP / streak rules),
+//            Observability (engagement funnel).
+message ReactionAdded {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 identifier of the Reaction record.
+  string reaction_id = 2;
+
+  // Post being reacted to (UUIDv7; same domain DB).
+  string target_post_id = 3;
+
+  // GCID of the reacting learner.
+  string actor_gcid = 4;
+
+  ReactionType reaction_type = 5;
+
+  google.protobuf.Timestamp created_at = 6;
+}
+
+// -----------------------------------------------------------------------------
+// ReactionRemoved — chora.sharing.reaction.removed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a learner withdraws a previously added Reaction (toggle off).
+// Soft-delete via deleted_at; aggregate counts decrement.
+message ReactionRemoved {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string reaction_id = 2;
+  string target_post_id = 3;
+  string actor_gcid = 4;
+  ReactionType reaction_type = 5;
+
+  google.protobuf.Timestamp removed_at = 6;
+}

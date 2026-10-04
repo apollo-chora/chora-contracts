@@ -1,0 +1,437 @@
+// =============================================================================
+// Chora Content Consumption — KnowledgeGraph events
+// =============================================================================
+//
+// Aggregate roots:
+//   - KnowledgeGraphNode + KnowledgeGraphEdge (legacy Discovery topology)
+//   - MapCluster + Exploration + HexagonNode + TrailHop
+//     (per-user hexagonal exploration fog per ADR-143)
+// Owning domain  : Content Consumption (chora_consumption DB).
+// Topic prefix   : chora.consumption.{aggregate}.*
+//
+// Discovery mode (per skill SKILL.md) uses PostgreSQL Recursive CTEs over
+// kg_node + kg_edge in chora_consumption — NOT a separate graph DB.
+// Edges are typed: prerequisite_of, extends, analogy_of, contrasts_with,
+// applied_in. Per-tenant RLS enforced on every recursive frame.
+//
+// Per ADR-143, knowledge_graph_edges (originally in chora_creation) is
+// relocated to chora_consumption and renamed atom_semantic_edges. The
+// new per-user feature adds 9 event topics covering MapCluster lifecycle,
+// Exploration lifecycle, HexagonFog cache, and JunctionDetected (when fog
+// generation finds an overlap with another of the user's active clusters).
+//
+// These events surface curiosity signals to Sharing (reputation, leaderboards)
+// and Observability (engagement analytics), and feed the AI Kernel cost
+// ledger via HexagonFogGenerated.total_cost_micros.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.consumption.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/consumption/v1;consumptionv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// =============================================================================
+// Existing legacy traversal events (PRESERVED — orthogonal to fog generation)
+// =============================================================================
+
+// KnowledgeGraphEdgeType — typed relationships between KG nodes.
+// Aligned with skill SKILL.md edge taxonomy.
+enum KnowledgeGraphEdgeType {
+  KNOWLEDGE_GRAPH_EDGE_TYPE_UNSPECIFIED = 0;
+  KNOWLEDGE_GRAPH_EDGE_TYPE_PREREQUISITE_OF = 1;
+  KNOWLEDGE_GRAPH_EDGE_TYPE_EXTENDS = 2;
+  KNOWLEDGE_GRAPH_EDGE_TYPE_ANALOGY_OF = 3;
+  KNOWLEDGE_GRAPH_EDGE_TYPE_CONTRASTS_WITH = 4;
+  KNOWLEDGE_GRAPH_EDGE_TYPE_APPLIED_IN = 5;
+}
+
+// NodeTraversed — emitted when a learner navigates to a KG node.
+//
+// Topic: chora.consumption.knowledge_graph.node_traversed.v1
+// Consumers: Sharing (curiosity reputation), Observability (discovery funnel).
+message NodeTraversed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // Traversal step ID (UUIDv7) — identifies this specific hop event.
+  string traversal_id = 2;
+
+  string learner_gcid = 3;
+
+  // Origin and destination KG nodes for this hop.
+  string source_node_id = 4;
+  string target_node_id = 5;
+
+  // The edge type the learner followed to reach the target.
+  KnowledgeGraphEdgeType edge_type = 6;
+
+  // Cumulative depth from the discovery seed (0 = seed itself, 1 = first hop).
+  int32 traversal_depth = 7;
+
+  google.protobuf.Timestamp traversed_at = 8;
+}
+
+// EdgeFollowed — emitted when a learner explicitly follows a typed edge
+// (distinct from NodeTraversed in that it is edge-centric — useful for
+// graph-edge analytics + edge weight learning).
+//
+// Topic: chora.consumption.knowledge_graph.edge_followed.v1
+// Consumers: Observability (edge popularity), AI Kernel (recommender training).
+message EdgeFollowed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string traversal_id = 2;
+  string learner_gcid = 3;
+
+  string source_node_id = 4;
+  string target_node_id = 5;
+  KnowledgeGraphEdgeType edge_type = 6;
+  int32 traversal_depth = 7;
+
+  google.protobuf.Timestamp followed_at = 8;
+}
+
+// CuriosityScoreUpdated — emitted when a learner's per-node curiosity score
+// is updated (decay + reinforcement). Anchors the Curiosity-Reward-Social
+// engagement loop primitive.
+//
+// Topic: chora.consumption.knowledge_graph.curiosity_score_updated.v1
+// Consumers: Sharing (reputation), Notifications (re-engagement nudges),
+//            AI Kernel (Recommender weighting).
+message CuriosityScoreUpdated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // Optional traversal ID linking this score change to a specific hop.
+  string traversal_id = 2;
+
+  string learner_gcid = 3;
+
+  // Node whose curiosity score is being updated.
+  string source_node_id = 4;
+
+  // Echo of target_node_id when the score change was driven by an inbound hop;
+  // empty for decay-only updates.
+  string target_node_id = 5;
+
+  // Edge type that contributed (UNSPECIFIED for decay-only updates).
+  KnowledgeGraphEdgeType edge_type = 6;
+
+  int32 traversal_depth = 7;
+
+  // Updated curiosity score (typically [0.0, 1.0]).
+  float curiosity_score = 8;
+
+  google.protobuf.Timestamp updated_at = 9;
+}
+
+// =============================================================================
+// Per-user hexagonal exploration fog events (NEW per ADR-143)
+// =============================================================================
+
+// MapClusterStatus — lifecycle status of a per-user knowledge map.
+enum MapClusterStatus {
+  MAP_CLUSTER_STATUS_UNSPECIFIED = 0;
+  MAP_CLUSTER_STATUS_ACTIVE = 1;
+  MAP_CLUSTER_STATUS_ARCHIVED = 2;
+  MAP_CLUSTER_STATUS_MERGED_INTO = 3;
+}
+
+// ExplorationStatus — lifecycle status of an exploration (seed-rooted journey
+// within a cluster).
+enum ExplorationStatus {
+  EXPLORATION_STATUS_UNSPECIFIED = 0;
+  EXPLORATION_STATUS_ACTIVE = 1;
+  EXPLORATION_STATUS_ARCHIVED = 2;
+}
+
+// FogInvalidationReason — why a hexagon fog cache row was invalidated.
+enum FogInvalidationReason {
+  FOG_INVALIDATION_REASON_UNSPECIFIED = 0;
+  FOG_INVALIDATION_REASON_ATOM_PUBLISHED = 1;
+  FOG_INVALIDATION_REASON_ATOM_REVISION_UPDATED = 2;
+  FOG_INVALIDATION_REASON_USER_RETENTION_SHIFTED = 3;
+  FOG_INVALIDATION_REASON_MANUAL_ADMIN = 4;
+  FOG_INVALIDATION_REASON_NEVER_GENERATED = 5;
+}
+
+// NeighborRelation — type of relationship from focal to a hexagon neighbor.
+// Superset of KnowledgeGraphEdgeType plus CURIOSITY_JUMP for fog-only neighbors
+// the LLM proposed without any pre-existing authoring edge.
+enum NeighborRelation {
+  NEIGHBOR_RELATION_UNSPECIFIED = 0;
+  NEIGHBOR_RELATION_PREREQUISITE_OF = 1;
+  NEIGHBOR_RELATION_EXTENDS = 2;
+  NEIGHBOR_RELATION_ANALOGY_OF = 3;
+  NEIGHBOR_RELATION_CONTRASTS_WITH = 4;
+  NEIGHBOR_RELATION_APPLIED_IN = 5;
+  NEIGHBOR_RELATION_CURIOSITY_JUMP = 6;
+}
+
+// HexagonNeighbor — one of 6 LLM-generated neighbors around a focal atom.
+// Mirrors the JSONB record stored in kg_hexagon_nodes.neighbors_json.
+message HexagonNeighbor {
+  // Cross-DB ref to chora_creation atom.
+  string atom_id = 1;
+
+  NeighborRelation relation = 2;
+
+  // LLM confidence in [0.0, 1.0]. Surfaced to user as 3-dot calibration.
+  float confidence = 3;
+
+  // Short LLM-generated teaser shown before user commits to traverse.
+  string fog_label = 4;
+
+  // True when this neighbor is a focal atom in another of the user's active
+  // clusters (set by orchestrator detect_junctions node, NOT by LLM).
+  bool is_junction = 5;
+}
+
+// MapClusterCreated — emitted when a learner creates a new knowledge map.
+//
+// Topic: chora.consumption.kg_map_cluster.created.v1
+// Consumers: Sharing (curiosity reputation seed), Observability (engagement).
+message MapClusterCreated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 of the new cluster.
+  string cluster_id = 2;
+  string user_gcid = 3;
+
+  // Original seed string (e.g., "agile").
+  string seed_topic = 4;
+  // First focal atom resolved from seed_topic via Meilisearch or LLM fallback.
+  string seed_atom_id = 5;
+  string display_name = 6;
+
+  google.protobuf.Timestamp created_at = 7;
+}
+
+// MapClusterMerged — emitted when a learner accepts a junction-prompt and
+// two clusters merge into one combined graph.
+//
+// Topic: chora.consumption.kg_map_cluster.merged.v1
+// Consumers: Sharing (cross-topic curiosity bonus), Observability,
+//            Notifications (achievement nudge).
+message MapClusterMerged {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // The cluster that absorbs the other (survivor).
+  string surviving_cluster_id = 2;
+  // The cluster being merged in (its status becomes MERGED_INTO).
+  string merged_cluster_id = 3;
+  string user_gcid = 4;
+
+  // The atom_id that triggered the merge (junction point).
+  string via_atom_id = 5;
+
+  // Post-merge display_name on the surviving cluster (default:
+  // "{seed_topic_a} + {seed_topic_b}").
+  string surviving_display_name = 6;
+
+  // Post-merge node_count (sum of the two pre-merge counts, with via_atom
+  // counted once).
+  int32 surviving_node_count = 7;
+
+  google.protobuf.Timestamp merged_at = 8;
+}
+
+// MapClusterArchived — emitted when a learner archives a knowledge map.
+// Archived clusters are read-only; sweeper soft-deletes their hex_nodes
+// after kg_fog_invalidation_grace_seconds × 12.
+//
+// Topic: chora.consumption.kg_map_cluster.archived.v1
+// Consumers: Observability.
+message MapClusterArchived {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string cluster_id = 2;
+  string user_gcid = 3;
+
+  google.protobuf.Timestamp archived_at = 4;
+}
+
+// ExplorationCreated — emitted when a new exploration starts within a cluster.
+// Initial cluster creation also emits this (one exploration per fresh cluster).
+// Subsequent explorations within the same cluster appear after a merge.
+//
+// Topic: chora.consumption.kg_exploration.created.v1
+// Consumers: Observability.
+message ExplorationCreated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string exploration_id = 2;
+  string cluster_id = 3;
+  string user_gcid = 4;
+
+  string started_at_atom_id = 5;
+  string current_focal_atom_id = 6;
+
+  google.protobuf.Timestamp created_at = 7;
+}
+
+// ExplorationFocalNodeChanged — emitted on every click-to-graduate hop.
+// Supersedes NodeTraversed semantics for the new fog flow (legacy events
+// stay valid for non-fog code paths).
+//
+// Topic: chora.consumption.kg_exploration.focal_changed.v1
+// Consumers: Sharing (curiosity score), Observability (engagement),
+//            AI Kernel (Recommender training).
+message ExplorationFocalNodeChanged {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string exploration_id = 2;
+  string cluster_id = 3;
+  string user_gcid = 4;
+
+  string from_focal_atom_id = 5;
+  string to_focal_atom_id = 6;
+
+  NeighborRelation relation = 7;
+
+  // Trail step_index (monotonic per exploration).
+  int32 step_index = 8;
+
+  google.protobuf.Timestamp traversed_at = 9;
+}
+
+// ExplorationArchived — emitted when an exploration is archived.
+//
+// Topic: chora.consumption.kg_exploration.archived.v1
+// Consumers: Observability.
+message ExplorationArchived {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string exploration_id = 2;
+  string cluster_id = 3;
+  string user_gcid = 4;
+
+  google.protobuf.Timestamp archived_at = 5;
+}
+
+// KGFogNeighborsRequested — emitted by chora-consumption MoveFocalNode when
+// the kg_hexagon_nodes cache misses or is stale per ADR-143 §4. Triggers a
+// chora-fog-orchestrator run (Hybrid P8 LangGraph supervisor + P1 ADK Go hex
+// explorers per ADR-147 §2). See subscription
+// `chora-fog-orchestrator.kg-fog-neighbors-requested` provisioned in
+// chora-infra/terraform/environments/dev/main.tf (Wave UU-F2).
+//
+// Topic: chora.consumption.kg.fog_neighbors_requested.v1
+// Consumers: chora-fog-orchestrator (Python LangGraph subscriber).
+message KGFogNeighborsRequested {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // The learner whose KG fog is being generated. KG is per-user (NOT
+  // per-tenant-shared) per ADR-143.
+  string user_gcid = 2;
+
+  // The MapCluster being explored (UUIDv7).
+  string cluster_id = 3;
+
+  // The Exploration within that cluster (UUIDv7).
+  string exploration_id = 4;
+
+  // The focal atom_id around which 6 hexagonal neighbors are to be generated.
+  string focal_atom_id = 5;
+
+  // Delivery mode that triggered the request. Typically "graph_discovery"
+  // (Discovery mode) but can be "straight_up" if Reader-mode UI requests
+  // related-atom suggestions.
+  string delivery_mode = 6;
+
+  // The learner's other existing atoms in this cluster — passed to the
+  // LangGraph orchestrator's detect_junctions node so it can flag any
+  // generated neighbor that already lives in another cluster.
+  repeated string existing_user_atom_ids = 7;
+
+  google.protobuf.Timestamp requested_at = 8;
+}
+
+// HexagonFogGenerated — emitted by chora-fog-orchestrator after each
+// successful Model Broker call. Carries cost + token data for the
+// AI Kernel cost ledger (per ai-cost-tracking skill).
+//
+// Topic: chora.consumption.kg_hexagon_fog.generated.v1
+// Consumers: AI Kernel (cost ledger BigQuery streaming),
+//            Observability (engagement analytics).
+message HexagonFogGenerated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 echo of orchestrator request_id (idempotency anchor).
+  string run_id = 2;
+
+  string cluster_id = 3;
+  string exploration_id = 4;
+  string user_gcid = 5;
+  string focal_atom_id = 6;
+
+  // The 6 neighbors persisted in kg_hexagon_nodes.neighbors_json.
+  repeated HexagonNeighbor neighbors = 7;
+
+  // Echo of Model Broker decision.
+  string model_id = 8;
+
+  // LLM cost in micros (1e-6 USD), per ai-cost-tracking ledger format.
+  int64 total_cost_micros = 9;
+
+  // Token usage breakdown.
+  int64 input_tokens = 10;
+  int64 output_tokens = 11;
+
+  google.protobuf.Timestamp generated_at = 12;
+}
+
+// HexagonFogInvalidated — emitted when a hex_node row is invalidated
+// (via subscriber to atom updates, retention shifts, or admin reset).
+//
+// Topic: chora.consumption.kg_hexagon_fog.invalidated.v1
+// Consumers: Notifications (optional re-engagement nudge),
+//            Observability (cache-freshness analytics).
+message HexagonFogInvalidated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // The hex_node row that was invalidated.
+  string hex_node_id = 2;
+
+  string cluster_id = 3;
+  string exploration_id = 4;
+  string user_gcid = 5;
+  string focal_atom_id = 6;
+
+  FogInvalidationReason reason = 7;
+
+  google.protobuf.Timestamp invalidated_at = 8;
+}
+
+// JunctionDetected — emitted when fog generation discovers that one of the
+// 6 candidate neighbors is already a focal atom in another of the user's
+// active clusters. Surfaced to the user via GraphQL Subscription.
+//
+// Topic: chora.consumption.kg_junction.detected.v1
+// Consumers: Notifications (proactive surface — push to user via WebSocket),
+//            Sharing (cross-topic curiosity bonus signal),
+//            Observability (engagement loop signal).
+message JunctionDetected {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string user_gcid = 2;
+
+  // The atom_id that exists in both clusters.
+  string via_atom_id = 3;
+
+  // Cluster A (where the user is currently exploring).
+  string current_cluster_id = 4;
+  // Cluster B (the OTHER cluster of the user's that contains via_atom_id).
+  string other_cluster_id = 5;
+
+  // For convenience to the UI (avoids extra fetch).
+  string current_cluster_display_name = 6;
+  string other_cluster_display_name = 7;
+
+  // Echo of orchestrator request_id that detected this junction.
+  string triggering_run_id = 8;
+
+  google.protobuf.Timestamp detected_at = 9;
+}

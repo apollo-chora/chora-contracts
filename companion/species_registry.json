@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "doc": "Canonical Companion species roster — the single source of truth every species-bearing surface is drift-tested against (CHO-2037). status=hero: rollable + Path-seeded + art-shipped starter species. status=legacy: retired pre-CHO-2032 gacha breeds kept ONLY so already-emitted events stay decodable — never rollable, never re-seeded. wire_value is the CompanionSpecies proto enum number: NEVER reuse or renumber; new species take the next free value. To onboard species N+1 follow docs/references/companion-species-onboarding.md — the drift guards in chora-consumption, chora-tenancy, chora-contracts/gen/go/contracttest and chora-web go RED on any surface you miss.",
+  "species": [
+    { "key": "owl", "wire_value": 1, "status": "hero" },
+    { "key": "fox", "wire_value": 2, "status": "hero" },
+    { "key": "cat", "wire_value": 3, "status": "legacy" },
+    { "key": "dragon", "wire_value": 4, "status": "hero" },
+    { "key": "phoenix", "wire_value": 5, "status": "hero" },
+    { "key": "turtle", "wire_value": 6, "status": "legacy" },
+    { "key": "wolf", "wire_value": 7, "status": "legacy" },
+    { "key": "raven", "wire_value": 8, "status": "legacy" },
+    { "key": "penguin", "wire_value": 9, "status": "hero" }
+  ]
+}

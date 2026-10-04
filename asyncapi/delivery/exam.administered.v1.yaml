@@ -1,0 +1,82 @@
+asyncapi: "3.0.0"
+info:
+  title: "chora.delivery.exam.administered.v1"
+  version: "1.0.0"
+  description: |
+    Published when the candidate begins the exam (proctoring active, items
+    served). Marks the start of incident-log ingestion.
+    Companion to `proto/events/delivery/exam.proto` message `ExamAdministered`.
+  contact: { name: "Chora Platform Team" }
+  license: { name: "Proprietary" }
+
+defaultContentType: application/x-protobuf
+
+servers:
+  local: { host: "localhost:8085", protocol: googlepubsub, description: "Pub/Sub Emulator" }
+  production: { host: "pubsub.googleapis.com", protocol: googlepubsub, description: "Google Cloud Pub/Sub" }
+
+channels:
+  examAdministered:
+    address: chora.delivery.exam.administered.v1
+    description: |
+      Carries ExamAdministered Protobuf payload.
+
+      Downstream consumers:
+        - chora-delivery (incident log) : begin ingest
+        - chora-observability           : audit trail
+    messages:
+      examAdministered:
+        $ref: "#/components/messages/ExamAdministered"
+
+operations:
+  publishExamAdministered:
+    action: send
+    channel: { $ref: "#/channels/examAdministered" }
+    summary: "Publish ExamAdministered"
+    messages: [ { $ref: "#/channels/examAdministered/messages/examAdministered" } ]
+  consumeExamAdministered:
+    action: receive
+    channel: { $ref: "#/channels/examAdministered" }
+    summary: "Consume ExamAdministered"
+    messages: [ { $ref: "#/channels/examAdministered/messages/examAdministered" } ]
+
+components:
+  messages:
+    ExamAdministered:
+      name: ExamAdministered
+      title: "Exam Administered"
+      summary: "Candidate began the exam."
+      contentType: application/x-protobuf
+      payload:
+        type: object
+        description: "Mirrors chora.delivery.v1.ExamAdministered."
+        properties:
+          envelope: { $ref: "#/components/schemas/EventEnvelope" }
+          exam_id: { type: string, format: uuid }
+          course_id: { type: string, format: uuid }
+          candidate_gcid: { type: string }
+          scheduled_for: { type: string, format: date-time }
+          proctor_method: { $ref: "#/components/schemas/ProctorMethod" }
+          administered_at: { type: string, format: date-time }
+  schemas:
+    EventEnvelope:
+      type: object
+      description: "Mirrors chora.common.v1.EventEnvelope."
+      required: [event_id, idempotency_key, tenant_id, occurred_at, published_at, traceparent, source_project, source_service, schema_version]
+      properties:
+        event_id: { type: string, format: uuid }
+        idempotency_key: { type: string }
+        tenant_id: { type: string }
+        gcid: { type: string }
+        occurred_at: { type: string, format: date-time }
+        published_at: { type: string, format: date-time }
+        traceparent: { type: string }
+        tracestate: { type: string }
+        source_project: { type: string }
+        source_service: { type: string }
+        schema_version: { type: integer }
+        correlation_id: { type: string }
+        causation_id: { type: string }
+    ProctorMethod:
+      type: string
+      enum: [PROCTOR_METHOD_UNSPECIFIED, PROCTOR_METHOD_NONE, PROCTOR_METHOD_AUTO_AI, PROCTOR_METHOD_HUMAN_LIVE, PROCTOR_METHOD_HUMAN_RECORDED]

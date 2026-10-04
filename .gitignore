@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.venv/
+.env
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+.idea/
+.vscode/
+.mcp.json
+.claude/settings.local.json

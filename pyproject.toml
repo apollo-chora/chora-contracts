@@ -1,0 +1,70 @@
+[project]
+name = "chora-contracts"
+version = "2.1.0"
+description = "Chora Contracts — API specs (OpenAPI, AsyncAPI, GraphQL SDL, Protobuf) and shared Pydantic models + generated gRPC stubs. v2.1 M11.4 codegen 2026-05-10."
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.0",
+    "grpcio>=1.66",
+    "protobuf>=5.28",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.4.0",
+    "mypy>=1.10.0",
+    "pytest>=7.4.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# Hatchling packaging — wheel includes:
+#   - `chora_contracts` (the legacy Pydantic shared models at src/chora_contracts/)
+#   - `chora_contracts_gen` (proto-generated stubs aliased from gen/python/)
+#
+# protoc-gen-python emits relative imports like `from services import
+# agent_executor_pb2`. To keep the wheel collision-free with services/agents
+# elsewhere in the monorepo, the relocator script post-processes the generated
+# .py files to rewrite the implicit imports under a `chora_contracts_gen.`
+# prefix. Consumers then import as:
+#
+#   from chora_contracts_gen.services import agent_executor_pb2_grpc
+#   from chora_contracts_gen.services import model_broker_gateway_pb2_grpc
+#   from chora_contracts_gen.chora.common.v1 import envelope_pb2
+#
+# `__init__.py` files at every gen/python/{services,events,chora}/ are
+# backfilled by `scripts/relocate-flat-services.sh` after `buf generate`.
+[tool.hatch.build.targets.wheel]
+packages = ["src/chora_contracts", "gen/python"]
+
+[tool.hatch.build.targets.wheel.sources]
+"src/chora_contracts" = "chora_contracts"
+"gen/python" = "chora_contracts_gen"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src/chora_contracts",
+    "/gen/python",
+    "/proto",
+    "/asyncapi",
+    "/openapi",
+    "/graphql",
+    "/buf.yaml",
+    "/buf.gen.yaml",
+    "/scripts",
+    "/CHANGELOG.md",
+    "/README.md",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "T20"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true

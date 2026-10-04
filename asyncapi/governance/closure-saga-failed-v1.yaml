@@ -1,0 +1,62 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Governance — ClosureSagaFailed
+  version: 1.0.0
+  description: |
+    Published when a closure saga step fails irrecoverably (domain can't
+    tokenize a field, KMS DEK delete failed, compensation required).
+    Triggers human-in-the-loop review in O+.
+
+    - Domain: Governance (`chora_governance` DB)
+    - Topic: `chora.governance.closure.saga_failed.v1`
+    - Source proto: `proto/events/governance/closure.proto`
+       message `chora.governance.v1.ClosureSagaFailed`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  closureSagaFailed:
+    address: chora.governance.closure.saga_failed.v1
+    messages:
+      closureSagaFailed:
+        $ref: '#/components/messages/ClosureSagaFailed'
+
+operations:
+  publishClosureSagaFailed:
+    action: send
+    channel:
+      $ref: '#/channels/closureSagaFailed'
+    messages:
+      - $ref: '#/channels/closureSagaFailed/messages/closureSagaFailed'
+
+  consumeClosureSagaFailed:
+    action: receive
+    channel:
+      $ref: '#/channels/closureSagaFailed'
+    description: |
+      Consumers: O+ HITL queue, AI Kernel Closure Orchestrator
+      (compensating action), pager alerts, Audit log.
+    messages:
+      - $ref: '#/channels/closureSagaFailed/messages/closureSagaFailed'
+
+components:
+  messages:
+    ClosureSagaFailed:
+      name: ClosureSagaFailed
+      title: Closure Saga Failed
+      summary: A federated closure saga step has failed irrecoverably
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/governance/closure.proto#/chora.governance.v1.ClosureSagaFailed'

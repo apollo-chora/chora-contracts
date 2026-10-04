@@ -1,0 +1,66 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Tenancy — AddonDeactivated
+  version: 1.1.0
+  description: |
+    Published when an add-on is deactivated. Feature flags revoke
+    immediately or at billing cycle end depending on plan terms.
+
+    v1.1 (additive, wire-compatible): adds `reason_code` (structured
+    enum mirroring the H+ deactivation reason audit dimension) and
+    `reason_text` (free-form context, required when reason_code =
+    OTHER). The legacy `reason` string is retained for v1 publishers.
+
+    - Domain: Tenancy + Billing (`chora_tenancy` DB)
+    - Topic: `chora.tenancy.addon.deactivated.v1`
+    - Source proto: `proto/events/tenancy/addon.proto`
+       message `chora.tenancy.v1.AddonDeactivated`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  addonDeactivated:
+    address: chora.tenancy.addon.deactivated.v1
+    messages:
+      addonDeactivated:
+        $ref: '#/components/messages/AddonDeactivated'
+
+operations:
+  publishAddonDeactivated:
+    action: send
+    channel:
+      $ref: '#/channels/addonDeactivated'
+    messages:
+      - $ref: '#/channels/addonDeactivated/messages/addonDeactivated'
+
+  consumeAddonDeactivated:
+    action: receive
+    channel:
+      $ref: '#/channels/addonDeactivated'
+    description: |
+      Consumers: ALL surfaces (revoke entitlement), AI Kernel
+      (LoRA retirement trigger), Notifications.
+    messages:
+      - $ref: '#/channels/addonDeactivated/messages/addonDeactivated'
+
+components:
+  messages:
+    AddonDeactivated:
+      name: AddonDeactivated
+      title: Add-On Deactivated
+      summary: A tenant has deactivated an add-on plan
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/tenancy/addon.proto#/chora.tenancy.v1.AddonDeactivated'

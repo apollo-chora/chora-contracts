@@ -1,0 +1,62 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Notifications — EmailBounced
+  version: 1.0.0
+  description: |
+    Published from SendGrid webhook "bounce" / "blocked" / "dropped" events.
+    Persistent hard bounces should trigger Account / Notification
+    preference updates.
+
+    - Domain: Notifications (`chora_notifications` DB)
+    - Topic: `chora.notifications.email.bounced.v1`
+    - Source proto: `proto/events/notifications/email.proto`
+       message `chora.notifications.v1.EmailBounced`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  emailBounced:
+    address: chora.notifications.email.bounced.v1
+    messages:
+      emailBounced:
+        $ref: '#/components/messages/EmailBounced'
+
+operations:
+  publishEmailBounced:
+    action: send
+    channel:
+      $ref: '#/channels/emailBounced'
+    messages:
+      - $ref: '#/channels/emailBounced/messages/emailBounced'
+
+  consumeEmailBounced:
+    action: receive
+    channel:
+      $ref: '#/channels/emailBounced'
+    description: |
+      Consumers: Identity (mark email undeliverable on hard bounces),
+      Observability (bounce rate KPI), Audit log.
+    messages:
+      - $ref: '#/channels/emailBounced/messages/emailBounced'
+
+components:
+  messages:
+    EmailBounced:
+      name: EmailBounced
+      title: Email Bounced
+      summary: An email has bounced or been blocked by the recipient MTA
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/notifications/email.proto#/chora.notifications.v1.EmailBounced'

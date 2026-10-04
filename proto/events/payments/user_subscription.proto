@@ -1,0 +1,300 @@
+// =============================================================================
+// Chora Payments — User Subscription events (Stripe Subscriptions API)
+// =============================================================================
+//
+// Aggregate root: UserSubscription (Stripe Subscription for a per-learner
+//                 Companion mana subscription — Basic / Standard / Premium
+//                 monthly or annual, per ADR-142 + ADR-149 amendment).
+// Owning domain : Payments (chora_payments DB, per ADR-164).
+// Topic prefix  : chora.payments.user_subscription.*
+//
+// Replaces (post Wave 1 Stage E cutover):
+//   chora.identity.user_subscription.created.v1
+//   chora.identity.user_subscription.activated.v1
+//   chora.identity.user_subscription.paused.v1
+//   chora.identity.user_subscription.cancelled.v1
+//   (renewal events did not previously have their own topic; added here for
+//    parity with the payments family).
+//
+// Lifecycle is richer than one-shot Checkouts: a single subscription has
+// 9 event types:
+//   5 payment-lifecycle: {checkout_started, payment_captured, payment_failed,
+//                         refunded, expired}
+//   4 subscription-lifecycle: {created, renewed, paused, cancelled}
+//
+// Originating-service notification path: chora-identity subscribes to ALL
+// 9 topics and drives the existing `UserSubscription` aggregate FSM in
+// `services/chora-identity/internal/domain/user_subscription/`.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.payments.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/payments/v1;paymentsv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// 5 payment-lifecycle events
+// -----------------------------------------------------------------------------
+
+// UserSubscriptionCheckoutStarted — emitted when chora-payments creates a
+// Stripe Checkout Session for a new subscription purchase. The customer has
+// NOT yet paid the initial invoice.
+//
+// Topic: chora.payments.user_subscription.checkout_started.v1
+// Consumers: chora-observability (funnel telemetry), chora-governance.
+message UserSubscriptionCheckoutStarted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string purchase_id = 2;
+
+  // The learner subscribing.
+  string learner_gcid = 3;
+
+  // Subscription plan SKU from the platform catalog
+  // (e.g., `subscription.companion.standard_monthly.v1`).
+  string plan_sku = 4;
+
+  // Billing period from the Stripe Price: "monthly" or "annually".
+  string billing_period = 5;
+
+  string stripe_session_id = 6;
+  string stripe_checkout_url = 7;
+
+  int64  amount_cents = 8;
+  string currency = 9;
+
+  google.protobuf.Timestamp checkout_started_at = 10;
+}
+
+// UserSubscriptionPaymentCaptured — emitted on Stripe's `invoice.paid`
+// webhook (covers BOTH the initial subscription invoice AND every
+// subsequent renewal invoice). chora-identity subscribes and credits
+// per-period mana / role grants per ADR-142 + ADR-149.
+//
+// Topic: chora.payments.user_subscription.payment_captured.v1
+// Consumers: chora-identity (PRIMARY — UserSubscription FSM activate /
+//            renew + emit downstream mana credit), chora-observability
+//            (recurring revenue ledger), chora-notifications (renewal
+//            receipt email), chora-governance.
+message UserSubscriptionPaymentCaptured {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string purchase_id = 2;
+  string learner_gcid = 3;
+  string plan_sku = 4;
+  string billing_period = 5;
+
+  // Stripe subscription_id is the cross-event correlation handle for
+  // recurring renewals (a single Stripe subscription fires N
+  // `invoice.paid` events over its lifetime).
+  string stripe_subscription_id = 6;
+  string stripe_invoice_id = 7;
+  string stripe_payment_intent_id = 8;
+  string stripe_charge_id = 9;
+
+  int64  amount_cents_paid = 10;
+  string currency = 11;
+
+  // The billing period this payment covers
+  // (Stripe's period_start / period_end on the invoice line item).
+  google.protobuf.Timestamp period_start = 12;
+  google.protobuf.Timestamp period_end = 13;
+
+  google.protobuf.Timestamp paid_at = 14;
+}
+
+// UserSubscriptionPaymentFailed — emitted on Stripe's
+// `invoice.payment_failed`. chora-identity transitions the subscription
+// to GRACE state (per existing FSM) + emits a downstream notification.
+//
+// Topic: chora.payments.user_subscription.payment_failed.v1
+// Consumers: chora-identity (UserSubscription FSM grace-period enter),
+//            chora-notifications (payment-failed email + Stripe smart
+//            retry timing), chora-governance.
+message UserSubscriptionPaymentFailed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string purchase_id = 2;
+  string learner_gcid = 3;
+  string plan_sku = 4;
+
+  string stripe_subscription_id = 5;
+  string stripe_invoice_id = 6;
+  string stripe_failure_code = 7;
+  string stripe_failure_message = 8;
+
+  // Next retry attempt (Stripe smart retry — usually 3 attempts over 21d).
+  google.protobuf.Timestamp next_attempt_at = 9;
+
+  google.protobuf.Timestamp failed_at = 10;
+}
+
+// UserSubscriptionRefunded — emitted on Stripe refund of a subscription
+// invoice (rare for subscriptions; usually a partial refund for prorated
+// cancellation).
+//
+// Topic: chora.payments.user_subscription.refunded.v1
+// Consumers: chora-identity (mana debit / role revoke if applicable),
+//            chora-notifications, chora-observability.
+message UserSubscriptionRefunded {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string purchase_id = 2;
+  string learner_gcid = 3;
+
+  string stripe_subscription_id = 4;
+  string stripe_invoice_id = 5;
+  string stripe_charge_id = 6;
+  string stripe_refund_id = 7;
+
+  int64  amount_cents_refunded = 8;
+  string currency = 9;
+
+  string reason = 10;
+
+  google.protobuf.Timestamp refunded_at = 11;
+}
+
+// UserSubscriptionExpired — emitted on Stripe `checkout.session.expired`
+// for the INITIAL subscription Checkout Session (customer abandoned
+// the sign-up flow before paying).
+//
+// For ongoing subscriptions, "expiry" is conveyed via the
+// `cancelled.v1` lifecycle event (Stripe terminology: "incomplete_expired"
+// status is reported via `customer.subscription.deleted`).
+//
+// Topic: chora.payments.user_subscription.expired.v1
+// Consumers: chora-observability (funnel abandonment), chora-governance.
+message UserSubscriptionExpired {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string purchase_id = 2;
+  string learner_gcid = 3;
+  string plan_sku = 4;
+
+  string stripe_session_id = 5;
+
+  google.protobuf.Timestamp expired_at = 6;
+}
+
+// -----------------------------------------------------------------------------
+// 4 subscription-lifecycle events
+// -----------------------------------------------------------------------------
+
+// UserSubscriptionCreated — emitted on Stripe's `customer.subscription.created`.
+// Distinct from `checkout_started` (pre-payment) and `payment_captured`
+// (post-payment): this fires when Stripe creates the Subscription object
+// itself, BEFORE the first invoice is paid. chora-identity may stage the
+// UserSubscription aggregate in PENDING state here, then transition on
+// `payment_captured`.
+//
+// Topic: chora.payments.user_subscription.created.v1
+// Consumers: chora-identity (stages UserSubscription PENDING),
+//            chora-observability, chora-governance.
+message UserSubscriptionCreated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string purchase_id = 2;
+  string learner_gcid = 3;
+  string plan_sku = 4;
+  string billing_period = 5;
+
+  string stripe_subscription_id = 6;
+  string stripe_customer_id = 7;
+
+  google.protobuf.Timestamp current_period_start = 8;
+  google.protobuf.Timestamp current_period_end = 9;
+
+  google.protobuf.Timestamp created_at = 10;
+}
+
+// UserSubscriptionRenewed — emitted on the SECOND-AND-AFTER
+// `customer.subscription.updated` events with period rollover (the
+// `current_period_end` advanced).
+//
+// Distinct from `payment_captured` (which fires per invoice paid —
+// initial AND renewal). `renewed` fires only on the rollover transition
+// (not the first invoice), so chora-identity can run rollover-specific
+// logic (e.g., reset per-period mana allowance).
+//
+// Topic: chora.payments.user_subscription.renewed.v1
+// Consumers: chora-identity (per-period mana reset), chora-observability
+//            (retention metrics), chora-governance.
+message UserSubscriptionRenewed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string purchase_id = 2;
+  string learner_gcid = 3;
+  string plan_sku = 4;
+  string billing_period = 5;
+
+  string stripe_subscription_id = 6;
+
+  // Both the OLD and NEW period boundaries (audit + idempotency aid).
+  google.protobuf.Timestamp previous_period_end = 7;
+  google.protobuf.Timestamp current_period_start = 8;
+  google.protobuf.Timestamp current_period_end = 9;
+
+  google.protobuf.Timestamp renewed_at = 10;
+}
+
+// UserSubscriptionPaused — emitted on Stripe's `customer.subscription.paused`
+// (admin pause OR Stripe smart retry exhaustion entering paused state).
+// chora-identity transitions UserSubscription to PAUSED + freezes mana
+// allowance.
+//
+// Topic: chora.payments.user_subscription.paused.v1
+// Consumers: chora-identity (FSM transition), chora-notifications
+//            (pause notification email), chora-governance.
+message UserSubscriptionPaused {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string purchase_id = 2;
+  string learner_gcid = 3;
+
+  string stripe_subscription_id = 4;
+
+  // Reason from Stripe (e.g., "payment_failed", "voluntary").
+  string reason = 5;
+
+  // When the subscription will auto-resume, if scheduled (Stripe
+  // `pause_collection.resumes_at`). Zero/empty if indefinitely paused.
+  google.protobuf.Timestamp resumes_at = 6;
+
+  google.protobuf.Timestamp paused_at = 7;
+}
+
+// UserSubscriptionCancelled — emitted on Stripe's
+// `customer.subscription.deleted`. chora-identity transitions
+// UserSubscription to CANCELLED + revokes ongoing role grants.
+//
+// Topic: chora.payments.user_subscription.cancelled.v1
+// Consumers: chora-identity (FSM transition + role revoke),
+//            chora-notifications (cancellation confirmation),
+//            chora-observability (churn metrics), chora-governance.
+message UserSubscriptionCancelled {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string purchase_id = 2;
+  string learner_gcid = 3;
+
+  string stripe_subscription_id = 4;
+
+  // Reason from Stripe (e.g., "cancellation_requested",
+  // "payment_failed", "incomplete_expired").
+  string reason = 5;
+
+  // True if the cancellation is effective at the end of the current
+  // billing period (Stripe `cancel_at_period_end`). False = immediate.
+  bool   at_period_end = 6;
+
+  // The period boundary the cancellation takes effect (Stripe
+  // `current_period_end` if at_period_end=true; else cancelled_at).
+  google.protobuf.Timestamp effective_at = 7;
+
+  google.protobuf.Timestamp cancelled_at = 8;
+}

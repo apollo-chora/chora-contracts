@@ -1,0 +1,235 @@
+// =============================================================================
+// chora.tenancy.v1 — Composable Add-On Plan events
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 1 D1
+//   (Composable Add-On Plans, feature-flag driven, NOT tier pricing)
+// + .claude/skills/monetization-patterns/SKILL.md
+//
+// Owning domain : Tenancy + Billing (chora_tenancy database)
+// Owning team   : Team 3 (Platform)
+// Topic prefix  : chora.tenancy.addon.*
+//
+// Add-Ons are composable feature toggles attached to a tenant — they are
+// NOT pricing tiers. Each add-on plan exposes one or more capabilities
+// (feature flags) and may carry usage-based metering (active learners,
+// AI tokens, video minutes, certification issuances, etc.).
+//
+// IMPORTANT: DigitalSkin is NEVER a purchasable add-on. DigitalSkin is
+// EARNED (via gameplay achievements in Content Sharing); see
+// chora.sharing.* events. Add-on events here MUST NOT include digital_skin
+// in addon_plan_id payloads.
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.tenancy.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/tenancy/v1;tenancyv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// AddonActivated — chora.tenancy.addon.activated.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a tenant activates an add-on plan. Activates feature flags
+// for the tenant; downstream surfaces refresh entitlements.
+message AddonActivated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string tenant_id = 2;
+
+  // UUIDv7 — references AddOnPlan catalog entry. NEVER references
+  // digital_skin (those are earned, not purchased).
+  string addon_plan_id = 3;
+
+  // GCID of the admin / owner who activated.
+  string activated_by_gcid = 4;
+
+  // When the add-on becomes effective (may be future-dated).
+  google.protobuf.Timestamp activated_at = 5;
+}
+
+// -----------------------------------------------------------------------------
+// AddonDeactivationReason — structured audit dimension
+// -----------------------------------------------------------------------------
+//
+// Mirrors the OpenAPI DeactivateAddonRequest.reason enum. Free-form text
+// goes in reason_text. UNSPECIFIED retained for wire-compat with v1
+// publishers that did not capture a structured reason.
+enum AddonDeactivationReason {
+  ADDON_DEACTIVATION_REASON_UNSPECIFIED = 0;
+  ADDON_DEACTIVATION_REASON_NO_LONGER_NEEDED = 1;
+  ADDON_DEACTIVATION_REASON_COST = 2;
+  ADDON_DEACTIVATION_REASON_CONSOLIDATION = 3;
+  ADDON_DEACTIVATION_REASON_MIGRATION = 4;
+  ADDON_DEACTIVATION_REASON_COMPLIANCE = 5;
+  ADDON_DEACTIVATION_REASON_OTHER = 6;
+}
+
+// -----------------------------------------------------------------------------
+// AddonDeactivated — chora.tenancy.addon.deactivated.v1
+// -----------------------------------------------------------------------------
+//
+// Published when an add-on is deactivated. Feature flags revoke immediately
+// or at billing cycle end depending on plan terms. Soft-delete only —
+// historical usage records preserved.
+//
+// v1.1 additive change: reason_code (structured) + reason_text added at
+// fields 7/8. The legacy `reason` string field 4 remains for wire-compat
+// with v1 publishers — new publishers SHOULD populate reason_code and
+// MAY leave `reason` empty.
+message AddonDeactivated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string tenant_id = 2;
+  string addon_plan_id = 3;
+
+  // Legacy free-text reason. Retained for wire-compat. New publishers
+  // SHOULD use reason_code (field 7) instead.
+  string reason = 4;
+
+  string deactivated_by_gcid = 5;
+
+  google.protobuf.Timestamp deactivated_at = 6;
+
+  // Structured audit dimension (v1.1+). Defaults to UNSPECIFIED for legacy
+  // publishers that have not migrated.
+  AddonDeactivationReason reason_code = 7;
+
+  // Free-form context, REQUIRED when reason_code = OTHER.
+  string reason_text = 8;
+}
+
+// -----------------------------------------------------------------------------
+// AddonDeactivationRequested — chora.tenancy.addon.deactivation_requested.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a tenant admin REQUESTS deactivation but the change is
+// deferred (e.g., end of billing cycle). The actual AddonDeactivated event
+// fires later when the scheduler reaches effective_at.
+//
+// Consumers: Notifications (admin email confirmation), Billing (schedule
+// refund / proration), Observability (capture intent for the deactivation
+// reason audit dashboard).
+message AddonDeactivationRequested {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string tenant_id = 2;
+  string addon_plan_id = 3;
+
+  // Structured audit dimension.
+  AddonDeactivationReason reason = 4;
+
+  // Free-form context, REQUIRED when reason = OTHER.
+  string reason_text = 5;
+
+  // GCID of the tenant admin who requested deactivation.
+  string requested_by_gcid = 6;
+
+  // When the deactivation will become effective. May equal requested_at
+  // for immediate deactivation paths that still emit this event before
+  // AddonDeactivated.
+  google.protobuf.Timestamp effective_at = 7;
+
+  google.protobuf.Timestamp requested_at = 8;
+}
+
+// -----------------------------------------------------------------------------
+// AddonUpgraded — chora.tenancy.addon.upgraded.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a tenant upgrades an add-on tier in place. Carries the
+// billing delta in cents (positive for upgrades) and a Stripe schedule_id
+// when the upgrade was scheduled rather than applied immediately.
+//
+// Consumers: Notifications, Billing aggregation, Observability (tier
+// migration funnel), AI Kernel (entitlement refresh — e.g., Gemma LoRA
+// quota change).
+message AddonUpgraded {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string tenant_id = 2;
+  string addon_plan_id = 3;
+
+  // Tier codes (snapshot for audit). Stable machine codes per AddOnPlan
+  // catalog (e.g., "starter", "pro", "enterprise").
+  string from_tier = 4;
+  string to_tier = 5;
+
+  // When the new tier takes effect (may be future-dated when scheduled).
+  google.protobuf.Timestamp effective_at = 6;
+
+  // Net billing delta in cents for the current period. Always >= 0 for
+  // upgrades; 0 if proration_mode = none.
+  int64 billing_delta_cents = 7;
+
+  // Stripe subscription_schedule ID when the change was scheduled.
+  // Empty when applied immediately.
+  string schedule_id = 8;
+
+  // GCID of the admin who initiated the upgrade.
+  string requested_by_gcid = 9;
+}
+
+// -----------------------------------------------------------------------------
+// AddonDowngraded — chora.tenancy.addon.downgraded.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a tenant downgrades an add-on tier in place. Mirrors
+// AddonUpgraded; billing_delta_cents will typically be <= 0 (credit).
+//
+// Consumers: same as AddonUpgraded plus AI Kernel quota-shrink handlers.
+message AddonDowngraded {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string tenant_id = 2;
+  string addon_plan_id = 3;
+
+  string from_tier = 4;
+  string to_tier = 5;
+
+  google.protobuf.Timestamp effective_at = 6;
+
+  // Net billing delta in cents for the current period. Typically <= 0
+  // (credit) for downgrades; 0 if proration_mode = none.
+  int64 billing_delta_cents = 7;
+
+  string schedule_id = 8;
+
+  string requested_by_gcid = 9;
+}
+
+// -----------------------------------------------------------------------------
+// AddonUsageRecorded — chora.tenancy.addon.usage_recorded.v1
+// -----------------------------------------------------------------------------
+//
+// Published when usage-metered add-on activity is recorded (e.g., a new
+// active learner consumed a seat, AI tokens consumed beyond the included
+// quota, a certification issuance against a metered cert pack).
+//
+// High-volume topic — consumers (BigQuery streaming, billing aggregation,
+// observability dashboards) should expect bursts.
+message AddonUsageRecorded {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string tenant_id = 2;
+  string addon_plan_id = 3;
+
+  // Usage dimension — string for forward-compat (e.g., "active_learners",
+  // "ai_tokens", "video_minutes", "certs_issued", "exam_proctored_hours").
+  string usage_dimension = 4;
+
+  // Quantity recorded for this event.
+  int64 usage_value = 5;
+
+  // Optional unit hint (e.g., "seats", "tokens", "minutes"). Empty if
+  // implicit from usage_dimension.
+  string usage_unit = 6;
+
+  google.protobuf.Timestamp recorded_at = 7;
+}

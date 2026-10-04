@@ -1,0 +1,61 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Closure — GraceStarted
+  version: 1.0.0
+  description: |
+    Grace window has begun — distinct from ClosureRequested in that it
+    explicitly marks the user-visible countdown timer kick-off.
+
+    - Domain: AI Kernel — Closure Orchestrator (`chora_ai_kernel` DB)
+    - Topic: `chora.closure.grace_started.v1`
+    - Source proto: `proto/events/closure/saga.proto`
+       message `chora.closure.v1.ClosureGraceStarted`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  closureGraceStarted:
+    address: chora.closure.grace_started.v1
+    messages:
+      closureGraceStarted:
+        $ref: '#/components/messages/ClosureGraceStarted'
+
+operations:
+  publishClosureGraceStarted:
+    action: send
+    channel:
+      $ref: '#/channels/closureGraceStarted'
+    messages:
+      - $ref: '#/channels/closureGraceStarted/messages/closureGraceStarted'
+
+  consumeClosureGraceStarted:
+    action: receive
+    channel:
+      $ref: '#/channels/closureGraceStarted'
+    description: |
+      Consumers:
+        - chora-notifications (grace-period countdown drip emails)
+        - chora-bff-gateway (A+ closure-status countdown UX)
+    messages:
+      - $ref: '#/channels/closureGraceStarted/messages/closureGraceStarted'
+
+components:
+  messages:
+    ClosureGraceStarted:
+      name: ClosureGraceStarted
+      title: Federated closure saga grace window started
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/closure/saga.proto#/chora.closure.v1.ClosureGraceStarted'

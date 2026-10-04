@@ -1,0 +1,81 @@
+// =============================================================================
+// GENERATED — DO NOT EDIT.
+// Source : events/consumption/weakness.proto message WeaknessDocUploaded
+// Tool   : chora-contracts/internal/protoflatten
+// Why    : GCP Pub/Sub Schema Registry rejects (a) schemas with `import`
+//          statements and (b) schemas with more than one top-level message.
+//          This flat copy contains exactly ONE top-level message;
+//          EventEnvelope + Timestamp + transitive deps are nested inside.
+// Path C : see chora-contracts/CHANGELOG.md and m10-data-plane main.tf.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.consumption.v1;
+
+message WeaknessDocUploaded {
+  // Inlined chora.common.v1.EventEnvelope (nested for self-contained schema).
+  message Envelope {
+    string event_id = 1;
+    string idempotency_key = 2;
+    string tenant_id = 3;
+    string gcid = 4;
+    Timestamp occurred_at = 5;
+    Timestamp published_at = 6;
+    string traceparent = 7;
+    string tracestate = 8;
+    string source_project = 9;
+    string source_service = 10;
+    int32 schema_version = 11;
+    string correlation_id = 12;
+    string causation_id = 13;
+    string chora_imda_dimension = 14;
+    string imda_lifecycle_stage = 15;
+  }
+
+  // Inlined google.protobuf.Timestamp (nested; wire-compatible).
+  message Timestamp {
+    int64 seconds = 1;
+    int32 nanos = 2;
+  }
+
+  // Inlined dep: OutputSelection
+  message OutputSelection {
+    bool focused_dose = 1;
+    bool familiar_coaching = 2;
+    bool practice_test = 3;
+    bool study_aids = 4;
+  }
+
+  // Inlined dep: StructuredClues
+  message StructuredClues {
+    string subject = 1;
+    repeated string weak_topic_keys = 2;
+    int32 self_confidence = 3;
+    WeaknessContextKind context_kind = 4;
+    string note = 5;
+  }
+
+  // Inlined enum dep: WeaknessContextKind
+  enum WeaknessContextKind {
+    WEAKNESS_CONTEXT_KIND_UNSPECIFIED = 0;
+    WEAKNESS_CONTEXT_KIND_EXAM = 1;
+    WEAKNESS_CONTEXT_KIND_ASSIGNMENT = 2;
+    WEAKNESS_CONTEXT_KIND_QUIZ = 3;
+    WEAKNESS_CONTEXT_KIND_PRACTICE = 4;
+    WEAKNESS_CONTEXT_KIND_SELF_STUDY = 5;
+  }
+
+  Envelope envelope = 1;
+  string upload_id = 2;
+  string tenant_id = 3;
+  string learner_gcid = 4;
+  string source_blob_uri = 5;
+  string source_mime_type = 6;
+  string upload_kind = 7;
+  string context_hint = 8;
+  Timestamp uploaded_at = 9;
+  StructuredClues structured_clues = 10;
+  OutputSelection requested_outputs = 11;
+  string reservation_id = 12;
+}

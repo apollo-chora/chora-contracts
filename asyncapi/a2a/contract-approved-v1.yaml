@@ -1,0 +1,64 @@
+asyncapi: "3.0.0"
+info:
+  title: "Chora Agent-to-Agent — contract.approved.v1"
+  version: "1.0.0"
+  description: |
+    Published after platform_ops approves a previously declared A2A
+    contract. The A2A Gateway begins routing invocations to the owning
+    agent on receipt of this event.
+
+    Owning team   : Team 3 (Platform)
+    Owning domain : Agent-to-Agent (chora_a2a database)
+    Reference     : ADR-132 §2
+  contact:
+    name: "Chora Platform Team — Platform Track"
+  license:
+    name: "Proprietary"
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  production:
+    host: "pubsub.googleapis.com"
+    protocol: googlepubsub
+    description: "Google Cloud Pub/Sub (production)"
+  emulator:
+    host: "localhost:8085"
+    protocol: googlepubsub
+    description: "Cloud Pub/Sub Emulator (local dev)"
+
+channels:
+  contractApproved:
+    address: "chora.a2a.contract.approved.v1"
+    messages:
+      contractApproved:
+        $ref: "#/components/messages/ContractApproved"
+
+operations:
+  publishContractApproved:
+    action: send
+    channel:
+      $ref: "#/channels/contractApproved"
+    summary: "Publish an A2A contract approval event"
+    description: |
+      Producer: chora-a2a-gateway (after platform_ops approval).
+      Consumers: A2A Gateway routing tables,
+                 O+ governance dashboard,
+                 Audit log,
+                 Notifications (notify capability owner agent).
+    messages:
+      - $ref: "#/channels/contractApproved/messages/contractApproved"
+
+components:
+  messages:
+    ContractApproved:
+      name: "ContractApproved"
+      title: "A2A Contract Approved"
+      summary: "An A2A contract has been approved by platform_ops"
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf;version=3
+      payload:
+        schemaFormat: "application/vnd.google.protobuf;version=3"
+        schema:
+          protoFile: "proto/events/a2a/contract.proto"
+          messageName: "chora.a2a.v1.ContractApproved"

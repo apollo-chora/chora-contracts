@@ -1,0 +1,71 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Content Consumption — ExplorationFocalNodeChanged
+  version: 1.0.0
+  description: |
+    Published on every click-to-graduate hop in a per-user exploration
+    (per ADR-143). Supersedes `NodeTraversed` semantics for the new fog
+    flow; `NodeTraversed` remains valid for legacy `discoveryFeed` paths.
+
+    - Domain: Content Consumption (`chora_consumption` DB)
+    - Aggregate root: `Exploration` (kg_user_explorations + kg_exploration_trail)
+    - Topic: `chora.consumption.kg_exploration.focal_changed.v1`
+    - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
+    - Source proto: `proto/events/consumption/knowledge_graph.proto`
+       message `chora.consumption.v1.ExplorationFocalNodeChanged`
+
+    Atomically co-emitted with the kg_exploration_trail row append + the
+    kg_user_explorations.current_focal_atom_id update (outbox pattern).
+
+    Embeds the mandatory `chora.common.v1.EventEnvelope` as field 1.
+  contact:
+    name: Chora Content Team (Team 1)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+    description: Google Cloud Pub/Sub (chora-489812 platform host)
+
+channels:
+  explorationFocalChanged:
+    address: chora.consumption.kg_exploration.focal_changed.v1
+    description: Single-event topic for ExplorationFocalNodeChanged.
+    messages:
+      explorationFocalChanged:
+        $ref: '#/components/messages/ExplorationFocalNodeChanged'
+
+operations:
+  publishExplorationFocalChanged:
+    action: send
+    channel:
+      $ref: '#/channels/explorationFocalChanged'
+    summary: Publish an ExplorationFocalNodeChanged event
+
+  consumeExplorationFocalChanged:
+    action: receive
+    channel:
+      $ref: '#/channels/explorationFocalChanged'
+    summary: Subscribe to ExplorationFocalNodeChanged events
+    description: |
+      Primary consumers:
+      - Sharing — curiosity score updates + reputation
+      - Observability — engagement analytics (graph traversal funnel)
+      - AI Kernel — Recommender training feedback
+
+components:
+  messages:
+    ExplorationFocalNodeChanged:
+      name: ExplorationFocalNodeChanged
+      title: Exploration Focal Node Changed
+      summary: A learner click-to-graduated to a new focal node in an exploration
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/consumption/knowledge_graph.proto#/chora.consumption.v1.ExplorationFocalNodeChanged'

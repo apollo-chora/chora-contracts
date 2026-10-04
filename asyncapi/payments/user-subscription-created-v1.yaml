@@ -1,0 +1,63 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Payments — UserSubscriptionCreated
+  version: 1.0.0
+  description: |
+    Stripe `customer.subscription.created` — distinct from
+    `checkout_started` (pre-payment) and `payment_captured`
+    (post-payment). Fires when Stripe creates the Subscription object
+    itself, BEFORE the first invoice is paid. chora-identity stages the
+    UserSubscription aggregate in PENDING state.
+
+    - Domain: Payments (`chora_payments` DB)
+    - Topic: `chora.payments.user_subscription.created.v1`
+    - Source proto: `proto/events/payments/user_subscription.proto`
+       message `chora.payments.v1.UserSubscriptionCreated`
+    - Aggregate: UserSubscription
+    - Per ADR-164 (chora-payments service + 13th DB).
+    - IMDA: envelope.chora_imda_dimension = "accountability"
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  userSubscriptionCreated:
+    address: chora.payments.user_subscription.created.v1
+    messages:
+      userSubscriptionCreated:
+        $ref: '#/components/messages/UserSubscriptionCreated'
+
+operations:
+  publishUserSubscriptionCreated:
+    action: send
+    channel:
+      $ref: '#/channels/userSubscriptionCreated'
+    messages:
+      - $ref: '#/channels/userSubscriptionCreated/messages/userSubscriptionCreated'
+
+  consumeUserSubscriptionCreated:
+    action: receive
+    channel:
+      $ref: '#/channels/userSubscriptionCreated'
+    messages:
+      - $ref: '#/channels/userSubscriptionCreated/messages/userSubscriptionCreated'
+
+components:
+  messages:
+    UserSubscriptionCreated:
+      name: UserSubscriptionCreated
+      title: Stripe Subscription object created (BEFORE first payment)
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/payments/user_subscription.proto#/chora.payments.v1.UserSubscriptionCreated'

@@ -1,0 +1,67 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Payments — TenantAddonPurchasePaymentRecovered
+  version: 1.0.0
+  description: |
+    chora-payments observed Stripe `invoice.payment_succeeded` for a
+    H+ Marketplace tenant-add-on subscription whose prior sub_status was
+    past_due — Stripe smart-retry recovered the dunning cycle. Normal
+    renewal cycles (prior status active) do NOT emit this; the cycle-
+    anchor refresh comes via customer.subscription.updated.
+
+    chora-tenancy clears the past_due flag; chora-notifications sends a
+    recovery-confirmation email; chora-observability records the
+    successful retry.
+
+    - Domain: Payments (`chora_payments` DB)
+    - Topic: `chora.payments.tenant_addon_purchase.payment_recovered.v1`
+    - Source proto: `proto/events/payments/tenant_addon_purchase.proto`
+       message `chora.payments.v1.TenantAddonPurchasePaymentRecovered`
+    - Aggregate: TenantAddonPurchase (CHO-1736 H+ Marketplace Subscribe)
+    - CHO-1771 + CHO-1775 — Stripe Subscription lifecycle Phase 2.
+    - IMDA: envelope.chora_imda_dimension = "accountability"
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  tenantAddonPurchasePaymentRecovered:
+    address: chora.payments.tenant_addon_purchase.payment_recovered.v1
+    messages:
+      tenantAddonPurchasePaymentRecovered:
+        $ref: '#/components/messages/TenantAddonPurchasePaymentRecovered'
+
+operations:
+  publishTenantAddonPurchasePaymentRecovered:
+    action: send
+    channel:
+      $ref: '#/channels/tenantAddonPurchasePaymentRecovered'
+    messages:
+      - $ref: '#/channels/tenantAddonPurchasePaymentRecovered/messages/tenantAddonPurchasePaymentRecovered'
+
+  consumeTenantAddonPurchasePaymentRecovered:
+    action: receive
+    channel:
+      $ref: '#/channels/tenantAddonPurchasePaymentRecovered'
+    messages:
+      - $ref: '#/channels/tenantAddonPurchasePaymentRecovered/messages/tenantAddonPurchasePaymentRecovered'
+
+components:
+  messages:
+    TenantAddonPurchasePaymentRecovered:
+      name: TenantAddonPurchasePaymentRecovered
+      title: Stripe Subscription invoice payment recovered for a H+ Marketplace tenant add-on (CHO-1775)
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/payments/tenant_addon_purchase.proto#/chora.payments.v1.TenantAddonPurchasePaymentRecovered'

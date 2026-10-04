@@ -1,0 +1,74 @@
+asyncapi: "3.0.0"
+info:
+  title: "Chora Content Creation — media.uploaded.v1"
+  version: "1.0.0"
+  description: |
+    Published immediately after a successful upload to the GCS staging
+    bucket (signed-URL PUT). Triggers the async media processing pipeline
+    (Cloud Run Job) — security scan, content moderation, metadata
+    extraction, and variant generation.
+
+    Asset is in MEDIA_PROCESSING_STATUS_PENDING — NOT yet safe to serve to
+    learners. Wait for the corresponding `chora.creation.media.processed.v1`
+    event before binding the asset to public surfaces.
+
+    Owning team    : Team 1 (Content)
+    Owning domain  : Content Creation (chora_creation database)
+
+    Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 2 D8
+    + ADR-134 (legacy media-processor pipeline retained as the processing
+    model; topic taxonomy migrated to chora.creation.media.* per Tier 2 D8).
+  contact:
+    name: "Chora Platform Team — Content Track"
+  license:
+    name: "Proprietary"
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  production:
+    host: "pubsub.googleapis.com"
+    protocol: googlepubsub
+    description: "Google Cloud Pub/Sub (production)"
+  emulator:
+    host: "localhost:8085"
+    protocol: googlepubsub
+    description: "Cloud Pub/Sub Emulator (local dev)"
+
+channels:
+  mediaUploaded:
+    address: "chora.creation.media.uploaded.v1"
+    description: |
+      Pub/Sub topic for MediaUploaded events. The media-processor Cloud Run
+      Job is the primary subscriber.
+    messages:
+      mediaUploaded:
+        $ref: "#/components/messages/MediaUploaded"
+
+operations:
+  publishMediaUploaded:
+    action: send
+    channel:
+      $ref: "#/channels/mediaUploaded"
+    summary: "Publish a media asset upload event"
+    description: |
+      Producer: chora-creation service (Media adapter).
+      Consumers:
+        - media-processor (Cloud Run Job) -> kicks off processing pipeline
+        - audit log
+    messages:
+      - $ref: "#/channels/mediaUploaded/messages/mediaUploaded"
+
+components:
+  messages:
+    MediaUploaded:
+      name: "MediaUploaded"
+      title: "Media Uploaded"
+      summary: "A media asset has been uploaded to staging — pipeline pending"
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf;version=3
+      payload:
+        schemaFormat: "application/vnd.google.protobuf;version=3"
+        schema:
+          protoFile: "proto/events/creation/media.proto"
+          messageName: "chora.creation.v1.MediaUploaded"

@@ -1,0 +1,47 @@
+asyncapi: 3.0.0
+info:
+  title: Chora AI Kernel — BrokerBudgetExhausted
+  version: 1.0.0
+  description: |
+    Published by chora-model-broker-gateway when a tenant's rate-limit
+    token bucket is exhausted (HTTP 429 on /broker/route).
+
+    - Domain: AI Kernel (`chora_ai_kernel` DB)
+    - Topic: `chora.ai_kernel.broker_budget.exhausted.v1`
+    - Producer: chora-model-broker-gateway
+    - Consumers: Notifications (alert tenant admin),
+      O+ runtime control surface.
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  brokerBudgetExhausted:
+    address: chora.ai_kernel.broker_budget.exhausted.v1
+    messages:
+      brokerBudgetExhausted:
+        $ref: '#/components/messages/BrokerBudgetExhausted'
+
+operations:
+  publishBrokerBudgetExhausted:
+    action: send
+    channel:
+      $ref: '#/channels/brokerBudgetExhausted'
+    messages:
+      - $ref: '#/channels/brokerBudgetExhausted/messages/brokerBudgetExhausted'
+
+components:
+  messages:
+    BrokerBudgetExhausted:
+      name: BrokerBudgetExhausted
+      title: Broker Budget Exhausted
+      summary: A tenant's rate-limit budget has been consumed
+      contentType: application/vnd.google.protobuf

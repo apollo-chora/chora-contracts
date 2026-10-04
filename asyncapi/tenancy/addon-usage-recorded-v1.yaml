@@ -1,0 +1,62 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Tenancy — AddonUsageRecorded
+  version: 1.0.0
+  description: |
+    Published when usage-metered add-on activity is recorded.
+    HIGH-VOLUME — expect bursts; consumers (BigQuery streaming, billing
+    aggregation, observability dashboards) must be idempotent.
+
+    - Domain: Tenancy + Billing (`chora_tenancy` DB)
+    - Topic: `chora.tenancy.addon.usage_recorded.v1`
+    - Source proto: `proto/events/tenancy/addon.proto`
+       message `chora.tenancy.v1.AddonUsageRecorded`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  addonUsageRecorded:
+    address: chora.tenancy.addon.usage_recorded.v1
+    messages:
+      addonUsageRecorded:
+        $ref: '#/components/messages/AddonUsageRecorded'
+
+operations:
+  publishAddonUsageRecorded:
+    action: send
+    channel:
+      $ref: '#/channels/addonUsageRecorded'
+    messages:
+      - $ref: '#/channels/addonUsageRecorded/messages/addonUsageRecorded'
+
+  consumeAddonUsageRecorded:
+    action: receive
+    channel:
+      $ref: '#/channels/addonUsageRecorded'
+    description: |
+      Consumers: BigQuery streaming (cost analytics), Billing
+      aggregator (Stripe metered billing), O+ KPI dashboards.
+    messages:
+      - $ref: '#/channels/addonUsageRecorded/messages/addonUsageRecorded'
+
+components:
+  messages:
+    AddonUsageRecorded:
+      name: AddonUsageRecorded
+      title: Add-On Usage Recorded
+      summary: Metered add-on usage event
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/tenancy/addon.proto#/chora.tenancy.v1.AddonUsageRecorded'

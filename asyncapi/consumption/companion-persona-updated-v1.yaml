@@ -1,0 +1,82 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Content Consumption — CompanionPersonaUpdated
+  version: 1.0.0
+  description: |
+    Published when a learner saves their Companion's Persona (CHO-2015, ADR-219 D2).
+
+    - Domain: Content Consumption (`chora_consumption` DB)
+    - Aggregate root: `Companion` (DOMAIN ENTITY — not an AI agent)
+    - Topic: `chora.consumption.companion.persona_updated.v1`
+    - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
+    - Source proto: `proto/events/consumption/companion.proto`
+       message `chora.consumption.v1.CompanionPersonaUpdated`
+
+    **PRIVACY** — the learner's free-text guidance note is NEVER on the wire.
+    Only `has_guidance_note` (a boolean) and the bounded persona knobs
+    (`tone`, `difficulty_cap`, `address_style`, `persona_version`) are emitted.
+    The note itself stays in `chora_consumption` and is Model-Armor-screened at
+    save (B1) + runtime-fenced in the agent prompt (B3).
+
+    **CRITICAL** — `Companion` here is the in-game RPG companion as a domain
+    entity. The AI agent that powers Companion responses is a SEPARATE adapter
+    concern in AI Kernel (`chora.ai_kernel.*`).
+
+    Emitted best-effort from the persona PUT handler via the loadout outbox — a
+    failed enqueue is logged loud but NEVER fails the persona save (this is a
+    consumer-less audit/cache signal today). Embeds the mandatory
+    `chora.common.v1.EventEnvelope` as field 1.
+  contact:
+    name: Chora Platform Team (Team 3) + Team 1 (Content)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+    description: Google Cloud Pub/Sub (chora-489812 platform host)
+
+channels:
+  companionPersonaUpdated:
+    address: chora.consumption.companion.persona_updated.v1
+    description: Single-event topic for CompanionPersonaUpdated.
+    messages:
+      companionPersonaUpdated:
+        $ref: '#/components/messages/CompanionPersonaUpdated'
+
+operations:
+  publishCompanionPersonaUpdated:
+    action: send
+    channel:
+      $ref: '#/channels/companionPersonaUpdated'
+    summary: Publish a CompanionPersonaUpdated event
+    messages:
+      - $ref: '#/channels/companionPersonaUpdated/messages/companionPersonaUpdated'
+
+  consumeCompanionPersonaUpdated:
+    action: receive
+    channel:
+      $ref: '#/channels/companionPersonaUpdated'
+    summary: Subscribe to CompanionPersonaUpdated events
+    description: |
+      No production consumer today — reserved for IMDA D1/D2 persona-change
+      audit and a future persona-config cache-invalidation subscriber. The note
+      text is deliberately absent from the payload.
+    messages:
+      - $ref: '#/channels/companionPersonaUpdated/messages/companionPersonaUpdated'
+
+components:
+  messages:
+    CompanionPersonaUpdated:
+      name: CompanionPersonaUpdated
+      title: Companion Persona Updated
+      summary: A learner saved their Companion's Persona (bounded knobs + note-present flag only)
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/consumption/companion.proto#/chora.consumption.v1.CompanionPersonaUpdated'

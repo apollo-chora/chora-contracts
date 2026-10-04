@@ -1,0 +1,436 @@
+openapi: "3.2.0"
+info:
+  title: Chora Support & Service API
+  version: "0.1.0"
+  description: |
+    Support & Service REST API for the Chora support lifecycle (CHO-24).
+
+    Covers help-center articles + ticket lifecycle + SLA policies +
+    escalation + post-resolution CSAT feedback per design doc
+    `docs/design/ux_support_service.md` (VS12).
+
+    Surfaces:
+      A+ Reader      — learner submits tickets + reads help articles
+      H+ Hub+        — tenant-admin manages KB + tickets + SLA policy
+      O+             — auditor / admin sees CSAT + escalation metrics
+
+    Auth: Identity Platform JWT (Bearer). All routes are tenant-scoped
+    via the `X-Tenant-Id` + `X-Gcid` headers.
+
+    Owning team    : Team 3 (Platform) — supporting domain
+    Owning service : services/chora-support (Go 1.26+)
+    Database       : chora_support (M12+)
+    Topic prefix   : chora.support.*
+
+    Per AP-01 (API-First Design): this contract exists BEFORE Postgres +
+    Pub/Sub wiring. Greenfield service per CHO-24.
+
+  contact:
+    name: Chora Platform Team — Support track
+  license:
+    name: Proprietary
+
+servers:
+  - url: https://api.chora.io
+    description: Production
+  - url: http://localhost:8080
+    description: Local dev
+
+components:
+  parameters:
+    TenantHeader:
+      in: header
+      name: X-Tenant-Id
+      required: true
+      schema:
+        type: string
+      description: Tenant identifier; required on every protected route.
+    GCIDHeader:
+      in: header
+      name: X-Gcid
+      required: true
+      schema:
+        type: string
+      description: Global Chora ID of the actor (UUIDv7 opaque).
+    TraceparentHeader:
+      in: header
+      name: Traceparent
+      required: false
+      schema:
+        type: string
+      description: W3C Trace Context — propagated across Pub/Sub.
+
+  schemas:
+    Article:
+      type: object
+      required: [id, tenant_id, category, title, body, view_count]
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string }
+        category: { type: string, example: "billing" }
+        title: { type: string }
+        body: { type: string }
+        view_count: { type: integer, minimum: 0 }
+        created_at: { type: string, format: date-time }
+
+    ArticleCreateRequest:
+      type: object
+      required: [category, title, body]
+      properties:
+        category: { type: string }
+        title: { type: string }
+        body: { type: string }
+
+    Ticket:
+      type: object
+      required: [id, tenant_id, reporter_gcid, subject, description, status, priority]
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string }
+        reporter_gcid: { type: string }
+        subject: { type: string }
+        description: { type: string }
+        category: { type: string }
+        status:
+          type: string
+          enum: [OPEN, TRIAGED, IN_PROGRESS, RESOLVED, CLOSED]
+        priority:
+          type: string
+          enum: [LOW, MEDIUM, HIGH, CRITICAL]
+        assignee_gcid: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        resolved_at: { type: string, format: date-time, nullable: true }
+        escalated: { type: boolean }
+
+    TicketCreateRequest:
+      type: object
+      required: [subject, description, priority]
+      properties:
+        subject: { type: string, minLength: 3 }
+        description: { type: string, minLength: 20 }
+        category: { type: string }
+        priority:
+          type: string
+          enum: [LOW, MEDIUM, HIGH, CRITICAL]
+
+    TicketAssignRequest:
+      type: object
+      required: [assignee_gcid]
+      properties:
+        assignee_gcid: { type: string }
+
+    TicketStatusRequest:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [OPEN, TRIAGED, IN_PROGRESS, RESOLVED, CLOSED]
+
+    SLAPolicy:
+      type: object
+      required: [tenant_id, priority, response_minutes, resolution_minutes]
+      properties:
+        tenant_id: { type: string }
+        priority:
+          type: string
+          enum: [LOW, MEDIUM, HIGH, CRITICAL]
+        response_minutes: { type: integer, minimum: 1 }
+        resolution_minutes: { type: integer, minimum: 1 }
+
+    SLAPolicyUpdateRequest:
+      type: object
+      required: [priority, response_minutes, resolution_minutes]
+      properties:
+        priority:
+          type: string
+          enum: [LOW, MEDIUM, HIGH, CRITICAL]
+        response_minutes: { type: integer, minimum: 1 }
+        resolution_minutes: { type: integer, minimum: 1 }
+
+    Feedback:
+      type: object
+      required: [id, ticket_id, tenant_id, reporter_gcid, csat_score]
+      properties:
+        id: { type: string, format: uuid }
+        ticket_id: { type: string, format: uuid }
+        tenant_id: { type: string }
+        reporter_gcid: { type: string }
+        csat_score:
+          type: integer
+          minimum: 1
+          maximum: 5
+        comment: { type: string }
+        created_at: { type: string, format: date-time }
+
+    FeedbackCreateRequest:
+      type: object
+      required: [csat_score]
+      properties:
+        csat_score:
+          type: integer
+          minimum: 1
+          maximum: 5
+        comment: { type: string }
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+
+paths:
+  /healthz:
+    get:
+      summary: Liveness probe
+      responses:
+        "200":
+          description: ok
+
+  /readyz:
+    get:
+      summary: Readiness probe
+      responses:
+        "200":
+          description: ready
+
+  /api/help/articles:
+    get:
+      summary: List help-center articles (filtered by category + query)
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/GCIDHeader'
+        - in: query
+          name: category
+          schema: { type: string }
+        - in: query
+          name: q
+          schema: { type: string }
+      responses:
+        "200":
+          description: matched articles
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Article' }
+    post:
+      summary: Create a new help-center article (admin)
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/GCIDHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ArticleCreateRequest' }
+      responses:
+        "201":
+          description: created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Article' }
+
+  /api/help/articles/{id}:
+    get:
+      summary: Read article (increments view_count)
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/GCIDHeader'
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: article
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Article' }
+        "404":
+          description: not found
+
+  /api/tickets:
+    get:
+      summary: List tickets (reporter or assignee scope)
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/GCIDHeader'
+        - in: query
+          name: status
+          schema: { type: string }
+      responses:
+        "200":
+          description: tickets
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Ticket' }
+    post:
+      summary: Submit a ticket (emits chora.support.ticket.opened.v1)
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/GCIDHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TicketCreateRequest' }
+      responses:
+        "201":
+          description: opened
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Ticket' }
+
+  /api/tickets/{id}:
+    get:
+      summary: Read ticket
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/GCIDHeader'
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: ticket
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Ticket' }
+
+  /api/tickets/{id}/assign:
+    patch:
+      summary: Assign ticket to a support agent (TRIAGED)
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/GCIDHeader'
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TicketAssignRequest' }
+      responses:
+        "200":
+          description: assigned
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Ticket' }
+
+  /api/tickets/{id}/status:
+    patch:
+      summary: Transition ticket status
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/GCIDHeader'
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TicketStatusRequest' }
+      responses:
+        "200":
+          description: transitioned
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Ticket' }
+
+  /api/tickets/{id}/escalate:
+    post:
+      summary: Escalate ticket (manual or auto on SLA breach)
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/GCIDHeader'
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: escalated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Ticket' }
+
+  /api/tickets/{id}/feedback:
+    post:
+      summary: Submit post-resolution CSAT feedback
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/GCIDHeader'
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FeedbackCreateRequest' }
+      responses:
+        "201":
+          description: feedback recorded
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Feedback' }
+
+  /api/sla/policies:
+    get:
+      summary: List SLA policies for tenant (or platform defaults)
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/GCIDHeader'
+      responses:
+        "200":
+          description: policies
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/SLAPolicy' }
+    put:
+      summary: Override SLA policy for tenant + priority
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/GCIDHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SLAPolicyUpdateRequest' }
+      responses:
+        "200":
+          description: updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SLAPolicy' }
+
+  /api/sla/check:
+    post:
+      summary: Check open tickets for SLA breach + auto-escalate
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/GCIDHeader'
+      responses:
+        "200":
+          description: check report
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  checked: { type: integer }
+                  breached: { type: integer }
+                  escalated:
+                    type: array
+                    items: { type: string, format: uuid }

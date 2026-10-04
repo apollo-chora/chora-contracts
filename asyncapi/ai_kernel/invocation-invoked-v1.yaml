@@ -1,0 +1,62 @@
+asyncapi: 3.0.0
+info:
+  title: Chora AI Kernel — ModelInvoked
+  version: 1.0.0
+  description: |
+    Published at invocation start. Carries pre-invocation metadata for
+    downstream correlation. NOT emitted for in-flight retries — only for
+    distinct top-level calls.
+
+    - Domain: AI Kernel (`chora_ai_kernel` DB)
+    - Topic: `chora.ai_kernel.invocation.invoked.v1`
+    - Source proto: `proto/events/ai_kernel/invocation.proto`
+       message `chora.ai_kernel.v1.ModelInvoked`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  modelInvoked:
+    address: chora.ai_kernel.invocation.invoked.v1
+    messages:
+      modelInvoked:
+        $ref: '#/components/messages/ModelInvoked'
+
+operations:
+  publishModelInvoked:
+    action: send
+    channel:
+      $ref: '#/channels/modelInvoked'
+    messages:
+      - $ref: '#/channels/modelInvoked/messages/modelInvoked'
+
+  consumeModelInvoked:
+    action: receive
+    channel:
+      $ref: '#/channels/modelInvoked'
+    description: |
+      Consumers: AI Kernel Guardrail Service (input-tier eval),
+      Observability (in-flight invocation tracking).
+    messages:
+      - $ref: '#/channels/modelInvoked/messages/modelInvoked'
+
+components:
+  messages:
+    ModelInvoked:
+      name: ModelInvoked
+      title: Model Invoked
+      summary: A model invocation has started
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/ai_kernel/invocation.proto#/chora.ai_kernel.v1.ModelInvoked'

@@ -1,0 +1,565 @@
+openapi: "3.2.0"
+info:
+  title: "Chora Course Application API"
+  version: "1.0.0"
+  description: |
+    REST surface for the Course Application UX — 7-screen flow from
+    `docs/design/ux_course_application.md`. Owning service:
+    `chora-delivery` (Content Delivery domain, `chora_delivery` DB).
+
+    State machine:
+      Draft -> Submitted -> UnderReview -> OfferMade ->
+              Accepted/Withdrawn -> Paid -> Enrolled
+      OR    UnderReview -> Rejected (terminal)
+
+    The 7 screens map to:
+      Screen 1: New Application (POST /applications -> Draft)
+      Screen 2: Singpass MyInfo Retrieve (POST /applications/{id}/myinfo:retrieve)
+      Screen 3: Submit Application (POST /applications/{id}:submit)
+      Screen 4: Reviewer Decision (POST /applications/{id}:offer | :reject)
+      Screen 5: Offer Acceptance (POST /applications/{id}:accept | :withdraw)
+      Screen 6: Stripe Elements Payment (POST /applications/{id}/payment:intent
+                + POST /applications/{id}/payment:capture)
+      Screen 7: Confirmation + Tax Invoice (GET /applications/{id})
+
+    Owning team : Team 2 (Delivery)
+    Surfaces    : A+ applicant-facing + R+ reviewer admin
+
+    Cross-domain flow:
+      ApplicationAccepted -> chora.identity.role.granted.v1 (learner role)
+      ApplicationPaid     -> chora.tenancy.tenant.payment_captured.v1
+      ApplicationEnrolled -> chora.delivery.enrollment.created.v1
+      Tax invoice PDF -> generated on ApplicationPaid; emailed via
+                         chora-notifications subscriber
+
+    AP-01: this contract exists BEFORE implementation. State transitions
+    are TDD-tested per `.claude/rules/development-execution.md`.
+
+    Error model: 401/403/404 propagate; 409 returned for invalid state
+    transitions; 502 for upstream cascades.
+  contact:
+    name: "Chora Delivery Team (Team 2)"
+  license:
+    name: "Proprietary"
+
+servers:
+  - url: "https://api.chora.site/v1"
+    description: Production
+  - url: "https://api.dev.chora.site/v1"
+    description: Development
+  - url: "http://localhost:8086/v1"
+    description: Local development
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Applications
+    description: Course Application aggregate lifecycle (7-screen UX)
+  - name: Singpass MyInfo
+    description: Pre-fill from Singpass NDI for SG residents
+  - name: Reviewer
+    description: Reviewer-side decision endpoints (R+ admin queue)
+  - name: Payment
+    description: Stripe Elements server-side intent + capture
+  - name: TaxInvoice
+    description: Tax-invoice PDF generation + retrieval
+
+paths:
+
+  /applications:
+    post:
+      operationId: createApplication
+      tags: [Applications]
+      summary: "Screen 1 — Create draft application"
+      description: |
+        Initial Draft creation. Returns application_id (UUIDv7) for
+        subsequent screens.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateApplicationRequest"
+      responses:
+        "201":
+          description: "Draft application created"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Application"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+    get:
+      operationId: listApplications
+      tags: [Applications]
+      summary: "List applications (applicant or reviewer view)"
+      description: |
+        For applicant: returns own applications. For reviewer (instructor /
+        admin): returns applications for courses they own.
+      parameters:
+        - $ref: "#/components/parameters/StatusFilter"
+        - $ref: "#/components/parameters/CourseIdFilter"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: "Applications page"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApplicationList"
+
+  /applications/{application_id}:
+    parameters:
+      - $ref: "#/components/parameters/ApplicationIdPath"
+    get:
+      operationId: getApplication
+      tags: [Applications]
+      summary: "Screen 7 — Read application detail (incl. tax invoice link)"
+      responses:
+        "200":
+          description: "Application detail"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Application"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /applications/{application_id}/myinfo:retrieve:
+    parameters:
+      - $ref: "#/components/parameters/ApplicationIdPath"
+    post:
+      operationId: retrieveMyInfo
+      tags: [Singpass MyInfo]
+      summary: "Screen 2 — Retrieve Singpass MyInfo to pre-fill"
+      description: |
+        Calls chora-identity Singpass adapter to fetch MyInfo profile (name,
+        NRIC mask, address, employment). Persisted on the Application
+        aggregate. Idempotent — re-call refreshes the snapshot.
+      responses:
+        "200":
+          description: "MyInfo retrieved + persisted"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MyInfoSnapshot"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /applications/{application_id}:submit:
+    parameters:
+      - $ref: "#/components/parameters/ApplicationIdPath"
+    post:
+      operationId: submitApplication
+      tags: [Applications]
+      summary: "Screen 3 — Submit application (Draft -> Submitted)"
+      description: |
+        Transitions Draft -> Submitted. Emits
+        `chora.delivery.application.submitted.v1` event.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubmitApplicationRequest"
+      responses:
+        "200":
+          description: "Submitted"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Application"
+        "409":
+          description: "Invalid state transition"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /applications/{application_id}:offer:
+    parameters:
+      - $ref: "#/components/parameters/ApplicationIdPath"
+    post:
+      operationId: makeOffer
+      tags: [Reviewer]
+      summary: "Screen 4 — Reviewer makes offer (UnderReview -> OfferMade)"
+      description: |
+        Reviewer (instructor / admin) decides + makes an offer.
+        Emits `chora.delivery.application.offer_made.v1`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MakeOfferRequest"
+      responses:
+        "200":
+          description: "Offer made"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Application"
+
+  /applications/{application_id}:reject:
+    parameters:
+      - $ref: "#/components/parameters/ApplicationIdPath"
+    post:
+      operationId: rejectApplication
+      tags: [Reviewer]
+      summary: "Screen 4 (alt) — Reviewer rejects (UnderReview -> Rejected)"
+      description: |
+        Terminal rejection. Distinct from withdrawal (applicant-side terminal).
+        Emits `chora.delivery.application.rejected.v1`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RejectApplicationRequest"
+      responses:
+        "200":
+          description: "Rejected"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Application"
+
+  /applications/{application_id}:accept:
+    parameters:
+      - $ref: "#/components/parameters/ApplicationIdPath"
+    post:
+      operationId: acceptOffer
+      tags: [Applications]
+      summary: "Screen 5 — Applicant accepts offer (OfferMade -> Accepted)"
+      description: |
+        Triggers downstream Stripe PaymentIntent creation +
+        `chora.identity.role.granted.v1` learner role projection.
+        Emits `chora.delivery.application.accepted.v1`.
+      responses:
+        "200":
+          description: "Offer accepted"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Application"
+
+  /applications/{application_id}:withdraw:
+    parameters:
+      - $ref: "#/components/parameters/ApplicationIdPath"
+    post:
+      operationId: withdrawApplication
+      tags: [Applications]
+      summary: "Screen 5 (alt) — Applicant withdraws"
+      description: |
+        Withdrawal terminal. Pre-payment only. Emits
+        `chora.delivery.application.withdrawn.v1`.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WithdrawApplicationRequest"
+      responses:
+        "200":
+          description: "Withdrawn"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Application"
+
+  /applications/{application_id}/payment:intent:
+    parameters:
+      - $ref: "#/components/parameters/ApplicationIdPath"
+    post:
+      operationId: createPaymentIntent
+      tags: [Payment]
+      summary: "Screen 6 — Create Stripe PaymentIntent (server-side)"
+      description: |
+        Server-side Stripe Elements PaymentIntent creation. Returns
+        client_secret for browser-side Stripe.js mounting.
+      responses:
+        "200":
+          description: "PaymentIntent created"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentIntent"
+
+  /applications/{application_id}/payment:capture:
+    parameters:
+      - $ref: "#/components/parameters/ApplicationIdPath"
+    post:
+      operationId: capturePayment
+      tags: [Payment]
+      summary: "Screen 6 — Capture confirmed PaymentIntent (Accepted -> Paid)"
+      description: |
+        Called after browser-side Stripe.js confirms the PaymentIntent.
+        Server-side capture transitions Accepted -> Paid. Emits
+        `chora.delivery.application.paid.v1` +
+        `chora.tenancy.tenant.payment_captured.v1`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CapturePaymentRequest"
+      responses:
+        "200":
+          description: "Payment captured"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Application"
+
+  /applications/{application_id}/tax-invoice:
+    parameters:
+      - $ref: "#/components/parameters/ApplicationIdPath"
+    get:
+      operationId: getTaxInvoice
+      tags: [TaxInvoice]
+      summary: "Screen 7 — Download tax invoice PDF"
+      description: |
+        Returns the tax-invoice PDF generated on ApplicationPaid. Includes
+        funding-source line items (LearnerPaid / SkillsFutures /
+        EmployerSponsored / TenantSubsidy / Scholarship).
+      responses:
+        "200":
+          description: "Tax invoice PDF"
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [Health]
+      summary: "Service health"
+      security: []
+      responses:
+        "200":
+          description: "Healthy"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [healthy] }
+
+components:
+  parameters:
+    ApplicationIdPath:
+      name: application_id
+      in: path
+      required: true
+      description: "Application UUIDv7"
+      schema:
+        type: string
+        format: uuid
+    StatusFilter:
+      name: status
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [draft, submitted, under_review, offer_made, accepted, withdrawn, paid, enrolled, rejected]
+    CourseIdFilter:
+      name: course_id
+      in: query
+      required: false
+      schema:
+        type: string
+        format: uuid
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      schema:
+        type: string
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+
+  schemas:
+    Application:
+      type: object
+      required: [application_id, applicant_gcid, course_id, status]
+      properties:
+        application_id: { type: string, format: uuid }
+        applicant_gcid: { type: string, format: uuid }
+        course_id: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [draft, submitted, under_review, offer_made, accepted, withdrawn, paid, enrolled, rejected]
+        myinfo_retrieved_at: { type: string, format: date-time }
+        supporting_docs_uri: { type: string }
+        offer:
+          $ref: "#/components/schemas/OfferDetail"
+        payment:
+          $ref: "#/components/schemas/PaymentDetail"
+        tax_invoice_url: { type: string, format: uri }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    OfferDetail:
+      type: object
+      properties:
+        reviewer_gcid: { type: string, format: uuid }
+        offer_expires_at: { type: string, format: date-time }
+        price_micros: { type: integer, format: int64 }
+        currency: { type: string, minLength: 3, maxLength: 3 }
+        notes: { type: string, maxLength: 2048 }
+
+    PaymentDetail:
+      type: object
+      properties:
+        stripe_payment_intent_id: { type: string }
+        total_micros: { type: integer, format: int64 }
+        currency: { type: string, minLength: 3, maxLength: 3 }
+        funding_lines:
+          type: array
+          items:
+            $ref: "#/components/schemas/FundingLine"
+        captured_at: { type: string, format: date-time }
+
+    FundingLine:
+      type: object
+      required: [source, amount_micros]
+      properties:
+        source:
+          type: string
+          enum: [learner_paid, skillsfutures, employer_sponsored, tenant_subsidy, scholarship]
+        amount_micros: { type: integer, format: int64, minimum: 0 }
+        reference_id: { type: string }
+
+    ApplicationList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Application"
+        next_cursor: { type: string, nullable: true }
+
+    CreateApplicationRequest:
+      type: object
+      required: [course_id]
+      properties:
+        course_id: { type: string, format: uuid }
+        notes: { type: string, maxLength: 1024 }
+
+    SubmitApplicationRequest:
+      type: object
+      properties:
+        supporting_docs_uri:
+          type: string
+          description: "GCS URI of supporting documents (resume, certs, etc.)"
+
+    MakeOfferRequest:
+      type: object
+      required: [offer_expires_at, price_micros, currency]
+      properties:
+        offer_expires_at: { type: string, format: date-time }
+        price_micros: { type: integer, format: int64, minimum: 0 }
+        currency: { type: string, minLength: 3, maxLength: 3 }
+        notes: { type: string, maxLength: 2048 }
+
+    RejectApplicationRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason: { type: string, maxLength: 2048 }
+
+    WithdrawApplicationRequest:
+      type: object
+      properties:
+        reason: { type: string, maxLength: 1024 }
+
+    PaymentIntent:
+      type: object
+      required: [client_secret, stripe_payment_intent_id, amount_micros, currency]
+      properties:
+        client_secret: { type: string }
+        stripe_payment_intent_id: { type: string }
+        amount_micros: { type: integer, format: int64 }
+        currency: { type: string, minLength: 3, maxLength: 3 }
+        funding_lines:
+          type: array
+          items:
+            $ref: "#/components/schemas/FundingLine"
+
+    CapturePaymentRequest:
+      type: object
+      required: [stripe_payment_intent_id]
+      properties:
+        stripe_payment_intent_id: { type: string }
+        funding_lines:
+          type: array
+          items:
+            $ref: "#/components/schemas/FundingLine"
+
+    MyInfoSnapshot:
+      type: object
+      properties:
+        name: { type: string }
+        nric_masked: { type: string }
+        date_of_birth: { type: string, format: date }
+        nationality: { type: string }
+        residential_address: { type: string }
+        employment:
+          type: object
+          properties:
+            employer: { type: string }
+            occupation: { type: string }
+        retrieved_at: { type: string, format: date-time }
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+        message: { type: string }
+        trace_id: { type: string }
+
+  responses:
+    BadRequest:
+      description: "Bad request"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unauthorized:
+      description: "Unauthorized"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: "Application not found"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

@@ -1,0 +1,2944 @@
+openapi: "3.2.0"
+info:
+  title: "Chora Tenancy Admin API"
+  version: "1.6.0"
+  description: |
+    Admin-only REST API for the Tenancy + Billing supporting domain.
+
+    Covers Tenant CRUD, white-label config, add-on activation,
+    subscription management, invoice lookup, refund issuance, and
+    tenant-funded mana subsidy pools (`TenantManaPool` +
+    `TenantManaAllocation` per ADR-142 Q2 = v1).
+
+    Owning domain : Tenancy + Billing (`chora_tenancy` database) — combined
+    Owning team   : Team 3 (Platform)
+    Surface       : H+ Hub+ (admin) + O+ Observability+ (auditor read-only)
+
+    Note: Tenancy and Billing are COMBINED — single domain, single API
+    surface. There is NO separate billing-admin.yaml.
+
+    DigitalSkin is NEVER referenced here (it is earned, not purchased —
+    see chora.sharing.* events).
+
+    v1.2.0 (additive) — adds tenant subsidy mana pool endpoints used by
+    the H+ corporate L&D / cohort sponsorship workflows. Per-user mana
+    wallet endpoints live in `learner-economy.yaml` (different surface).
+  contact:
+    name: "Chora Platform Team (Team 3)"
+  license:
+    name: "Proprietary"
+
+servers:
+  - url: "https://api.chora.app"
+    description: "Production"
+  - url: "http://localhost:8080"
+    description: "Local development"
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Tenant
+    description: "Tenant CRUD + lifecycle"
+  - name: Whitelabel
+    description: "White-label / franchise branding"
+  - name: Addon
+    description: "Composable add-on plan management"
+  - name: AddonLifecycle
+    description: "Add-on activation, upgrade/downgrade, deactivation, usage analytics"
+  - name: Marketplace
+    description: "Tenant-facing marketplace browse for available add-on plans"
+  - name: Subscription
+    description: "Subscription management"
+  - name: Invoice
+    description: "Invoice lookup + refunds"
+  - name: ManaPool
+    description: "Tenant-funded mana subsidy pool (per ADR-142 Q2 = v1)"
+  - name: ManaAllocation
+    description: "Per-learner allocation from a TenantManaPool"
+  - name: Health
+    description: "Health check"
+
+paths:
+  /api/v1/admin/tenants:
+    get:
+      operationId: listTenants
+      summary: "List tenants"
+      tags: [Tenant]
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/HostingModeQuery"
+      responses:
+        "200":
+          description: "Tenants listed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantListResponse"
+    post:
+      operationId: createTenant
+      summary: "Create a tenant"
+      tags: [Tenant]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTenantRequest"
+      responses:
+        "201":
+          description: "Tenant created"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tenant"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /api/v1/tenants/bootstrap:
+    post:
+      operationId: bootstrapTenant
+      summary: "Self-onboard: bootstrap a tenant where the caller becomes its owner"
+      description: |
+        H+ Setup-Tenant Phase 1 (CHO-1628). Any authenticated user with NO
+        existing TenantMembership may bootstrap exactly one tenant in a
+        single atomic operation:
+
+          1. Creates a `tenants` row (status ACTIVE, empty branding)
+          2. Creates a `members` row linking the caller's GCID with role
+             `owner` (status `active`, `joined_at = now()`)
+          3. Creates a `tenant_entitlements` row for the `core` add-on
+
+        Caller's GCID is read from the verified Chora session JWT — never
+        from the request body.
+
+        Phase 1 scope: chora-tenancy writes only. The mirror row in
+        `chora_identity.tenant_memberships` lands via Pub/Sub event in
+        Phase 2 (see CHO-1628 Out of scope).
+
+        Idempotency: 409 Conflict if the caller already holds an active
+        TenantMembership anywhere. Re-issue is NOT allowed in Phase 1.
+      tags: [Tenant]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BootstrapTenantRequest"
+      responses:
+        "201":
+          description: "Tenant bootstrapped"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BootstrapTenantResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/v1/tenancy/sub-tenants:
+    post:
+      operationId: createSubTenant
+      summary: "Operator: create a franchise sub-tenant under a parent (ADR-217 Model β)"
+      description: |
+        ADR-217 Phase 2.2 (CHO-2008). A platform_operator provisions a sub-tenant
+        under an existing parent tenant. chora-gateway proxies this to
+        chora-tenancy's Tenancy/CreateSubTenant gRPC, which persists the sub-tenant
+        atomically (tenant + owner-member + core entitlement + outbox event) with
+        parent_tenant_id + hosting_mode. The migration-0026 parent-invariant
+        trigger validates the parent resolves into the chora-master tree at persist
+        time (foreign root / cycle → 409).
+
+        AUTHZ: platform_operator ONLY. This gateway gate is the SOLE
+        application-layer authorization — chora-tenancy does no role check (it
+        trusts the Istio allow-list + this gate). owner_gcid is the sub-tenant
+        owner's GCID; hosting_mode is optional (UNSPECIFIED → FRANCHISE).
+      tags: [Tenant]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSubTenantRequest"
+      responses:
+        "201":
+          description: "Sub-tenant created"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tenant"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/v1/tenancy/tenants/current/hierarchy:
+    get:
+      operationId: getCurrentTenantHierarchy
+      summary: "Operator/Tenant Admin: direct children of the current tenant (ADR-217 Model β)"
+      description: |
+        ADR-217 Phase 2.3b (CHO-2010). Returns the DIRECT children of the
+        caller's CURRENT tenant (resolved from the validated session JWT — never
+        a client-supplied id, so no cross-tenant enumeration) with a per-child
+        live-member count. is_parent is true when the current tenant has >= 1
+        non-deleted direct child. Backs the H+ tenant-deletion parent-check + the
+        operator managed-tenant picker.
+
+        chora-gateway proxies this to chora-tenancy's Tenancy/GetTenantHierarchy
+        gRPC; direct children come from the RLS-free tenants registry, and each
+        child's user_count is read under that child's OWN RLS scope.
+
+        AUTHZ: platform_operator OR tenant_admin. This gateway gate is the SOLE
+        application-layer authorization (chora-tenancy does no role check — it
+        trusts the Istio allow-list + this gate). The gate is REQUIRED: ADR-182
+        auto-enrols new learners into the public chora-master tenant, so an
+        ungated read would let any learner enumerate chora-master's franchises +
+        user counts.
+
+        atom_count is 0 for now — atoms live in chora_creation and cross-DB reads
+        are forbidden; a future event-fed projection will populate it.
+      tags: [Tenant]
+      responses:
+        "200":
+          description: "The current tenant's direct children + per-child counts"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantHierarchy"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/admin/tenants/{tenantId}:
+    parameters:
+      - $ref: "#/components/parameters/TenantIdPath"
+    get:
+      operationId: getTenant
+      summary: "Get a tenant"
+      tags: [Tenant]
+      responses:
+        "200":
+          description: "Tenant found"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tenant"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updateTenant
+      summary: "Update tenant fields"
+      tags: [Tenant]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateTenantRequest"
+      responses:
+        "200":
+          description: "Tenant updated"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tenant"
+
+  /api/v1/admin/tenants/{tenantId}/suspend:
+    parameters:
+      - $ref: "#/components/parameters/TenantIdPath"
+    post:
+      operationId: suspendTenant
+      summary: "Suspend a tenant"
+      tags: [Tenant]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SuspendTenantRequest"
+      responses:
+        "200":
+          description: "Tenant suspended"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tenant"
+
+  /api/v1/admin/tenants/{tenantId}/reactivate:
+    parameters:
+      - $ref: "#/components/parameters/TenantIdPath"
+    post:
+      operationId: reactivateTenant
+      summary: "Reactivate a suspended tenant"
+      tags: [Tenant]
+      responses:
+        "200":
+          description: "Tenant reactivated"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tenant"
+
+  /api/v1/admin/tenants/{tenantId}/golive:
+    parameters:
+      - $ref: "#/components/parameters/TenantIdPath"
+    post:
+      operationId: goLiveTenant
+      summary: "Move tenant from PROVISIONING to ACTIVE (Phyllis MVP §5.2)"
+      description: |
+        Transitions tenant state PROVISIONING -> ACTIVE. Triggers Stripe
+        Customer creation, default add-on activation (base / cms / ai_assist /
+        companion per Phyllis MVP §3 Step 2), and "workspace ready"
+        notification email.
+
+        Emits `chora.tenancy.tenant.golive.v1` Pub/Sub event.
+
+        Idempotent — calling on an already-ACTIVE tenant returns 200 with
+        no state change.
+      tags: [Tenant]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GoLiveTenantRequest"
+      responses:
+        "200":
+          description: "Tenant active"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tenant"
+        "409":
+          description: "Invalid state transition (e.g., tenant already CLOSED)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/admin/tenants/{tenantId}/close:
+    parameters:
+      - $ref: "#/components/parameters/TenantIdPath"
+    post:
+      operationId: closeTenant
+      summary: "Permanently close a tenant (triggers federated closure saga)"
+      tags: [Tenant]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CloseTenantRequest"
+      responses:
+        "202":
+          description: "Closure accepted; saga started"
+
+  /api/v1/admin/tenants/{tenantId}/whitelabel:
+    parameters:
+      - $ref: "#/components/parameters/TenantIdPath"
+    put:
+      operationId: configureWhitelabel
+      summary: "Configure white-label / franchise branding"
+      tags: [Whitelabel]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConfigureWhitelabelRequest"
+      responses:
+        "200":
+          description: "Whitelabel configured"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WhitelabelConfig"
+
+  /api/v1/admin/tenants/{tenantId}/addons:
+    parameters:
+      - $ref: "#/components/parameters/TenantIdPath"
+    get:
+      operationId: listTenantAddons
+      summary: "List active add-ons for a tenant"
+      tags: [Addon]
+      responses:
+        "200":
+          description: "Add-ons listed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AddonListResponse"
+    post:
+      operationId: activateAddon
+      summary: "Activate an add-on plan"
+      tags: [Addon]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ActivateAddonRequest"
+      responses:
+        "201":
+          description: "Add-on activated"
+
+  /api/v1/admin/tenants/{tenantId}/addons/{addonPlanId}:
+    parameters:
+      - $ref: "#/components/parameters/TenantIdPath"
+      - $ref: "#/components/parameters/AddonPlanIdPath"
+    get:
+      operationId: getTenantAddonDetail
+      summary: "Get add-on detail for a tenant (entitlements + integrations + compliance + pricing breakdown)"
+      description: |
+        Powers STITCH-H-ADD-1 (management dashboard sub-tab) and
+        STITCH-H-ADD-5 (marketplace tile detail expansion). Returns the
+        full AddOnDetail including the tenant's current subscription
+        snapshot when active.
+      tags: [AddonLifecycle]
+      responses:
+        "200":
+          description: "Add-on detail returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AddOnDetail"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: changeAddonTier
+      summary: "Upgrade or downgrade an add-on tier in place"
+      description: |
+        Powers STITCH-H-ADD-4 in-place upgrade/downgrade flow. Computes
+        the price delta against Stripe with the chosen proration mode and
+        returns the resulting subscription change, billing delta and (if
+        scheduled) a Stripe schedule_id.
+
+        Returns 409 if the add-on is not in an upgrade-eligible state
+        (e.g., pending cancellation, dunning, or terminal). Returns 422
+        if the target plan is invalid or incompatible with the current
+        plan family.
+      tags: [AddonLifecycle]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangeAddonTierRequest"
+      responses:
+        "200":
+          description: "Tier change accepted"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChangeAddonTierResponse"
+        "409":
+          description: "Tier change conflict (not upgrade-eligible)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+    delete:
+      operationId: deactivateAddon
+      summary: "Deactivate an add-on (DELETE-with-body, RFC 9110 §9.3.5)"
+      description: |
+        Original DELETE deactivation endpoint. Clients SHOULD prefer the
+        action-style POST `:deactivate` sibling for portability — many
+        HTTP clients silently strip request bodies on DELETE.
+      tags: [AddonLifecycle]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeactivateAddonRequest"
+      responses:
+        "204":
+          description: "Add-on deactivated"
+
+  /api/v1/admin/tenants/{tenantId}/addons/{addonPlanId}:deactivate:
+    parameters:
+      - $ref: "#/components/parameters/TenantIdPath"
+      - $ref: "#/components/parameters/AddonPlanIdPath"
+    post:
+      operationId: deactivateAddonAction
+      summary: "Deactivate an add-on (action-style endpoint with reason audit)"
+      description: |
+        Powers STITCH-H-ADD-2 deactivation modal. Captures the structured
+        reason enum (for audit/analytics) plus optional free-text and an
+        effective_at deferral (e.g., end of billing cycle vs immediate).
+        Preferred over DELETE-with-body for client portability.
+      tags: [AddonLifecycle]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeactivateAddonRequest"
+      responses:
+        "202":
+          description: "Deactivation accepted (may be effective_at deferred)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeactivateAddonResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /api/v1/admin/tenants/{tenantId}/addons/{addonPlanId}/usage:
+    parameters:
+      - $ref: "#/components/parameters/TenantIdPath"
+      - $ref: "#/components/parameters/AddonPlanIdPath"
+    get:
+      operationId: getAddonUsage
+      summary: "Get add-on usage analytics for a tenant (seats / quota / time-series)"
+      description: |
+        Powers STITCH-H-ADD-3 usage analytics screen. Returns aggregated
+        seats, quota consumption, time-series buckets, and a privacy-
+        preserving top-consumers list (pseudonymized GCIDs only — never
+        raw GCID; honours federated closure saga rules).
+      tags: [AddonLifecycle]
+      parameters:
+        - name: from
+          in: query
+          required: false
+          description: "Inclusive ISO 8601 start of analytics window (defaults to 30 days ago)"
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          description: "Exclusive ISO 8601 end of analytics window (defaults to now)"
+          schema:
+            type: string
+            format: date-time
+        - name: granularity
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [day, week, month]
+            default: day
+      responses:
+        "200":
+          description: "Usage analytics returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AddOnUsage"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/admin/marketplace/addons:
+    get:
+      operationId: listMarketplaceAddons
+      summary: "Browse available add-on plans (tenant marketplace)"
+      description: |
+        Powers STITCH-H-ADD-5 marketplace tile detail expansion (list
+        backing). Returns the public AddOnDetail catalogue, paginated.
+        `current_subscription` will be omitted in this endpoint's items —
+        callers should fetch the per-tenant detail endpoint for live
+        subscription snapshot.
+      tags: [Marketplace]
+      parameters:
+        - name: category
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: tier
+          in: query
+          required: false
+          schema:
+            type: string
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: "Marketplace add-ons listed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MarketplaceAddonListResponse"
+
+  /api/v1/admin/subscriptions:
+    get:
+      operationId: listSubscriptions
+      summary: "List subscriptions (filtered)"
+      tags: [Subscription]
+      parameters:
+        - $ref: "#/components/parameters/TenantIdQuery"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: "Subscriptions listed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubscriptionListResponse"
+    post:
+      operationId: createSubscription
+      summary: "Create a subscription"
+      tags: [Subscription]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSubscriptionRequest"
+      responses:
+        "201":
+          description: "Subscription created"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Subscription"
+
+  /api/v1/admin/subscriptions/{subscriptionId}:
+    parameters:
+      - name: subscriptionId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getSubscription
+      summary: "Get a subscription"
+      tags: [Subscription]
+      responses:
+        "200":
+          description: "Subscription found"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Subscription"
+    delete:
+      operationId: cancelSubscription
+      summary: "Cancel a subscription"
+      tags: [Subscription]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CancelSubscriptionRequest"
+      responses:
+        "200":
+          description: "Subscription cancelled"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Subscription"
+
+  /api/v1/admin/invoices:
+    get:
+      operationId: listInvoices
+      summary: "List invoices (filtered)"
+      tags: [Invoice]
+      parameters:
+        - $ref: "#/components/parameters/TenantIdQuery"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: "Invoices listed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InvoiceListResponse"
+
+  /api/v1/admin/invoices/{invoiceId}:
+    parameters:
+      - name: invoiceId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getInvoice
+      summary: "Get an invoice"
+      tags: [Invoice]
+      responses:
+        "200":
+          description: "Invoice found"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Invoice"
+
+  /api/v1/admin/invoices/{invoiceId}/refunds:
+    parameters:
+      - name: invoiceId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: issueRefund
+      summary: "Issue a refund against an invoice"
+      tags: [Invoice]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IssueRefundRequest"
+      responses:
+        "201":
+          description: "Refund issued"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Refund"
+
+  /api/v1/admin/tenants/{tenantId}/mana-pool:
+    parameters:
+      - $ref: "#/components/parameters/TenantIdPath"
+    get:
+      operationId: getTenantManaPool
+      summary: "Get the tenant's mana subsidy pool detail + usage breakdown"
+      tags: [ManaPool]
+      responses:
+        "200":
+          description: "Mana pool returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantManaPool"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      operationId: createTenantManaPool
+      summary: "Create a tenant mana subsidy pool"
+      description: |
+        Provisions a new TenantManaPool for the tenant. Idempotent on
+        (tenant_id) — repeated calls return the existing pool. Pool is
+        funded subsequently via `:topup` or `:auto-renew`.
+      tags: [ManaPool]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTenantManaPoolRequest"
+      responses:
+        "201":
+          description: "Pool created"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantManaPool"
+        "409":
+          description: "Pool already exists for tenant"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantManaPool"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /api/v1/admin/tenants/{tenantId}/mana-pool:topup:
+    parameters:
+      - $ref: "#/components/parameters/TenantIdPath"
+    post:
+      operationId: topupTenantManaPool
+      summary: "One-time top-up of the tenant mana pool"
+      description: |
+        Charges the tenant's Stripe Customer for `amount_cents` and
+        credits the converted unit count to the pool's balance. Emits
+        chora.tenancy.tenant_mana_pool.topped_up.v1.
+      tags: [ManaPool]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ManaPoolTopupRequest"
+      responses:
+        "200":
+          description: "Top-up successful + pool credited"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManaPoolTopupResponse"
+        "402":
+          description: "Stripe payment failed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /api/v1/admin/tenants/{tenantId}/mana-pool:auto-renew:
+    parameters:
+      - $ref: "#/components/parameters/TenantIdPath"
+    post:
+      operationId: setTenantManaPoolAutoRenew
+      summary: "Configure monthly auto top-up amount for the pool"
+      tags: [ManaPool]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetManaPoolAutoRenewRequest"
+      responses:
+        "200":
+          description: "Auto-renew configured"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantManaPool"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /api/v1/admin/tenants/{tenantId}/mana-pool/policy:
+    parameters:
+      - $ref: "#/components/parameters/TenantIdPath"
+    patch:
+      operationId: updateManaPoolAllocationPolicy
+      summary: "Set the auto-allocation policy for the pool"
+      description: |
+        Configures how the pool drips mana into per-learner allocations.
+        Policies: `manual` (admin allocates one-at-a-time), `on_enrollment`
+        (auto-allocate N units when learner enrolls in a tenant course),
+        `equal_split` (monthly drip distributed equally across active
+        learners), `tier_based` (varying allocation by learner role).
+      tags: [ManaPool]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateManaPoolPolicyRequest"
+      responses:
+        "200":
+          description: "Policy updated"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantManaPool"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /api/v1/admin/tenants/{tenantId}/mana-allocations:
+    parameters:
+      - $ref: "#/components/parameters/TenantIdPath"
+    get:
+      operationId: listTenantManaAllocations
+      summary: "List allocations from the tenant's mana pool"
+      tags: [ManaAllocation]
+      parameters:
+        - $ref: "#/components/parameters/GcidQuery"
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/AllocationStatus"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: "Allocations listed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantManaAllocationListResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      operationId: createTenantManaAllocation
+      summary: "Manually grant a mana allocation to a learner"
+      description: |
+        Debits `units` from the pool and creates a TenantManaAllocation
+        with status=`pending`. Emits
+        chora.tenancy.tenant_mana_allocation.granted.v1 — chora-identity
+        consumes and credits the learner's mana wallet
+        (reason=tenant_subsidy).
+      tags: [ManaAllocation]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTenantManaAllocationRequest"
+      responses:
+        "201":
+          description: "Allocation granted"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantManaAllocation"
+        "402":
+          description: "Pool balance insufficient"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /api/v1/admin/tenants/{tenantId}/mana-allocations/{allocationId}:
+    parameters:
+      - $ref: "#/components/parameters/TenantIdPath"
+      - name: allocationId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    delete:
+      operationId: revokeTenantManaAllocation
+      summary: "Revoke an allocation (returns unspent units to pool if pending)"
+      tags: [ManaAllocation]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RevokeTenantManaAllocationRequest"
+      responses:
+        "200":
+          description: "Allocation revoked"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantManaAllocation"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: "Allocation not in revocable state (already claimed)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/admin/tenants/{tenantId}/knowledge-graph-settings:
+    parameters:
+      - $ref: "#/components/parameters/TenantIdPath"
+    get:
+      operationId: getTenantKnowledgeGraphSettings
+      summary: "Get tenant Knowledge Graph cap + invalidation settings"
+      description: |
+        Returns the per-tenant configuration for the per-user hexagonal
+        exploration fog feature (per ADR-143). Values are stored in
+        `tenant_entitlements.config_overrides` JSONB; defaults sourced
+        from env vars `KG_DEFAULT_MAX_CLUSTERS_PER_USER` and
+        `KG_FOG_INVALIDATION_GRACE_SECONDS`.
+
+        Visible to: `tenant_admin`, `super_admin`, `billing_admin` (read-only).
+      tags: [Tenant, KnowledgeGraph]
+      responses:
+        "200":
+          description: "Settings retrieved"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantKnowledgeGraphSettings"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updateTenantKnowledgeGraphSettings
+      summary: "Update tenant Knowledge Graph cap + invalidation settings"
+      description: |
+        Updates per-tenant `tenant_entitlements.config_overrides` JSONB keys
+        `max_concurrent_kg_clusters_per_user` (1..10) and
+        `kg_fog_invalidation_grace_seconds` (60..3600).
+
+        Sweeper picks up the new grace value on next tick; existing
+        clusters are NOT auto-archived when cap is reduced (cap is
+        enforced at create-time only).
+
+        Idempotent on (tenantId, last-known config_overrides version).
+
+        Visible to: `tenant_admin`, `super_admin`. Read-only for `billing_admin`.
+      tags: [Tenant, KnowledgeGraph]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateTenantKnowledgeGraphSettingsRequest"
+      responses:
+        "200":
+          description: "Settings updated"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantKnowledgeGraphSettings"
+        "403":
+          description: "Caller lacks write capability (e.g., billing_admin)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: "Validation error (out-of-range values)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/tenants/me/addons:
+    post:
+      operationId: subscribeMyTenantAddons
+      summary: "Subscribe the calling user's tenant to one or more add-ons (Setup Wizard step 2)"
+      description: |
+        Setup Wizard Phase B (CHO-1664) step 2 — persists the add-on
+        codes the tenant ticked during onboarding.
+
+        **Semantics: idempotent-additive.** For each code in
+        `add_on_codes`, ensures a subscription row exists in
+        `pending_activation` status. Codes already subscribed (in
+        any status) are no-ops. Codes the tenant previously had but
+        that are NOT in this request are LEFT UNCHANGED —
+        deactivation lives in the dedicated add-on lifecycle flow
+        (see the admin `addons` endpoints), not the wizard. This
+        keeps the wizard safe to re-enter without destructive
+        side-effects.
+
+        The tenant_id is taken from the validated Chora session JWT
+        (`X-Tenant-Id` header stamped by chora-gateway via the
+        Phyllis aggregator), NEVER from the body. Unknown add-on
+        codes (codes not in the catalogue) cause a 400 with the
+        unknown subset listed in the error body so the FE can
+        surface a precise validation message.
+      tags: [Addon]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubscribeMyTenantAddonsRequest"
+      responses:
+        "200":
+          description: "Subscribed; response carries the full set of subscriptions for the tenant (newly created + already-existing)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubscribeMyTenantAddonsResponse"
+        "400":
+          description: "Malformed JSON, empty add_on_codes, or unknown add-on code"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: "X-Tenant-Id missing (gateway did not stamp the header) or JWT invalid"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/tenants/me/finish-setup:
+    patch:
+      operationId: finishMyTenantSetup
+      summary: "Mark the calling user's tenant Setup Wizard complete (CHO-1682 step 4)"
+      description: |
+        Setup Wizard step 4 — set-once stamp of `wizard_completed_at`
+        on the caller's tenant. Idempotent: a second call returns 200
+        with `newly_completed=false` and the original timestamp
+        preserved. The BFF aggregator
+        (`POST /api/v1/tenants/setup` in bff-gateway.yaml) calls this
+        IMMEDIATELY after `chora-identity`'s
+        `POST /api/v1/tenants/me/idp-providers` succeeds.
+
+        The `tenant_id` is taken from the validated Chora session JWT
+        via the `X-Tenant-Id` header stamped by chora-gateway; NEVER
+        from the body. There is no request body.
+      tags: [Tenant]
+      responses:
+        "200":
+          description: "Wizard marked complete (or no-op if already complete)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FinishMyTenantSetupResponse"
+        "401":
+          description: "X-Tenant-Id missing or JWT invalid"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: "Tenant not found for the caller"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /healthz:
+    get:
+      operationId: healthCheck
+      summary: "Health check"
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: "Healthy"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+
+  # ---------------------------------------------------------------------------
+  # Ownership handover (UX Track U, E3; first-launch spec 13.3, 13.4, 13.8)
+  # ---------------------------------------------------------------------------
+  #
+  # Ownership is one row in chora_tenancy.members with role='owner'. It is the
+  # only role no admin API can grant, so a handover cannot be a role edit: it is
+  # a two-party offer the nominee must accept. `from_gcid` is NEVER accepted
+  # from a caller, on any of these routes, because a GCID alone never proves
+  # ownership; the outgoing owner is resolved from the members table.
+
+  /api/v1/tenants/me/ownership/offers:
+    post:
+      operationId: offerMyTenantOwnership
+      summary: "Offer ownership of the calling user's tenant to another member (S7a)"
+      description: |
+        Owner-initiated handover. The caller MUST hold the tenant's live
+        `owner` row; an admin gets 403 OWNERSHIP_OWNER_REQUIRED.
+
+        Nothing about the tenant changes until the nominee accepts. The
+        outgoing owner keeps their seat as an admin at that point, so what
+        they lose is ownership rather than access.
+
+        At most one offer is open per tenant, enforced by a partial unique
+        index rather than a read followed by an insert, so two racing
+        initiators cannot both pass a check and then both write.
+
+        The tenant comes from the validated session (`X-Tenant-Id`, stamped by
+        chora-gateway), the initiator from `X-GCID`, and the outgoing owner
+        from the members table. A `from_gcid` in the body is ignored.
+      tags: [Ownership]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateOwnershipOfferRequest"
+      responses:
+        "201":
+          description: "Offer created and pending the nominee's answer"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OwnershipOffer"
+        "400":
+          description: "Malformed body, missing nominee, or self-nomination"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: "X-Tenant-Id or X-GCID missing (the gateway did not stamp them)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: "OWNERSHIP_OWNER_REQUIRED: the caller does not hold the owner row"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: |
+            OWNERSHIP_OFFER_ALREADY_PENDING (withdraw the open offer first), or
+            OWNERSHIP_NO_LIVE_OWNER (ownership has already been stripped, so a
+            platform operator has to assign it).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/tenants/me/ownership/offer:
+    get:
+      operationId: getMyTenantOwnershipOffer
+      summary: "Read the open ownership offer for the calling user's tenant (S7a and S7b)"
+      description: |
+        Both sides of the handover read this one row: the caller is the
+        initiator or the nominee, and the screen renders the matching side.
+
+        A row past its TTL is RETURNED with `is_live: false`, not hidden. No
+        reaper writes the expired status, so the row is still pending in the
+        table and still blocks a new offer; reporting it absent would be a
+        lie about a row that exists.
+      tags: [Ownership]
+      responses:
+        "200":
+          description: "The open offer"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OwnershipOffer"
+        "401":
+          description: "X-Tenant-Id or X-GCID missing"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: "OWNERSHIP_OFFER_NOT_FOUND: no offer is open for this tenant"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/tenants/me/ownership/offers/{offerId}/accept:
+    post:
+      operationId: acceptMyTenantOwnershipOffer
+      summary: "Accept an ownership offer (S7b); ownership moves on this call"
+      description: |
+        Only the nominee may accept. The offer id is in the path rather than
+        implied, so a screen cannot answer an offer that was withdrawn and
+        replaced while it was open.
+
+        The membership checks that matter run HERE, not at nomination: the
+        roster can change in between, so the nominee's live, unsuspended
+        membership is verified at acceptance.
+      tags: [Ownership]
+      parameters:
+        - $ref: "#/components/parameters/OwnershipOfferId"
+      responses:
+        "200":
+          description: "Ownership transferred"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OwnershipOfferSettled"
+        "401":
+          description: "X-Tenant-Id or X-GCID missing"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: "OWNERSHIP_NOT_THE_NOMINEE"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: "OWNERSHIP_OFFER_NOT_FOUND"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: |
+            OWNERSHIP_OFFER_NOT_PENDING, OWNERSHIP_OFFER_EXPIRED,
+            OWNERSHIP_NOMINEE_NOT_A_MEMBER, OWNERSHIP_NOMINEE_SUSPENDED, or
+            OWNERSHIP_OUTGOING_OWNER_GONE.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/tenants/me/ownership/offers/{offerId}/decline:
+    post:
+      operationId: declineMyTenantOwnershipOffer
+      summary: "Decline an ownership offer (S7b)"
+      description: |
+        Only the nominee may decline. An EXPIRED offer still declines: saying
+        no to something that lapsed is harmless, and a recorded refusal is
+        more honest than a silent timeout. Nothing about the tenant's
+        ownership changes, so no audit event is written; the offer row carries
+        the record.
+      tags: [Ownership]
+      parameters:
+        - $ref: "#/components/parameters/OwnershipOfferId"
+      responses:
+        "200":
+          description: "Offer declined"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OwnershipOfferSettled"
+        "401":
+          description: "X-Tenant-Id or X-GCID missing"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: "OWNERSHIP_NOT_THE_NOMINEE"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: "OWNERSHIP_OFFER_NOT_FOUND"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: "OWNERSHIP_OFFER_NOT_PENDING"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/tenants/me/ownership/offers/{offerId}/revoke:
+    post:
+      operationId: revokeMyTenantOwnershipOffer
+      summary: "Withdraw an ownership offer before it is answered (S7a)"
+      description: |
+        Only the INITIATOR may withdraw. The nominee's way out is to decline,
+        which is recorded as a refusal rather than as the initiator changing
+        their mind. On the operator override the initiator is the operator who
+        created the offer, so a different operator cannot quietly withdraw
+        somebody else's override.
+      tags: [Ownership]
+      parameters:
+        - $ref: "#/components/parameters/OwnershipOfferId"
+      responses:
+        "200":
+          description: "Offer withdrawn"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OwnershipOfferSettled"
+        "401":
+          description: "X-Tenant-Id or X-GCID missing"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: "OWNERSHIP_NOT_THE_INITIATOR"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: "OWNERSHIP_OFFER_NOT_FOUND"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: "OWNERSHIP_OFFER_NOT_PENDING"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/admin/tenants/{tenantId}/ownership/offers:
+    post:
+      operationId: assignTenantOwner
+      summary: "PLATFORM_OPERATOR: offer ownership of a tenant whose owner is gone (S7c)"
+      description: |
+        The operator override (spec 13.4), for an owner who has left, closed
+        their account or is unreachable, so there is nobody to initiate.
+
+        Differences from the owner-initiated path, all deliberate:
+          * a `reason` is REQUIRED and is stored on the audit row. A handover
+            nobody can explain later is not auditable.
+          * it works whether or not a live owner row exists. If the row has
+            already been stripped, acceptance CREATES ownership rather than
+            swapping it.
+          * the leaving owner's other roles are left UNTOUCHED. Writing them a
+            fresh admin row would either hand a seat to somebody who never
+            asked for it or resurrect a membership the closure saga is winding
+            down.
+          * the tenant comes from the PATH, never from a header:
+            PLATFORM_OPERATOR is tenant-less by design (ADR-165).
+
+        Acceptance is STILL required from the nominee. Nothing about the owner
+        being gone makes silent assignment acceptable.
+
+        This adds NO RLS-bypass surface: the write runs inside
+        RunInTenantTx(path tenant) with RLS enforcing, the ADR-194 D1 pattern.
+      tags: [Ownership]
+      parameters:
+        - name: tenantId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AssignTenantOwnerRequest"
+      responses:
+        "201":
+          description: "Offer created and pending the nominee's answer"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OwnershipOffer"
+        "400":
+          description: "Malformed body, missing nominee, missing reason, or self-nomination"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: "X-GCID missing (the gateway did not stamp it)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: "AUTH_PLATFORM_OPERATOR_REQUIRED"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: |
+            OWNERSHIP_OFFER_ALREADY_PENDING, or OWNERSHIP_NO_OWNER_EVER when
+            the tenant has no owner row at all, live or deleted, which is a
+            provisioning fault rather than a handover.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    OwnershipOfferId:
+      name: offerId
+      in: path
+      required: true
+      description: |
+        The offer being answered. Carried explicitly rather than implied by
+        "whatever is pending", so a screen cannot answer an offer that was
+        withdrawn and replaced while it was open.
+      schema:
+        type: string
+        format: uuid
+    TenantIdPath:
+      name: tenantId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    AddonPlanIdPath:
+      name: addonPlanId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    TenantIdQuery:
+      name: tenant_id
+      in: query
+      required: false
+      schema:
+        type: string
+        format: uuid
+    HostingModeQuery:
+      name: hosting_mode
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [PLATFORM_HOSTED, WHITE_LABEL, FRANCHISE, SELF_HOST]
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      schema:
+        type: string
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    GcidQuery:
+      name: gcid
+      in: query
+      required: false
+      description: "Filter by GCID (UUIDv7)"
+      schema:
+        type: string
+        format: uuid
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: "Client-supplied idempotency key (UUIDv7 recommended)"
+      schema:
+        type: string
+        maxLength: 64
+
+  responses:
+    NotFound:
+      description: "Resource not found"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    InternalError:
+      description: "Internal server error"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ValidationError:
+      description: "Validation failed"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unauthenticated:
+      description: "Missing or invalid Chora session token"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Conflict:
+      description: "State conflict (e.g. caller already holds a TenantMembership)"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Forbidden:
+      description: "Caller lacks the required role (e.g. platform_operator)"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    CreateOwnershipOfferRequest:
+      type: object
+      required: [to_gcid]
+      description: |
+        `from_gcid` is deliberately absent. A GCID alone never proves
+        ownership, so the outgoing owner is resolved from the members table
+        and a field of that name in the body is ignored.
+      properties:
+        to_gcid:
+          type: string
+          format: uuid
+          description: "The nominee. Must already be a live, unsuspended member of the tenant, verified at ACCEPTANCE."
+        note:
+          type: string
+          description: "Optional message shown to the nominee."
+
+    AssignTenantOwnerRequest:
+      allOf:
+        - $ref: "#/components/schemas/CreateOwnershipOfferRequest"
+        - type: object
+          required: [reason]
+          properties:
+            reason:
+              type: string
+              minLength: 1
+              description: "REQUIRED on the override and stored on the audit row. A handover nobody can explain later is not auditable."
+
+    OwnershipOffer:
+      type: object
+      required: [offer_id, tenant_id, from_gcid, to_gcid, initiated_by, initiator, status, is_live, created_at, expires_at]
+      properties:
+        offer_id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        from_gcid:
+          type: string
+          format: uuid
+          description: "The outgoing owner, resolved server-side. On the override this may be an owner whose row is already soft-deleted."
+        to_gcid:
+          type: string
+          format: uuid
+        initiated_by:
+          type: string
+          format: uuid
+        initiator:
+          type: string
+          enum: [owner, operator]
+        reason:
+          type: string
+        note:
+          type: string
+        status:
+          type: string
+          enum: [pending, accepted, declined, revoked, expired]
+        is_live:
+          type: boolean
+          description: |
+            Whether the offer can still be answered. COMPUTED, not stored: no
+            reaper writes the expired status, so a row past its TTL is still
+            `pending` in the table and not live in fact.
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+
+    OwnershipOfferSettled:
+      type: object
+      required: [offer_id, status]
+      properties:
+        offer_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+
+    Tenant:
+      type: object
+      required: [tenant_id, display_name, hosting_mode, created_at]
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        parent_tenant_id:
+          type: string
+          format: uuid
+          nullable: true
+        display_name:
+          type: string
+          maxLength: 256
+        hosting_mode:
+          type: string
+          enum: [PLATFORM_HOSTED, WHITE_LABEL, FRANCHISE, SELF_HOST]
+        owner_gcid:
+          type: string
+          format: uuid
+        state:
+          type: string
+          enum: [ACTIVE, SUSPENDED, CLOSED]
+        created_at:
+          type: string
+          format: date-time
+
+    TenantListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Tenant"
+        next_cursor:
+          type: string
+          nullable: true
+
+    CreateTenantRequest:
+      type: object
+      required: [display_name, hosting_mode, owner_gcid]
+      properties:
+        display_name:
+          type: string
+          maxLength: 256
+        parent_tenant_id:
+          type: string
+          format: uuid
+          nullable: true
+        hosting_mode:
+          type: string
+          enum: [PLATFORM_HOSTED, WHITE_LABEL, FRANCHISE, SELF_HOST]
+        owner_gcid:
+          type: string
+          format: uuid
+
+    CreateSubTenantRequest:
+      description: |
+        Operator create of a franchise sub-tenant under a parent (ADR-217 Phase
+        2.2). parent_tenant_id is REQUIRED and must resolve into the chora-master
+        tree. hosting_mode is OPTIONAL — omitted / UNSPECIFIED defaults to
+        FRANCHISE (a sub-tenant is a franchise by default in Model β).
+      type: object
+      required: [parent_tenant_id, display_name, owner_gcid]
+      properties:
+        parent_tenant_id:
+          type: string
+          format: uuid
+        display_name:
+          type: string
+          maxLength: 256
+        hosting_mode:
+          type: string
+          enum: [PLATFORM_HOSTED, WHITE_LABEL, FRANCHISE, SELF_HOST]
+        owner_gcid:
+          type: string
+          format: uuid
+        add_on_codes:
+          description: |
+            Add-on CODES granted at creation, beyond the mandatory `core`
+            (E1 / UX refactor wave W2). Written as durable
+            add_on_subscriptions rows in the same transaction as the tenant.
+            Codes, not display names. `base` is an alias of `core` and is
+            folded rather than doubled. An unrecognised code fails the whole
+            creation with 400. Optional; omitted means core only.
+          type: array
+          items:
+            type: string
+            maxLength: 64
+          maxItems: 64
+
+    TenantHierarchy:
+      description: |
+        The DIRECT children of the caller's current tenant + whether it is a
+        parent (ADR-217 Phase 2.3b). Response of
+        GET /api/v1/tenancy/tenants/current/hierarchy.
+      type: object
+      required: [is_parent, children]
+      properties:
+        is_parent:
+          type: boolean
+          description: "True when the current tenant has >= 1 non-deleted direct child."
+        children:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChildTenantSummary"
+
+    ChildTenantSummary:
+      description: "One DIRECT child of the current tenant, with counts."
+      type: object
+      required: [tenant_id, tenant_name, user_count, atom_count]
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        tenant_name:
+          type: string
+        user_count:
+          type: integer
+          format: int64
+          description: "Count of DISTINCT live members (GCIDs) in the child tenant."
+        atom_count:
+          type: integer
+          format: int64
+          description: "Always 0 for now — atoms live in chora_creation; cross-DB reads are forbidden, so an event-fed projection will populate this later."
+
+    UpdateTenantRequest:
+      type: object
+      properties:
+        display_name:
+          type: string
+          maxLength: 256
+
+    SuspendTenantRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          maxLength: 512
+
+    GoLiveTenantRequest:
+      type: object
+      description: |
+        Optional GoLive override payload. When omitted, the tenant transitions
+        with default add-ons enabled (base / cms / ai_assist / companion)
+        per Phyllis MVP §3 Step 2.
+      properties:
+        default_addon_plan_ids:
+          type: array
+          description: "Override default add-on plan IDs to enable on go-live"
+          items:
+            type: string
+            format: uuid
+        skip_stripe_customer_create:
+          type: boolean
+          description: |
+            Skip Stripe Customer creation (for SELF_HOST tenants or test mode).
+            Default false.
+          default: false
+
+    CloseTenantRequest:
+      type: object
+      required: [reason, target_state]
+      properties:
+        reason:
+          type: string
+          maxLength: 512
+        target_state:
+          type: string
+          enum: [PSEUDONYMIZED, COLD_ARCHIVED, CRYPTO_SHREDDED]
+          description: "Terminal state for the federated closure saga"
+
+    ConfigureWhitelabelRequest:
+      type: object
+      properties:
+        custom_domain:
+          type: string
+          format: hostname
+        brand_assets_uri:
+          type: string
+          format: uri
+        primary_color_hex:
+          type: string
+          pattern: "^#[0-9A-Fa-f]{6}$"
+
+    WhitelabelConfig:
+      type: object
+      required: [tenant_id]
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        custom_domain:
+          type: string
+        brand_assets_uri:
+          type: string
+        primary_color_hex:
+          type: string
+        configured_at:
+          type: string
+          format: date-time
+
+    Addon:
+      type: object
+      required: [tenant_id, addon_plan_id, activated_at]
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        addon_plan_id:
+          type: string
+          format: uuid
+        activated_at:
+          type: string
+          format: date-time
+        deactivated_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    AddonListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Addon"
+
+    ActivateAddonRequest:
+      type: object
+      required: [addon_plan_id]
+      properties:
+        addon_plan_id:
+          type: string
+          format: uuid
+
+    SubscribeMyTenantAddonsRequest:
+      type: object
+      required: [add_on_codes]
+      description: |
+        Setup Wizard step 2 (CHO-1664) request body. `add_on_codes` is
+        the set of catalogue codes the tenant ticked. The endpoint is
+        idempotent-additive — repeating the same codes returns the
+        same set of subscriptions, and omitting a previously-ticked
+        code does NOT deactivate it.
+      properties:
+        add_on_codes:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            type: string
+            description: "Add-on code from the catalogue (e.g. 'kg_hexagonal', 'marketplace', 'governance_dashboard')"
+
+    SubscribeMyTenantAddonsResponse:
+      type: object
+      required: [subscriptions]
+      description: |
+        Full set of the tenant's subscriptions after the request — newly
+        created (status `pending_activation`) plus any pre-existing rows
+        the request was a no-op for. The FE uses the returned list to
+        reconcile the wizard's local state with persisted truth.
+      properties:
+        subscriptions:
+          type: array
+          items:
+            $ref: "#/components/schemas/MyTenantAddonSubscription"
+
+    FinishMyTenantSetupResponse:
+      type: object
+      required: [tenant_id, wizard_completed_at, newly_completed]
+      description: |
+        Response for PATCH /api/v1/tenants/me/finish-setup (CHO-1682
+        step 4). `newly_completed` distinguishes the first finish
+        (true; the BFF aggregator emits `tenant_wizard_completed.v1`)
+        from idempotent re-finishes (false; original timestamp
+        preserved). The aggregator forwards this whole payload back
+        to the FE in the SetupApplyResponse.finish_setup field.
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+          description: "Tenant the wizard finished on."
+        wizard_completed_at:
+          type: string
+          format: date-time
+          description: "Timestamp the wizard was first completed (preserved across idempotent re-finishes)."
+        newly_completed:
+          type: boolean
+          description: |
+            True if this call was the first finish (timestamp was set
+            by this request); false if the wizard was already complete
+            (no-op).
+
+    MyTenantAddonSubscription:
+      type: object
+      required: [subscription_id, add_on_code, status, created_at]
+      properties:
+        subscription_id:
+          type: string
+          format: uuid
+        add_on_code:
+          type: string
+          description: "Catalogue code (matches add_ons.code)"
+        status:
+          type: string
+          enum:
+            - pending_activation
+            - active
+            - grace_period
+            - suspended
+            - pending_deactivation
+            - deactivated
+        created_at:
+          type: string
+          format: date-time
+        newly_subscribed:
+          type: boolean
+          description: |
+            True if this row was created by the current request; false
+            if it already existed (no-op). Lets the FE highlight what
+            actually changed without diffing against prior state.
+
+    DeactivateAddonRequest:
+      type: object
+      required: [reason]
+      description: |
+        Structured deactivation request used by both the DELETE-with-body
+        and the action-style POST `:deactivate` endpoint. The `reason`
+        enum is the audit dimension (powers STITCH-H-ADD-2 reason
+        dropdown + admin analytics). `reason_text` holds free-form notes
+        and is REQUIRED when `reason = other`.
+      properties:
+        reason:
+          type: string
+          enum:
+            - no_longer_needed
+            - cost
+            - consolidation
+            - migration
+            - compliance
+            - other
+        reason_text:
+          type: string
+          maxLength: 1024
+          description: "Required if reason = 'other'; optional context otherwise"
+        effective_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            Optional ISO 8601 deferral. If null, deactivation is immediate.
+            If set, the add-on remains active until effective_at (typically
+            end of billing cycle) and an AddonDeactivationRequested event
+            is published immediately, followed by AddonDeactivated when the
+            scheduler reaches effective_at.
+
+    DeactivateAddonResponse:
+      type: object
+      required: [tenant_id, addon_plan_id, status, requested_at]
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        addon_plan_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [DEACTIVATED, DEACTIVATION_SCHEDULED]
+          description: |
+            DEACTIVATED = applied immediately.
+            DEACTIVATION_SCHEDULED = effective_at in the future.
+        requested_at:
+          type: string
+          format: date-time
+        effective_at:
+          type: string
+          format: date-time
+          nullable: true
+        reason:
+          type: string
+          enum:
+            - no_longer_needed
+            - cost
+            - consolidation
+            - migration
+            - compliance
+            - other
+
+    ChangeAddonTierRequest:
+      type: object
+      required: [target_plan_id, proration_mode]
+      description: |
+        Upgrade or downgrade an add-on tier in place. The current tier is
+        derived from the existing tenant subscription; the target is
+        identified by `target_plan_id` (must be in the same plan family
+        per chora-tenancy plan-family rules; HTTP 422 otherwise).
+      properties:
+        target_plan_id:
+          type: string
+          format: uuid
+          description: "AddOnPlan UUID to switch to"
+        proration_mode:
+          type: string
+          enum: [create_prorations, none]
+          description: |
+            create_prorations = mirror Stripe `proration_behavior=create_prorations`,
+            issuing a credit/charge for the unused portion. none = honour the new
+            price starting at next renewal with no mid-cycle proration.
+        effective_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            Optional ISO 8601 future timestamp. If set, the tier change is
+            scheduled (Stripe subscription_schedule) and `schedule_id` is
+            returned. If null, the change applies immediately.
+
+    ChangeAddonTierResponse:
+      type: object
+      required: [subscription_id, billing_delta_cents, effective_at]
+      properties:
+        subscription_id:
+          type: string
+          format: uuid
+        billing_delta_cents:
+          type: integer
+          format: int64
+          description: |
+            Net change for the current billing period in cents.
+            Positive = additional charge (upgrade). Negative = credit
+            (downgrade). Zero = no proration applied.
+        effective_at:
+          type: string
+          format: date-time
+        schedule_id:
+          type: string
+          nullable: true
+          description: "Stripe subscription_schedule ID (set only when scheduled)"
+        from_tier:
+          type: string
+          description: "Tier code before the change (snapshot for audit)"
+        to_tier:
+          type: string
+          description: "Tier code after the change"
+
+    AddOnEntitlement:
+      type: object
+      required: [feature_code, label]
+      properties:
+        feature_code:
+          type: string
+          description: "Stable machine-readable code (e.g., 'gemma_lora', 'mcp_gateway')"
+        label:
+          type: string
+          description: "Human display label"
+        limit:
+          type: integer
+          format: int64
+          nullable: true
+          description: "Cap on the entitlement (null = unlimited)"
+        limit_unit:
+          type: string
+          nullable: true
+          description: "Unit string (e.g., 'seats', 'tokens', 'minutes', 'invocations')"
+
+    AddOnIntegration:
+      type: object
+      required: [type, label]
+      properties:
+        type:
+          type: string
+          description: "Integration type (e.g., 'webhook', 'oauth_app', 'mcp_server', 'lti')"
+        label:
+          type: string
+        status:
+          type: string
+          enum: [available, configured, error, disabled]
+          description: "Per-tenant integration health (omitted in marketplace browse responses)"
+
+    AddOnCompliance:
+      type: object
+      properties:
+        gdpr:
+          type: boolean
+          default: false
+        pdpa:
+          type: boolean
+          default: false
+          description: "Singapore PDPA"
+        ccpa:
+          type: boolean
+          default: false
+        imda:
+          type: boolean
+          default: false
+          description: "IMDA Model AI Governance Framework alignment claim"
+        data_residency_regions:
+          type: array
+          items:
+            type: string
+          description: "ISO 3166-1 alpha-2 codes (e.g., 'SG', 'EU', 'US')"
+
+    AddOnPricingTier:
+      type: object
+      required: [tier_code, label, monthly_price_cents, currency]
+      properties:
+        tier_code:
+          type: string
+          description: "Stable code (e.g., 'starter', 'pro', 'enterprise')"
+        label:
+          type: string
+        monthly_price_cents:
+          type: integer
+          format: int64
+          minimum: 0
+        included_units:
+          type: integer
+          format: int64
+          nullable: true
+          description: "Units bundled at this tier (null = unlimited / not unit-metered)"
+        overage_unit_cents:
+          type: integer
+          format: int64
+          nullable: true
+          description: "Per-unit overage price (null = no overage available)"
+        currency:
+          type: string
+          minLength: 3
+          maxLength: 3
+
+    AddOnSubscriptionSnapshot:
+      type: object
+      required: [activated_at, status]
+      description: "Tenant-specific subscription view — omitted in marketplace listing"
+      properties:
+        activated_at:
+          type: string
+          format: date-time
+        current_tier:
+          type: string
+          description: "Tier code currently in effect"
+        status:
+          type: string
+          enum: [ACTIVE, GRACE, DEACTIVATION_SCHEDULED, DEACTIVATED]
+        next_renewal_at:
+          type: string
+          format: date-time
+          nullable: true
+        billing_cycle:
+          type: string
+          enum: [MONTHLY, QUARTERLY, ANNUAL]
+          nullable: true
+
+    AddOnDetail:
+      type: object
+      required: [addon_plan_id, code, display_name, category, system, installed]
+      description: |
+        Full add-on plan detail — powers STITCH-H-ADD-1 dashboard sub-tab,
+        STITCH-H-ADD-5 marketplace tile expansion, and the source-of-truth
+        view for STITCH-H-ADD-4 upgrade/downgrade flow.
+      properties:
+        addon_plan_id:
+          type: string
+          format: uuid
+        code:
+          type: string
+          description: "Stable machine code (e.g., 'gemma_lora', 'mcp_gateway')"
+        display_name:
+          type: string
+        category:
+          type: string
+          description: "Marketplace category (e.g., 'AI', 'Integrations', 'Compliance')"
+        system:
+          type: boolean
+          description: |
+            True for plans that ship as part of the tenant baseline (e.g.
+            `base`) and cannot be subscribed / activated / deactivated via the
+            standard flows. FE uses this to suppress Subscribe / Activate Free
+            / Deactivate affordances. BE enforces the same constraint
+            independently (defense-in-depth); the flag is an affordance hint,
+            NOT the authorisation boundary.
+        installed:
+          type: boolean
+          description: |
+            True iff the calling tenant currently holds an `ACTIVE` or
+            `PENDING` subscription to this plan. Denormalised view for
+            marketplace tiles so the FE can render an `Installed` badge
+            without an extra round-trip. On `GET /marketplace/addons` it is
+            computed against the caller's tenant; on
+            `GET /tenants/{tenantId}/addons/{addonPlanId}` it mirrors
+            `current_subscription != null`.
+        description:
+          type: string
+          description: "Long-form marketplace copy (Markdown allowed)"
+        entitlements:
+          type: array
+          items:
+            $ref: "#/components/schemas/AddOnEntitlement"
+        integrations:
+          type: array
+          items:
+            $ref: "#/components/schemas/AddOnIntegration"
+        compliance:
+          $ref: "#/components/schemas/AddOnCompliance"
+        pricing_tiers:
+          type: array
+          items:
+            $ref: "#/components/schemas/AddOnPricingTier"
+        current_subscription:
+          allOf:
+            - $ref: "#/components/schemas/AddOnSubscriptionSnapshot"
+          nullable: true
+          description: |
+            Tenant-specific subscription snapshot. Present on
+            `GET /tenants/{tenantId}/addons/{addonPlanId}` when the
+            tenant has an active or recently-active subscription;
+            ALWAYS null on `GET /marketplace/addons`.
+
+    MarketplaceAddonListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AddOnDetail"
+        next_cursor:
+          type: string
+          nullable: true
+
+    AddOnUsageBucket:
+      type: object
+      required: [bucket_start]
+      properties:
+        bucket_start:
+          type: string
+          format: date-time
+          description: "Inclusive ISO 8601 start of the bucket interval"
+        seats_used:
+          type: integer
+          format: int64
+          minimum: 0
+        quota_consumed:
+          type: integer
+          format: int64
+          minimum: 0
+        api_calls:
+          type: integer
+          format: int64
+          minimum: 0
+          nullable: true
+        error_count:
+          type: integer
+          format: int64
+          minimum: 0
+          nullable: true
+
+    AddOnUsageTopConsumer:
+      type: object
+      required: [user_id_pseudonymous, share_pct]
+      description: |
+        Privacy-preserving top consumer entry. NEVER returns raw GCID.
+        `user_id_pseudonymous` is a per-tenant per-window pseudonym (HMAC
+        of GCID with a tenant-scoped DEK rotated each window) per the
+        federated closure saga / PII closure rules.
+      properties:
+        user_id_pseudonymous:
+          type: string
+          description: "Per-window pseudonymous identifier — NOT a GCID"
+        share_pct:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 100
+
+    AddOnUsage:
+      type: object
+      required:
+        - addon_plan_id
+        - tenant_id
+        - period_from
+        - period_to
+        - granularity
+      description: |
+        Aggregated usage for an add-on within a window. Powers
+        STITCH-H-ADD-3 usage analytics screen.
+      properties:
+        addon_plan_id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        period_from:
+          type: string
+          format: date-time
+        period_to:
+          type: string
+          format: date-time
+        granularity:
+          type: string
+          enum: [day, week, month]
+        seats_total:
+          type: integer
+          format: int64
+          minimum: 0
+        seats_used:
+          type: integer
+          format: int64
+          minimum: 0
+        seats_used_peak:
+          type: integer
+          format: int64
+          minimum: 0
+        quota_unit:
+          type: string
+          nullable: true
+          description: "Unit string for the quota dimension (e.g., 'tokens', 'minutes')"
+        quota_limit:
+          type: integer
+          format: int64
+          nullable: true
+          minimum: 0
+        quota_consumed:
+          type: integer
+          format: int64
+          minimum: 0
+        quota_consumed_pct:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 100
+          nullable: true
+        time_series:
+          type: array
+          items:
+            $ref: "#/components/schemas/AddOnUsageBucket"
+        top_consumers:
+          type: array
+          items:
+            $ref: "#/components/schemas/AddOnUsageTopConsumer"
+
+    Subscription:
+      type: object
+      required: [subscription_id, tenant_id, plan_ids, starts_at, renews_at]
+      properties:
+        subscription_id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        plan_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+        starts_at:
+          type: string
+          format: date-time
+        renews_at:
+          type: string
+          format: date-time
+        stripe_subscription_id:
+          type: string
+        cancelled_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    SubscriptionListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Subscription"
+        next_cursor:
+          type: string
+          nullable: true
+
+    CreateSubscriptionRequest:
+      type: object
+      required: [tenant_id, plan_ids, starts_at]
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        plan_ids:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            format: uuid
+        starts_at:
+          type: string
+          format: date-time
+
+    CancelSubscriptionRequest:
+      type: object
+      required: [cancellation_reason]
+      properties:
+        cancellation_reason:
+          type: string
+          maxLength: 512
+        effective_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    Invoice:
+      type: object
+      required: [invoice_id, tenant_id, amount_cents, currency, issued_at]
+      properties:
+        invoice_id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        amount_cents:
+          type: integer
+          format: int64
+        currency:
+          type: string
+          minLength: 3
+          maxLength: 3
+        stripe_payment_intent_id:
+          type: string
+        subscription_id:
+          type: string
+          format: uuid
+          nullable: true
+        state:
+          type: string
+          enum: [ISSUED, PAID, FAILED, REFUNDED]
+        due_at:
+          type: string
+          format: date-time
+        issued_at:
+          type: string
+          format: date-time
+
+    InvoiceListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Invoice"
+        next_cursor:
+          type: string
+          nullable: true
+
+    Refund:
+      type: object
+      required: [refund_id, invoice_id, amount_cents, currency, issued_at]
+      properties:
+        refund_id:
+          type: string
+          format: uuid
+        invoice_id:
+          type: string
+          format: uuid
+        amount_cents:
+          type: integer
+          format: int64
+        currency:
+          type: string
+        stripe_refund_id:
+          type: string
+        reason:
+          type: string
+        issued_at:
+          type: string
+          format: date-time
+
+    IssueRefundRequest:
+      type: object
+      required: [amount_cents, reason]
+      properties:
+        amount_cents:
+          type: integer
+          format: int64
+          minimum: 1
+        reason:
+          type: string
+          maxLength: 512
+
+    AllocationPolicy:
+      type: string
+      enum: [manual, on_enrollment, equal_split, tier_based]
+      description: |
+        `manual` = admin allocates one-at-a-time per learner.
+        `on_enrollment` = auto-allocate N units when a learner enrols
+        in a tenant course.
+        `equal_split` = pool's monthly drip distributed equally across
+        active learners.
+        `tier_based` = different allocation amounts per learner role.
+
+    AllocationStatus:
+      type: string
+      enum: [pending, claimed, expired, revoked]
+      description: |
+        `pending` = granted, awaiting first claim from chora-identity.
+        `claimed` = mana credited to the learner's UserMana wallet
+        (idempotency confirmed via UserManaCredited event).
+        `expired` = TTL elapsed; revert to pool by housekeeping job.
+        `revoked` = admin / offboarding-driven revocation.
+
+    AllocationPolicyConfig:
+      type: object
+      required: [policy]
+      description: "Policy block + per-policy parameters"
+      properties:
+        policy:
+          $ref: "#/components/schemas/AllocationPolicy"
+        units_on_enrollment:
+          type: integer
+          format: int64
+          minimum: 0
+          nullable: true
+          description: "Units granted per learner on enrollment (when policy=on_enrollment)"
+        tier_amounts:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int64
+            minimum: 0
+          nullable: true
+          description: |
+            Map of learner role -> units (when policy=tier_based).
+            Example: {"power_user": 1000, "standard": 200}.
+        allocation_ttl_days:
+          type: integer
+          minimum: 0
+          nullable: true
+          description: "Default TTL on issued allocations; null = never expire"
+
+    TenantManaPool:
+      type: object
+      required: [pool_id, tenant_id, balance_units, created_at]
+      properties:
+        pool_id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        balance_units:
+          type: integer
+          format: int64
+          minimum: 0
+        monthly_topup_units:
+          type: integer
+          format: int64
+          minimum: 0
+          description: "Auto-renew amount; 0 = disabled"
+        auto_allocation_policy:
+          $ref: "#/components/schemas/AllocationPolicyConfig"
+        lifetime_topped_up_units:
+          type: integer
+          format: int64
+          minimum: 0
+        lifetime_allocated_units:
+          type: integer
+          format: int64
+          minimum: 0
+        version:
+          type: integer
+          format: int64
+          description: "Optimistic concurrency control version"
+        created_at:
+          type: string
+          format: date-time
+        last_topped_up_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    CreateTenantManaPoolRequest:
+      type: object
+      properties:
+        initial_topup_units:
+          type: integer
+          format: int64
+          minimum: 0
+          nullable: true
+          description: "Optional first credit (must be paired with a charge in same call)"
+        initial_topup_amount_cents:
+          type: integer
+          format: int64
+          minimum: 0
+          nullable: true
+        initial_topup_currency:
+          type: string
+          minLength: 3
+          maxLength: 3
+          nullable: true
+        auto_allocation_policy:
+          $ref: "#/components/schemas/AllocationPolicyConfig"
+
+    ManaPoolTopupRequest:
+      type: object
+      required: [amount_cents, currency, units]
+      properties:
+        amount_cents:
+          type: integer
+          format: int64
+          minimum: 100
+        currency:
+          type: string
+          minLength: 3
+          maxLength: 3
+        units:
+          type: integer
+          format: int64
+          minimum: 1
+          description: "Mana units to credit (caller computes per pricing config)"
+        payment_method_id:
+          type: string
+          description: "Stripe PaymentMethod ID; defaults to tenant default if omitted"
+
+    ManaPoolTopupResponse:
+      type: object
+      required: [pool_id, units_credited, charged_cents, currency]
+      properties:
+        pool_id:
+          type: string
+          format: uuid
+        units_credited:
+          type: integer
+          format: int64
+        charged_cents:
+          type: integer
+          format: int64
+        currency:
+          type: string
+        stripe_payment_intent_id:
+          type: string
+        balance_after_units:
+          type: integer
+          format: int64
+        recorded_at:
+          type: string
+          format: date-time
+
+    SetManaPoolAutoRenewRequest:
+      type: object
+      required: [monthly_topup_units]
+      properties:
+        monthly_topup_units:
+          type: integer
+          format: int64
+          minimum: 0
+          description: "Set to 0 to disable auto-renew"
+        currency:
+          type: string
+          minLength: 3
+          maxLength: 3
+          nullable: true
+
+    UpdateManaPoolPolicyRequest:
+      type: object
+      required: [auto_allocation_policy]
+      properties:
+        auto_allocation_policy:
+          $ref: "#/components/schemas/AllocationPolicyConfig"
+
+    TenantManaAllocation:
+      type: object
+      required:
+        - allocation_id
+        - tenant_id
+        - gcid
+        - units
+        - source_pool_id
+        - status
+        - allocated_at
+      properties:
+        allocation_id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        gcid:
+          type: string
+          format: uuid
+          description: "Recipient learner GCID"
+        units:
+          type: integer
+          format: int64
+          minimum: 1
+        source_pool_id:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/AllocationStatus"
+        allocation_reason:
+          type: string
+          enum: [manual, on_enrollment, equal_split, tier_based, promo]
+        allocated_by_gcid:
+          type: string
+          format: uuid
+          nullable: true
+          description: "Admin GCID for manual; null for auto-policy allocations"
+        allocated_at:
+          type: string
+          format: date-time
+        claimed_at:
+          type: string
+          format: date-time
+          nullable: true
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        revoked_at:
+          type: string
+          format: date-time
+          nullable: true
+        revoked_reason:
+          type: string
+          maxLength: 512
+          nullable: true
+
+    TenantManaAllocationListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/TenantManaAllocation"
+        next_cursor:
+          type: string
+          nullable: true
+
+    CreateTenantManaAllocationRequest:
+      type: object
+      required: [gcid, units]
+      properties:
+        gcid:
+          type: string
+          format: uuid
+        units:
+          type: integer
+          format: int64
+          minimum: 1
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: "Optional expiry (null = no expiry; pool default may apply)"
+        note:
+          type: string
+          maxLength: 512
+
+    RevokeTenantManaAllocationRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          maxLength: 512
+
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            correlation_id:
+              type: string
+              format: uuid
+            details:
+              type: object
+
+    TenantKnowledgeGraphSettings:
+      type: object
+      required:
+        - tenant_id
+        - max_concurrent_kg_clusters_per_user
+        - kg_fog_invalidation_grace_seconds
+        - max_concurrent_kg_clusters_per_user_default
+        - kg_fog_invalidation_grace_seconds_default
+        - active_users_at_cap
+        - daily_fog_gen_cost_micros
+      description: |
+        Per-tenant Knowledge Graph cap + cache invalidation settings, plus
+        derived observability stats for STITCH-H-KG-1 admin form preview rail.
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        max_concurrent_kg_clusters_per_user:
+          type: integer
+          minimum: 1
+          maximum: 10
+          description: |
+            Per-user active-cluster cap. Enforced at create-time. Reducing
+            does NOT auto-archive existing clusters above the new cap.
+        kg_fog_invalidation_grace_seconds:
+          type: integer
+          minimum: 60
+          maximum: 3600
+          description: |
+            Time before invalidated hexagon nodes are forcibly regenerated
+            by the sweeper. Higher values reduce LLM cost; lower values
+            mean faster freshness.
+        max_concurrent_kg_clusters_per_user_default:
+          type: integer
+          description: "Cluster-default sourced from env var KG_DEFAULT_MAX_CLUSTERS_PER_USER"
+        kg_fog_invalidation_grace_seconds_default:
+          type: integer
+          description: "Cluster-default sourced from env var KG_FOG_INVALIDATION_GRACE_SECONDS"
+        active_users_at_cap:
+          type: integer
+          description: "Stat: how many tenant users are currently at the cap"
+        daily_fog_gen_cost_micros:
+          type: integer
+          format: int64
+          description: |
+            Stat: rolling 24h sum of `HexagonFogGenerated.total_cost_micros`
+            across this tenant. Sourced from chora-observability ledger.
+        last_updated_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: "Set when the override was last edited (null = defaults)"
+        last_updated_by_gcid:
+          type: string
+          format: uuid
+          nullable: true
+          description: "Admin who last edited the override (null = defaults)"
+
+    UpdateTenantKnowledgeGraphSettingsRequest:
+      type: object
+      description: |
+        Partial-update body. Omit a field to retain the current value.
+        Provide null to revert a field to env-var default.
+      properties:
+        max_concurrent_kg_clusters_per_user:
+          type: integer
+          minimum: 1
+          maximum: 10
+          nullable: true
+        kg_fog_invalidation_grace_seconds:
+          type: integer
+          minimum: 60
+          maximum: 3600
+          nullable: true
+
+    BootstrapTenantRequest:
+      type: object
+      required: [name]
+      description: |
+        H+ Setup-Tenant Phase 1 (CHO-1628). Caller's GCID is taken from
+        the verified Chora session JWT — never accepted in this body.
+      properties:
+        name:
+          type: string
+          minLength: 3
+          maxLength: 256
+          description: "Tenant display name. Trimmed; must be non-empty."
+
+    BootstrapTenantResponse:
+      type: object
+      required: [tenant_id, owner_member_id, entitlement_id, created_at]
+      description: |
+        Identifiers for the rows created by the bootstrap saga. The mirror
+        `chora_identity.tenant_memberships` row arrives via Pub/Sub event
+        in Phase 2 and is NOT reflected here.
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+          description: "UUIDv7 — the new tenant's identifier"
+        owner_member_id:
+          type: string
+          format: uuid
+          description: "UUIDv7 — caller's chora_tenancy.members row"
+        entitlement_id:
+          type: string
+          format: uuid
+          description: "UUIDv7 — chora_tenancy.tenant_entitlements row for the `core` add-on"
+        created_at:
+          type: string
+          format: date-time
+          description: "RFC-3339 timestamp of the bootstrap transaction commit"

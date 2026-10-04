@@ -1,0 +1,87 @@
+// =============================================================================
+// FROZEN WIRE. DO NOT EDIT, DO NOT RENAME, DO NOT ADD FIELDS.
+// =============================================================================
+//
+// Frozen source for chora.consumption.familiar.ritual_published.v1, whose live
+// schema chora-consumption-familiar-ritual_published-v1 carries `familiar_id`
+// at tag 3 while the current-generation ritual.proto carries `companion_id`
+// there (the ADR-254 rename). The old topic is still declared and still LIVE,
+// so its flat proto must stay generated. See proto-frozen/README.md.
+//
+// ⚠ RitualRunCompleted is deliberately ABSENT. Its topic
+// chora.consumption.familiar.ritual_run_completed.v1 is in Terraform's
+// schemaless_topics: it is provisioned with NO schema binding, so it requires
+// no flat proto and none is committed. Emitting one here would add a file the
+// declared set does not ask for.
+//
+// ⚠ FLATTEN-INPUT ONLY: `buf generate` excludes this tree.
+//
+// Source: chora-contracts/proto/events/consumption/ritual.proto at 4658bd2a0^
+// =============================================================================
+
+// =============================================================================
+// Chora Content Consumption — Grimoire Ritual events (CHO-2016, ADR-219)
+// =============================================================================
+//
+// Aggregate root: Familiar (Ritual is a learner-designed sub-aggregate).
+// Owning domain : Content Consumption (chora_consumption DB).
+// Topic prefix  : chora.consumption.familiar.ritual_*  (mirrors the loadout
+//                 family — aggregate=familiar, event_type=ritual_published /
+//                 ritual_run_completed).
+//
+// A Ritual is a deterministic, learner-composed pipeline of equipped Skills run
+// by the platform's Go runner (ADR-219 D4). Runs are decision-stamped (ADR-197
+// substrate) and projected role-scoped per ADR-215 (learner "why" / O+ full
+// record).
+//
+// NOTE (CHO-2016 G6): codegen is DEFERRED — the publisher emits the
+// JSON-transitional shape (map payload) today; this proto is the contract for
+// the single integration codegen pass (avoids a gen/** collision per ADR-225).
+// Additive-only within v1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.consumption.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/consumption/v1;consumptionv1";
+
+import "chora/common/v1/envelope.proto";
+
+// RitualStepStamp — one step's ADR-197 decision stamp (the O+ full record).
+// The learner projection redacts prompt_version/prompt_hash/tools_invoked
+// (ADR-215 D5); citations are learner-safe.
+message RitualStepStamp {
+  int32 step_index = 1;
+  string skill_key = 2;
+  string prompt_version = 3;      // auditor-only
+  string prompt_hash = 4;         // auditor-only
+  repeated string tools_invoked = 5;
+  repeated string citations = 6;  // learner-safe (atom/concept titles)
+}
+
+// RitualPublished — a learner published a Ritual revision.
+//
+// Topic: chora.consumption.familiar.ritual_published.v1
+// Consumers: O+ (governance/explainability), learner Grimoire read models.
+message RitualPublished {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string ritual_id = 2;             // UUIDv7
+  string familiar_id = 3;           // owning familiar (UUIDv7)
+  int32 revision_no = 4;            // append-only revision minted at publish
+  string trigger = 5;               // manual | on_map_open | on_dose_completed
+  string sink = 6;                  // one of the 6 closed sinks
+  int32 published_price_units = 7;  // composed-flat, frozen at publish (spec §7)
+}
+
+// RunStatus — terminal (or in-flight) state of a Ritual run.
+enum RitualRunStatus {
+  RITUAL_RUN_STATUS_UNSPECIFIED = 0;
+  RITUAL_RUN_STATUS_RUNNING = 1;
+  RITUAL_RUN_STATUS_COMPLETED = 2;
+  RITUAL_RUN_STATUS_FAILED = 3;
+  RITUAL_RUN_STATUS_SKIPPED_BUDGET = 4;
+  RITUAL_RUN_STATUS_BLOCKED = 5;
+}
+

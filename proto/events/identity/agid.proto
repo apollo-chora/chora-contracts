@@ -1,0 +1,96 @@
+// =============================================================================
+// chora.identity.v1 — Agent Identity (AGID) events
+// =============================================================================
+//
+// Source-of-truth: .claude/rules/ddd-enforcement.md (Aggregate Invariant #10)
+// + memory project_chora_governance_ai.md
+//
+// Owning domain : Identity (chora_identity database)
+// Owning team   : Team 3 (Platform)
+// Topic prefix  : chora.identity.agid.*
+//
+// AGID is the agent identity primitive — DISTINCT from GCID. Agents CANNOT
+// hold TenantMembership. AGIDs are issued for:
+//   - CHORA_INTERNAL_CREW : platform-owned crews (per Tier 5 D20)
+//   - EXTERNAL_PARTNER    : external partner agents onboarded via A2A gateway
+//   - BYOA                : Bring-Your-Own-Agent tenant-scoped agents
+//
+// When an agent emits a domain event, the AGID is carried in
+// envelope.gcid (per envelope semantics — the actor identifier slot).
+// Downstream consumers determine "is this an agent or a user?" by looking
+// up the identifier in chora_identity (GCID table vs AGID table).
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.identity.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/identity/v1;identityv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// AgentKind — classification of the agent identity.
+// -----------------------------------------------------------------------------
+enum AgentKind {
+  AGENT_KIND_UNSPECIFIED = 0;
+  AGENT_KIND_CHORA_INTERNAL_CREW = 1; // Platform-owned crew (Tier 5 D20 fixed core or dynamic specialist)
+  AGENT_KIND_EXTERNAL_PARTNER = 2;     // External partner agent — onboarded via A2A gateway (ADR-132)
+  AGENT_KIND_BYOA = 3;                  // Bring-Your-Own-Agent — tenant-scoped, governed by platform
+}
+
+// -----------------------------------------------------------------------------
+// AgidIssued — chora.identity.agid.issued.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a new AGID is minted. Internal crews are provisioned
+// programmatically by the platform; external partner / BYOA AGIDs are
+// provisioned via H+ Hub+ admin onboarding flows.
+message AgidIssued {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // The newly issued AGID (UUIDv7 — distinct namespace from GCID).
+  string agid = 2;
+
+  // Owning organisation / tenant ID. For CHORA_INTERNAL_CREW this is the
+  // literal "platform"; for EXTERNAL_PARTNER / BYOA it is the issuing
+  // tenant's UUID.
+  string owner_org_id = 3;
+
+  // Classification of this agent identity.
+  AgentKind agent_kind = 4;
+
+  // Human-readable display name (e.g., "Atom Validator", "Partner ACME Math
+  // Tutor", "TenantX BYOA Coach"). Max 128 chars.
+  string display_name = 5;
+
+  google.protobuf.Timestamp issued_at = 6;
+}
+
+// -----------------------------------------------------------------------------
+// AgidRevoked — chora.identity.agid.revoked.v1
+// -----------------------------------------------------------------------------
+//
+// Published when an AGID is revoked. After revocation the AGID may NOT emit
+// further events; the Guardrail Service rejects invocations. Soft-delete
+// semantics — historical events remain attributable for audit.
+message AgidRevoked {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string agid = 2;
+  string owner_org_id = 3;
+  AgentKind agent_kind = 4;
+
+  // Free-text reason (max 512 chars; e.g., "partner_offboarded",
+  // "byoa_safety_violation", "internal_deprecation").
+  string reason = 5;
+
+  // GCID of the human admin who triggered revocation (or empty if
+  // platform-automated).
+  string revoked_by_gcid = 6;
+
+  google.protobuf.Timestamp revoked_at = 7;
+}

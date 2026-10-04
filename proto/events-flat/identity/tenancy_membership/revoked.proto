@@ -1,0 +1,61 @@
+// =============================================================================
+// GENERATED — DO NOT EDIT.
+// Source : events/identity/tenancy_membership.proto message TenantMembershipRevoked
+// Tool   : chora-contracts/internal/protoflatten
+// Why    : GCP Pub/Sub Schema Registry rejects (a) schemas with `import`
+//          statements and (b) schemas with more than one top-level message.
+//          This flat copy contains exactly ONE top-level message;
+//          EventEnvelope + Timestamp + transitive deps are nested inside.
+// Path C : see chora-contracts/CHANGELOG.md and m10-data-plane main.tf.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.identity.v1;
+
+message TenantMembershipRevoked {
+  // Inlined chora.common.v1.EventEnvelope (nested for self-contained schema).
+  message Envelope {
+    string event_id = 1;
+    string idempotency_key = 2;
+    string tenant_id = 3;
+    string gcid = 4;
+    Timestamp occurred_at = 5;
+    Timestamp published_at = 6;
+    string traceparent = 7;
+    string tracestate = 8;
+    string source_project = 9;
+    string source_service = 10;
+    int32 schema_version = 11;
+    string correlation_id = 12;
+    string causation_id = 13;
+    string chora_imda_dimension = 14;
+    string imda_lifecycle_stage = 15;
+  }
+
+  // Inlined google.protobuf.Timestamp (nested; wire-compatible).
+  message Timestamp {
+    int64 seconds = 1;
+    int32 nanos = 2;
+  }
+
+  // Inlined enum dep: TenantMembershipRole
+  enum TenantMembershipRole {
+    TENANT_MEMBERSHIP_ROLE_UNSPECIFIED = 0;
+    TENANT_MEMBERSHIP_ROLE_LEARNER = 1;
+    TENANT_MEMBERSHIP_ROLE_INSTRUCTOR = 2;
+    TENANT_MEMBERSHIP_ROLE_ADMIN = 3;
+    TENANT_MEMBERSHIP_ROLE_AUDITOR = 4;
+    TENANT_MEMBERSHIP_ROLE_OWNER = 5;
+    TENANT_MEMBERSHIP_ROLE_SUPPORT_AGENT = 6;
+  }
+
+  Envelope envelope = 1;
+  string membership_id = 2;
+  string gcid = 3;
+  string tenant_id = 4;
+  repeated TenantMembershipRole prior_roles = 5;
+  string revoked_by_gcid = 6;
+  string reason = 7;
+  Timestamp revoked_at = 8;
+}

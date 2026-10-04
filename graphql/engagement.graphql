@@ -1,0 +1,108 @@
+# =============================================================================
+# Chora Engagement subschema — federated GraphQL
+# =============================================================================
+#
+# Federation v2 compatible. Owns LearningPath / AtomicSession / DailyDose /
+# KnowledgeGraphEdge for the learner-facing read graph (Content Consumption
+# domain). Consumed via stitching by `learner.graphql` at the BFF gateway.
+#
+# Owning team   : Team 1 (Content)
+# Domain        : Content Consumption (chora_consumption DB)
+# Surface       : A+ Reader mode (per skill `domain-content-consumption`)
+# =============================================================================
+
+directive @key(fields: String!, resolvable: Boolean = true) repeatable on OBJECT | INTERFACE
+directive @shareable on OBJECT | FIELD_DEFINITION
+directive @external on FIELD_DEFINITION
+
+scalar UUID
+scalar DateTime
+
+enum PathMode {
+  STRAIGHT_UP
+  GRAPH_DISCOVERY
+}
+
+enum SessionStatus {
+  STARTED
+  COMPLETED
+  ABANDONED
+}
+
+enum KnowledgeGraphEdgeType {
+  PREREQUISITE_OF
+  EXTENDS
+  ANALOGY_OF
+  CONTRASTS_WITH
+  APPLIED_IN
+}
+
+# -----------------------------------------------------------------------------
+# Query root — engagement subschema
+# -----------------------------------------------------------------------------
+
+type Query {
+  """The current learner's enrolled LearningPaths."""
+  myPaths: [LearningPath!]!
+
+  """Fetch a LearningPath by ID (RLS-scoped to caller tenant)."""
+  path(id: ID!): LearningPath
+
+  """All currently-active (STARTED) AtomicSessions for the current learner."""
+  myActiveSessions: [AtomicSession!]!
+
+  """Today's AI-curated DailyDose for the current learner."""
+  dailyDose: DailyDose!
+
+  """
+  Discovery feed — KnowledgeGraph edges around an optional seed atom.
+  Used by Discovery curiosity-driven mode.
+  """
+  discoveryFeed(seedAtomId: ID, depth: Int = 2): [KnowledgeGraphEdge!]!
+}
+
+# -----------------------------------------------------------------------------
+# Domain types
+# -----------------------------------------------------------------------------
+
+type LearningPath @key(fields: "id") {
+  id: ID!
+  title: String!
+  description: String
+  mode: PathMode!
+  atomIds: [UUID!]!
+  totalSteps: Int!
+  completionPercentage: Float
+  currentStep: Int
+  enrolledAt: DateTime
+  completedAt: DateTime
+}
+
+type AtomicSession {
+  id: ID!
+  atomId: UUID!
+  pathId: UUID
+  status: SessionStatus!
+  score: Float
+  durationMs: Int
+  startedAt: DateTime!
+  completedAt: DateTime
+}
+
+type DailyDose {
+  id: ID!
+  atomIds: [UUID!]!
+  estimatedMinutes: Int!
+  pathId: UUID
+  generatedAt: DateTime!
+  expiresAt: DateTime!
+}
+
+type KnowledgeGraphEdge {
+  id: ID!
+  sourceNodeId: UUID!
+  targetNodeId: UUID!
+  edgeType: KnowledgeGraphEdgeType!
+  weight: Float
+  traversalDepth: Int!
+}

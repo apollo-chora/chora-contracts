@@ -1,0 +1,369 @@
+openapi: "3.2.0"
+info:
+  title: "Chora AI Kernel Orchestrator API"
+  version: "1.0.0"
+  description: |
+    REST API for the Python LangGraph orchestrator (hybrid kernel per
+    Tier 2 D5 + Tier 5 D20).
+
+    Owning domain : AI Kernel (`chora_ai_kernel` database)
+    Owning team   : Team 3 (Platform)
+    Project       : `chora-489812` (platform host) — `team-platform` namespace
+                    in `chora-prod-cluster` (always-on, leader-elected).
+    Surface       : O+ Observability+ (admin/auditor read on traces;
+                    `/orchestrate` is BFF-internal — invoked by chora-bff-gateway
+                    + per-domain orchestrators).
+
+    AP-01: This contract exists BEFORE implementation per CLAUDE.md §4.
+
+    ## Hybrid kernel role
+
+    The orchestrator owns the LangGraph state machine: it classifies intent,
+    dispatches a fixed core crew (per Content {verb} domain) or summons a
+    dynamic specialist (Tier 5 D20), calls the Model Broker (gRPC) for model
+    invocations, calls the Guardrail Service (HTTP) for input/output screening,
+    and aggregates results. State is checkpointed via PostgresSaver in the
+    `chora_ai_kernel` database. HITL interrupts are exposed as 202 + resume
+    endpoints (deferred to M14).
+
+    ## Crews
+
+    Five fixed core crews (Tier 5 D20):
+
+      - `creation_crew`    — ContentGen + ContentReview + Translation + Assessment
+      - `consumption_crew` — TriggerOptimizer + RAGMemory + WeaknessAnalyzer + LearningPath
+      - `delivery_crew`    — TutorAgent + AdaptiveDifficulty + Explainer
+      - `sharing_crew`     — PvPScreener + ModerationAgent
+      - `a2a_crew`         — ContractValidator + RateLimiter
+
+    Plus dynamic specialist agents summoned on-demand via the
+    `crew_kind=dynamic_specialist` route.
+  contact:
+    name: "Chora Platform Team (Team 3)"
+  license:
+    name: "Proprietary"
+
+servers:
+  - url: "https://api.chora.app"
+    description: "Production"
+  - url: "http://localhost:8080"
+    description: "Local development"
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Health
+    description: "Health + readiness"
+  - name: Orchestrate
+    description: "LangGraph crew orchestration entrypoint"
+  - name: Crews
+    description: "Crew registry + status"
+
+paths:
+  /healthz:
+    get:
+      operationId: healthz
+      summary: "Liveness probe"
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          $ref: "#/components/responses/Healthy"
+
+  /readyz:
+    get:
+      operationId: readyz
+      summary: "Readiness probe — checks model broker + guardrail wiring"
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          $ref: "#/components/responses/Healthy"
+        "503":
+          description: "Adapters uninitialised (env config missing)"
+
+  /orchestrate:
+    post:
+      operationId: orchestrate
+      summary: "Run a crew workflow through the LangGraph state machine"
+      description: |
+        Comic Ch6 P12 anchor — "Generate 10 MCQ" through the Sequel Act 1
+        atom-orchestration pipeline. Pipeline:
+
+          intent_classifier → crew_dispatch → model_broker_call
+                              → guardrail_screen → result_aggregate
+
+        Conditional edges:
+
+          - intent unclassifiable    → terminal failure
+          - guardrail decision=refuse → result_aggregate with empty results
+          - guardrail decision=rewrite → result carries the rewrite
+
+        Idempotent on `request_id` (UUIDv7) — retries hit the existing
+        checkpoint.
+      tags: [Orchestrate]
+      parameters:
+        - $ref: "#/components/parameters/TenantHeader"
+        - $ref: "#/components/parameters/GcidHeader"
+        - $ref: "#/components/parameters/Traceparent"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OrchestrateRequest"
+      responses:
+        "200":
+          description: "Orchestration completed (allow / rewrite / refuse)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrchestrateResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "502":
+          description: "Downstream model broker or guardrail failure"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: "Service not configured (env vars missing)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /orchestrate/{request_id}:
+    parameters:
+      - name: request_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      - $ref: "#/components/parameters/TenantHeader"
+      - $ref: "#/components/parameters/GcidHeader"
+    get:
+      operationId: getOrchestrationTrace
+      summary: "Fetch a prior orchestration's execution trace"
+      description: |
+        Returns the LangGraph state machine's node-by-node trace for the
+        requested run. Used by the O+ surface to audit a single workflow
+        end-to-end (intent → dispatch → model call → guardrail → final).
+      tags: [Orchestrate]
+      responses:
+        "200":
+          description: "Trace found"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrchestrateTrace"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /crews:
+    get:
+      operationId: listCrews
+      summary: "List configured crews + status"
+      description: |
+        Returns the five fixed core crews + any registered dynamic specialist
+        archetypes. Used by O+ to render the crew composition snapshot.
+      tags: [Crews]
+      responses:
+        "200":
+          description: "Crews listed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CrewListResponse"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    TenantHeader:
+      name: X-Tenant-Id
+      in: header
+      required: true
+      description: "Tenant UUIDv7 propagated from edge (mesh-injected)."
+      schema: { type: string, format: uuid }
+    GcidHeader:
+      name: gcid
+      in: header
+      required: true
+      description: "Global Chora ID UUIDv7 (caller's identity)."
+      schema: { type: string, format: uuid }
+    Traceparent:
+      name: traceparent
+      in: header
+      required: false
+      description: "W3C traceparent header for cross-service trace stitching."
+      schema: { type: string }
+  responses:
+    Healthy:
+      description: "OK"
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              status: { type: string }
+              time: { type: string, format: date-time }
+    BadRequest:
+      description: "Invalid request body or headers"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: "Resource not found"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string, example: "ORCHESTRATOR_INVALID_BODY" }
+        message: { type: string }
+    Domain:
+      type: string
+      description: "11-domain Chora topology — 5 core + 6 supporting."
+      enum:
+        - creation
+        - consumption
+        - delivery
+        - sharing
+        - a2a
+        - identity
+        - tenancy
+        - governance
+        - observability
+        - notifications
+        - ai_kernel
+    CrewKind:
+      type: string
+      enum: [fixed_core, dynamic_specialist]
+    CrewID:
+      type: string
+      example: "creation_crew"
+      enum:
+        - creation_crew
+        - consumption_crew
+        - delivery_crew
+        - sharing_crew
+        - a2a_crew
+        - dynamic_specialist
+    OrchestratorDecision:
+      type: string
+      description: "Final orchestrator decision mirrored from guardrail."
+      enum: [allow, rewrite, refuse]
+    OrchestrateRequest:
+      type: object
+      required: [tenant_id, gcid, agent_id, intent, domain, prompt]
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+          description: "Tenant UUIDv7. Must match X-Tenant-Id header."
+        gcid:
+          type: string
+          format: uuid
+          description: "Caller GCID UUIDv7."
+        agent_id:
+          type: string
+          example: "chora-creation-author-mcq"
+          description: |
+            Calling agent's logical id; used for guardrail config lookup +
+            audit trail.
+        intent:
+          type: string
+          example: "generate_mcq"
+          description: |
+            Free-form intent label. The orchestrator's intent_classifier may
+            override this when explicit intent disagrees with prompt content.
+        domain:
+          $ref: "#/components/schemas/Domain"
+        crew_kind:
+          $ref: "#/components/schemas/CrewKind"
+          default: fixed_core
+        prompt:
+          type: string
+          example: "Generate 10 MCQ on Agile Estimation"
+        constraints:
+          type: object
+          description: "Free-form constraints (timeout, cost cap, count, ...)."
+          additionalProperties:
+            type: string
+    OrchestrateResponse:
+      type: object
+      required:
+        [request_id, crew_id, decision, model_used, output_payload, completed_at]
+      properties:
+        request_id: { type: string, format: uuid }
+        crew_id: { $ref: "#/components/schemas/CrewID" }
+        member_agent_ids:
+          type: array
+          items: { type: string }
+        decision: { $ref: "#/components/schemas/OrchestratorDecision" }
+        decision_explanation: { type: string }
+        model_used: { type: string, example: "gemini-2.5-flash" }
+        output_payload:
+          type: string
+          description: |
+            JSON-stringified workflow output. Empty when decision=refuse.
+        completed_at: { type: string, format: date-time }
+        traceparent: { type: string }
+    NodeTrace:
+      type: object
+      required: [node, started_at]
+      properties:
+        node:
+          type: string
+          enum:
+            - intent_classifier
+            - crew_dispatch
+            - model_broker_call
+            - guardrail_screen
+            - result_aggregate
+        started_at: { type: string, format: date-time }
+        completed_at: { type: string, format: date-time }
+        outcome: { type: string, example: "success" }
+        notes: { type: string }
+    OrchestrateTrace:
+      type: object
+      required: [request_id, nodes]
+      properties:
+        request_id: { type: string, format: uuid }
+        crew_id: { $ref: "#/components/schemas/CrewID" }
+        nodes:
+          type: array
+          items: { $ref: "#/components/schemas/NodeTrace" }
+        final_decision: { $ref: "#/components/schemas/OrchestratorDecision" }
+    CrewDescriptor:
+      type: object
+      required: [crew_id, kind, domain, member_agent_ids]
+      properties:
+        crew_id: { $ref: "#/components/schemas/CrewID" }
+        kind: { $ref: "#/components/schemas/CrewKind" }
+        domain: { $ref: "#/components/schemas/Domain" }
+        member_agent_ids:
+          type: array
+          items: { type: string }
+        status:
+          type: string
+          enum: [ready, degraded]
+          default: ready
+    CrewListResponse:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/CrewDescriptor" }
+        total: { type: integer }

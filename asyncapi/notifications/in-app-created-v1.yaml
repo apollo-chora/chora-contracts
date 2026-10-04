@@ -1,0 +1,62 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Notifications — InAppNotificationCreated
+  version: 1.0.0
+  description: |
+    Published when a new in-app notification is materialised for a
+    recipient. Surfaces subscribe (via WebSocket / SSE bridge) for
+    real-time tray updates.
+
+    - Domain: Notifications (`chora_notifications` DB)
+    - Topic: `chora.notifications.in_app.created.v1`
+    - Source proto: `proto/events/notifications/in_app.proto`
+       message `chora.notifications.v1.InAppNotificationCreated`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  inAppCreated:
+    address: chora.notifications.in_app.created.v1
+    messages:
+      inAppCreated:
+        $ref: '#/components/messages/InAppNotificationCreated'
+
+operations:
+  publishInAppCreated:
+    action: send
+    channel:
+      $ref: '#/channels/inAppCreated'
+    messages:
+      - $ref: '#/channels/inAppCreated/messages/inAppCreated'
+
+  consumeInAppCreated:
+    action: receive
+    channel:
+      $ref: '#/channels/inAppCreated'
+    description: |
+      Consumers: All 5 surfaces' notification trays (via WebSocket bridge),
+      Observability (engagement KPI).
+    messages:
+      - $ref: '#/channels/inAppCreated/messages/inAppCreated'
+
+components:
+  messages:
+    InAppNotificationCreated:
+      name: InAppNotificationCreated
+      title: In-App Notification Created
+      summary: A new in-app notification has been materialised
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/notifications/in_app.proto#/chora.notifications.v1.InAppNotificationCreated'

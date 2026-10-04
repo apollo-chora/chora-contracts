@@ -1,0 +1,62 @@
+asyncapi: 3.0.0
+info:
+  title: Chora AI Kernel — ModelInvocationFailed
+  version: 1.0.0
+  description: |
+    Published when a model invocation fails (post-retry exhaustion).
+    Drives agent fallback selection + alerting.
+
+    - Domain: AI Kernel (`chora_ai_kernel` DB)
+    - Topic: `chora.ai_kernel.invocation.failed.v1`
+    - Source proto: `proto/events/ai_kernel/invocation.proto`
+       message `chora.ai_kernel.v1.ModelInvocationFailed`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  modelInvocationFailed:
+    address: chora.ai_kernel.invocation.failed.v1
+    messages:
+      modelInvocationFailed:
+        $ref: '#/components/messages/ModelInvocationFailed'
+
+operations:
+  publishModelInvocationFailed:
+    action: send
+    channel:
+      $ref: '#/channels/modelInvocationFailed'
+    messages:
+      - $ref: '#/channels/modelInvocationFailed/messages/modelInvocationFailed'
+
+  consumeModelInvocationFailed:
+    action: receive
+    channel:
+      $ref: '#/channels/modelInvocationFailed'
+    description: |
+      Consumers: Observability (failure KPI, alerting),
+      AI Kernel orchestrator (fallback selection),
+      Agent fallback registry.
+    messages:
+      - $ref: '#/channels/modelInvocationFailed/messages/modelInvocationFailed'
+
+components:
+  messages:
+    ModelInvocationFailed:
+      name: ModelInvocationFailed
+      title: Model Invocation Failed
+      summary: A model invocation has failed after retry exhaustion
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/ai_kernel/invocation.proto#/chora.ai_kernel.v1.ModelInvocationFailed'

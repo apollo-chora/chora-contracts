@@ -1,0 +1,67 @@
+// =============================================================================
+// GENERATED — DO NOT EDIT.
+// Source : events/delivery/exam.proto message ExamGraded
+// Tool   : chora-contracts/internal/protoflatten
+// Why    : GCP Pub/Sub Schema Registry rejects (a) schemas with `import`
+//          statements and (b) schemas with more than one top-level message.
+//          This flat copy contains exactly ONE top-level message;
+//          EventEnvelope + Timestamp + transitive deps are nested inside.
+// Path C : see chora-contracts/CHANGELOG.md and m10-data-plane main.tf.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.delivery.v1;
+
+message ExamGraded {
+  // Inlined chora.common.v1.EventEnvelope (nested for self-contained schema).
+  message Envelope {
+    string event_id = 1;
+    string idempotency_key = 2;
+    string tenant_id = 3;
+    string gcid = 4;
+    Timestamp occurred_at = 5;
+    Timestamp published_at = 6;
+    string traceparent = 7;
+    string tracestate = 8;
+    string source_project = 9;
+    string source_service = 10;
+    int32 schema_version = 11;
+    string correlation_id = 12;
+    string causation_id = 13;
+    string chora_imda_dimension = 14;
+    string imda_lifecycle_stage = 15;
+  }
+
+  // Inlined google.protobuf.Timestamp (nested; wire-compatible).
+  message Timestamp {
+    int64 seconds = 1;
+    int32 nanos = 2;
+  }
+
+  // Inlined enum dep: PassFail
+  enum PassFail {
+    PASS_FAIL_UNSPECIFIED = 0;
+    PASS_FAIL_PASS = 1;
+    PASS_FAIL_FAIL = 2;
+  }
+
+  // Inlined enum dep: ProctorMethod
+  enum ProctorMethod {
+    PROCTOR_METHOD_UNSPECIFIED = 0;
+    PROCTOR_METHOD_NONE = 1;
+    PROCTOR_METHOD_AUTO_AI = 2;
+    PROCTOR_METHOD_HUMAN_LIVE = 3;
+    PROCTOR_METHOD_HUMAN_RECORDED = 4;
+  }
+
+  Envelope envelope = 1;
+  string exam_id = 2;
+  string course_id = 3;
+  string candidate_gcid = 4;
+  Timestamp scheduled_for = 5;
+  ProctorMethod proctor_method = 6;
+  int32 score = 7;
+  PassFail pass_fail = 8;
+  Timestamp graded_at = 9;
+}

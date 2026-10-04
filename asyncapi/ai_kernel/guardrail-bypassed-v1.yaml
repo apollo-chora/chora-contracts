@@ -1,0 +1,64 @@
+asyncapi: 3.0.0
+info:
+  title: Chora AI Kernel — GuardrailBypassed
+  version: 1.0.0
+  description: |
+    Published when an authorised principal explicitly bypasses a guardrail.
+    HIGHLY audited — feeds the IMDA D4 Safety + Security evidence chain
+    and surfaces in the O+ moderation queue.
+
+    Only humans can bypass — bypassed_by_gcid is NEVER an AGID.
+
+    - Domain: AI Kernel (`chora_ai_kernel` DB)
+    - Topic: `chora.ai_kernel.guardrail.bypassed.v1`
+    - Source proto: `proto/events/ai_kernel/guardrail.proto`
+       message `chora.ai_kernel.v1.GuardrailBypassed`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  guardrailBypassed:
+    address: chora.ai_kernel.guardrail.bypassed.v1
+    messages:
+      guardrailBypassed:
+        $ref: '#/components/messages/GuardrailBypassed'
+
+operations:
+  publishGuardrailBypassed:
+    action: send
+    channel:
+      $ref: '#/channels/guardrailBypassed'
+    messages:
+      - $ref: '#/channels/guardrailBypassed/messages/guardrailBypassed'
+
+  consumeGuardrailBypassed:
+    action: receive
+    channel:
+      $ref: '#/channels/guardrailBypassed'
+    description: |
+      Consumers: Governance (audit + compliance), IMDA D4 evidence
+      collector, O+ critical-action review.
+    messages:
+      - $ref: '#/channels/guardrailBypassed/messages/guardrailBypassed'
+
+components:
+  messages:
+    GuardrailBypassed:
+      name: GuardrailBypassed
+      title: Guardrail Bypassed
+      summary: A human-authorised guardrail bypass has been recorded
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/ai_kernel/guardrail.proto#/chora.ai_kernel.v1.GuardrailBypassed'

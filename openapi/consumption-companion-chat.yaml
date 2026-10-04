@@ -1,0 +1,427 @@
+openapi: "3.2.0"
+info:
+  title: "Chora Companion Conversational Chat API"
+  version: "1.0.0"
+  description: |
+    Per-Companion conversational chat surface — multi-turn streaming chat
+    between a learner and their Companion (RPG companion). Server-Sent
+    Events (SSE) transport per ADR-154 D1.
+
+    Owning domain : Content Consumption (`chora_consumption` database)
+    Owning team   : Team 1 (Content)
+    Surface       : A+ (learner self-service); also C+ (social "Companion
+                    chat" widget when surfaced inside a post thread)
+
+    Authentication: Bearer JWT (ChoraSession-minted) — same as every
+    other A+ route. NOT gated by CompanionExposureGrant (per ADR-154 D5
+    — that's external A2A path; first-party FE goes JWT-only).
+
+    AP-01: This contract exists BEFORE implementation. Reuses the
+    canonical `InsufficientManaUpsell` envelope from learner-economy.yaml
+    for the 402 response — same shape every other mana-gated path emits.
+
+    Source-of-truth: `docs/architecture/adrs/adr-154-companion-chat-surface.md`
+  contact:
+    name: "Chora Team 1 (Content)"
+  license:
+    name: "Proprietary"
+
+servers:
+  - url: "https://api.chora.site"
+    description: "Production via chora-gateway"
+  - url: "http://localhost:8080"
+    description: "Local development (direct chora-consumption)"
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: CompanionChat
+    description: "Conversational chat — streaming multi-turn with a learner's Companion"
+  - name: Health
+    description: "Health check"
+
+paths:
+  /v1/me/companions/{companion_id}/chat:
+    post:
+      operationId: streamCompanionChat
+      summary: "Open or continue a chat turn with a Companion (SSE stream)"
+      description: |
+        Send a single message to a Companion and receive a streamed response.
+
+        ## Session lifecycle (per ADR-154 D2)
+
+        The first call for a (caller GCID, companion_id) pair creates a
+        long-lived ADK session on Vertex AI Agent Engine and persists the
+        engine_session_id in `chora_consumption.companion_chat_sessions`.
+        Subsequent turns reuse the session — the engine accumulates
+        conversation history across turns.
+
+        On engine-side session expiry (4xx `session_not_found`) the server
+        creates a fresh session, persists it, and retries the turn ONCE.
+
+        ## Mana cost (per ADR-154 D3)
+
+        Tier-aware per ADR-142 + ADR-149 model mapping:
+
+        | Tier | Action code | Cost |
+        |---|---|---|
+        | Basic | `companion_chat_turn_basic` | 5 mana |
+        | Standard | `companion_chat_turn_standard` | 15 mana |
+        | Premium | `companion_chat_turn_premium` | 30 mana |
+
+        On insufficient balance the response is `402 Payment Required` with
+        the canonical `InsufficientManaUpsell` envelope (see
+        `learner-economy.yaml#InsufficientManaUpsell`) — render the upsell
+        CTA verbatim. This is the educational moment for unseeded users.
+
+        ## SSE frame schema (per ADR-154 D4)
+
+        The 200 response body is `text/event-stream`. Five event types:
+
+        - `session_open` — fires once at turn start with the session_id +
+          turn_id so the FE can correlate the trace.
+        - `tool_call` — fires zero or more times when the engine invokes
+          one of its tools (atom_search / persona_lookup /
+          ebbinghaus_state). The FE renders "Companion is searching atoms..."
+          indicators per IMDA D2 transparency convention. Tools' RETURN
+          values are NOT exposed.
+        - `token` — fires once per LLM token chunk. Concatenate the `text`
+          field to build the cumulative response.
+        - `turn_complete` — fires once at turn end with token counts +
+          mana charged + model + finish_reason.
+        - `error` — fires once on engine error mid-turn (transport drop,
+          guardrail intercept, tool failure); the stream closes after.
+
+        Frame wire format (W3C SSE):
+
+        ```
+        event: session_open
+        data: {"session_id":"...","turn_id":"...","engine_session_id":"..."}
+
+        event: tool_call
+        data: {"tool":"atom_search","args":{"query":"forgetting curve"}}
+
+        event: token
+        data: {"text":"Based on"}
+
+        event: token
+        data: {"text":" your learning history,"}
+
+        event: turn_complete
+        data: {"session_id":"...","turn_id":"...","output_tokens":42,"mana_charged":5,"model":"gemini-2.5-flash-lite","finish_reason":"STOP"}
+
+        ```
+
+      tags: [CompanionChat]
+      parameters:
+        - name: companion_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: "Companion instance ID (UUIDv7)."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatRequest"
+      responses:
+        "200":
+          description: |
+            Successful chat turn. Body is `text/event-stream`. See SSE frame
+            schema in operation description.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+              description: "Always `no-cache` so intermediaries do not buffer."
+            X-Accel-Buffering:
+              schema:
+                type: string
+              description: "Set to `no` to disable Envoy/Nginx response buffering."
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: "SSE stream — see ChatSseFrame for per-frame schema."
+        "402":
+          description: "Insufficient mana — render upsell CTA."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InsufficientManaErrorResponse"
+        "404":
+          description: "Companion not found OR not owned by caller."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: |
+            The companion turn lane is not wired at chora-consumption boot.
+            Fail-loud: no stub fallback on this path.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /healthz:
+    get:
+      operationId: chatHealthz
+      summary: "Health check"
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: "Healthy"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: "ChoraSession JWT minted by /api/v1/auth/session/mint"
+
+  schemas:
+    # -------------------------------------------------------------------
+    # Request
+    # -------------------------------------------------------------------
+    ChatRequest:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+          minLength: 1
+          maxLength: 4000
+          description: |
+            The learner's prompt for this turn. Truncation at the FE is
+            recommended for the long-tail; engine-side guardrails clip
+            beyond `max_input_tokens` per Cloud Model Armor template.
+        max_output_tokens:
+          type: integer
+          minimum: 1
+          maximum: 2048
+          default: 512
+          description: |
+            Caps the engine's per-turn output. Default 512 keeps p95
+            latency under the 60s gateway timeout for `gemini-3.1-pro-preview`.
+        locale:
+          type: string
+          pattern: "^[a-z]{2}(-[A-Z]{2})?$"
+          example: "en"
+          description: |
+            BCP-47 locale hint. The Companion's tone/style adapts per
+            locale (en / zh-CN / en-SG / ...). Defaults to learner's
+            stored preference if absent.
+
+    # -------------------------------------------------------------------
+    # SSE frame schemas (for documentation; the wire format is
+    # text/event-stream, not application/json. Each `data: ...` line is
+    # ONE of the schemas below, dispatched by the `event:` field name.)
+    # -------------------------------------------------------------------
+    ChatSseFrame:
+      oneOf:
+        - $ref: "#/components/schemas/SessionOpenFrame"
+        - $ref: "#/components/schemas/ToolCallFrame"
+        - $ref: "#/components/schemas/TokenFrame"
+        - $ref: "#/components/schemas/TurnCompleteFrame"
+        - $ref: "#/components/schemas/ChatErrorFrame"
+      discriminator:
+        propertyName: type
+
+    SessionOpenFrame:
+      type: object
+      required: [session_id, turn_id, engine_session_id]
+      description: "Carried on `event: session_open` (always first)."
+      properties:
+        type:
+          type: string
+          const: session_open
+        session_id:
+          type: string
+          format: uuid
+          description: "chora_consumption.companion_chat_sessions.id (UUIDv7)"
+        turn_id:
+          type: string
+          format: uuid
+          description: "Per-turn UUIDv7 for FE-side trace correlation"
+        engine_session_id:
+          type: string
+          description: "Vertex AI Agent Engine session id (opaque)"
+
+    ToolCallFrame:
+      type: object
+      required: [tool]
+      description: |
+        Carried on `event: tool_call` zero or more times per turn. The
+        FE renders "Companion is using ..." indicators. Tools' RETURN
+        values are NOT forwarded.
+      properties:
+        type:
+          type: string
+          const: tool_call
+        tool:
+          type: string
+          enum: [atom_search, persona_lookup, ebbinghaus_state]
+          description: "ADK tool name registered on the Companion engine"
+        args:
+          type: object
+          description: "Tool args as the engine emitted them (opaque)"
+          additionalProperties: true
+
+    TokenFrame:
+      type: object
+      required: [text]
+      description: |
+        Carried on `event: token` once per LLM token chunk. Concatenate
+        `text` across all token frames to build the cumulative response.
+      properties:
+        type:
+          type: string
+          const: token
+        text:
+          type: string
+
+    TurnCompleteFrame:
+      type: object
+      required: [session_id, turn_id, output_tokens, mana_charged, model]
+      description: |
+        Carried on `event: turn_complete` exactly once per successful turn.
+      properties:
+        type:
+          type: string
+          const: turn_complete
+        session_id:
+          type: string
+          format: uuid
+        turn_id:
+          type: string
+          format: uuid
+        output_tokens:
+          type: integer
+          minimum: 0
+        mana_charged:
+          type: integer
+          minimum: 0
+        model:
+          type: string
+          example: "gemini-2.5-flash-lite"
+        finish_reason:
+          type: string
+          enum: [STOP, MAX_TOKENS, SAFETY, TOOL_ERROR, UNKNOWN]
+
+    ChatErrorFrame:
+      type: object
+      required: [code, message]
+      description: |
+        Carried on `event: error` when the engine aborts mid-turn (transport
+        drop, guardrail block, tool failure). The stream closes after.
+      properties:
+        type:
+          type: string
+          const: error
+        code:
+          type: string
+          enum:
+            - ENGINE_STREAM_ABORTED
+            - ENGINE_TIMEOUT
+            - GUARDRAIL_BLOCKED
+            - TOOL_FAILED
+            - INTERNAL_ERROR
+        message:
+          type: string
+
+    # -------------------------------------------------------------------
+    # 4xx / 5xx envelopes
+    # -------------------------------------------------------------------
+    InsufficientManaErrorResponse:
+      type: object
+      required: [error]
+      description: |
+        402 envelope — verbatim from
+        chora-contracts/openapi/learner-economy.yaml#InsufficientManaErrorResponse
+        so FE renders one universal upsell component across all mana-gated
+        paths.
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum: [insufficient_mana]
+            message:
+              type: string
+            correlation_id:
+              type: string
+              format: uuid
+            upsell:
+              $ref: "#/components/schemas/InsufficientManaUpsell"
+
+    InsufficientManaUpsell:
+      type: object
+      required: [required_units, current_balance_units]
+      description: "Upsell context returned in 402 responses"
+      properties:
+        required_units:
+          type: integer
+          format: int64
+          minimum: 0
+        current_balance_units:
+          type: integer
+          format: int64
+          minimum: 0
+        recommended_plan_code:
+          type: string
+          nullable: true
+        recommended_topup_units:
+          type: integer
+          format: int64
+          nullable: true
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: |
+                Codes:
+                - COMPANION_NOT_FOUND — :id does not exist or is owned by
+                  another GCID. 404.
+                - ENGINE_NOT_CONFIGURED: the companion turn lane is not
+                  wired at chora-consumption boot. 503.
+                - BAD_REQUEST — malformed JSON / message missing / too long.
+                  400.
+                - GATEWAY_UPSTREAM_5XX — chora-consumption 5xx, normalised
+                  by chora-gateway. 502.
+                - GATEWAY_UPSTREAM_TIMEOUT — 60s per-call cap reached. 504.
+                - INTERNAL_ERROR — unexpected handler-side error. 500.
+            message:
+              type: string
+            correlation_id:
+              type: string
+              format: uuid
+
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [healthy, degraded]
+        version:
+          type: string

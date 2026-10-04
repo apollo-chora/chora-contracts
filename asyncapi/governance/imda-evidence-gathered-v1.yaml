@@ -1,0 +1,62 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Governance — ImdaEvidenceGathered
+  version: 1.0.0
+  description: |
+    Published when evidence supporting an IMDA dimension is gathered
+    (red-team report, eval suite run, model card publish, decision log
+    snapshot). Builds the cumulative evidence chain for tenant-level
+    IMDA attestation.
+
+    - Domain: Governance (`chora_governance` DB)
+    - Topic: `chora.governance.imda.evidence_gathered.v1`
+    - Source proto: `proto/events/governance/imda.proto`
+       message `chora.governance.v1.ImdaEvidenceGathered`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  imdaEvidenceGathered:
+    address: chora.governance.imda.evidence_gathered.v1
+    messages:
+      imdaEvidenceGathered:
+        $ref: '#/components/messages/ImdaEvidenceGathered'
+
+operations:
+  publishImdaEvidenceGathered:
+    action: send
+    channel:
+      $ref: '#/channels/imdaEvidenceGathered'
+    messages:
+      - $ref: '#/channels/imdaEvidenceGathered/messages/imdaEvidenceGathered'
+
+  consumeImdaEvidenceGathered:
+    action: receive
+    channel:
+      $ref: '#/channels/imdaEvidenceGathered'
+    description: |
+      Consumers: O+ IMDA dashboard, Audit log, attestation pipelines.
+    messages:
+      - $ref: '#/channels/imdaEvidenceGathered/messages/imdaEvidenceGathered'
+
+components:
+  messages:
+    ImdaEvidenceGathered:
+      name: ImdaEvidenceGathered
+      title: IMDA Evidence Gathered
+      summary: Evidence has been gathered for an IMDA dimension
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/governance/imda.proto#/chora.governance.v1.ImdaEvidenceGathered'

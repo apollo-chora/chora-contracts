@@ -1,0 +1,63 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Tenancy — TenantManaAllocationClaimed
+  version: 1.0.0
+  description: |
+    Published when chora-identity acks the FIRST debit hitting the
+    allocation (i.e., the learner spends from this subsidy slice).
+    Idempotent on allocation_id — repeat events are no-ops.
+
+    - Domain: Tenancy + Billing (`chora_tenancy` DB)
+    - Topic: `chora.tenancy.tenant_mana_allocation.claimed.v1`
+    - Source proto: `proto/events/tenancy/tenant_mana_allocation.proto`
+       message `chora.tenancy.v1.TenantManaAllocationClaimed`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  tenantManaAllocationClaimed:
+    address: chora.tenancy.tenant_mana_allocation.claimed.v1
+    messages:
+      tenantManaAllocationClaimed:
+        $ref: '#/components/messages/TenantManaAllocationClaimed'
+
+operations:
+  publishTenantManaAllocationClaimed:
+    action: send
+    channel:
+      $ref: '#/channels/tenantManaAllocationClaimed'
+    messages:
+      - $ref: '#/channels/tenantManaAllocationClaimed/messages/tenantManaAllocationClaimed'
+
+  consumeTenantManaAllocationClaimed:
+    action: receive
+    channel:
+      $ref: '#/channels/tenantManaAllocationClaimed'
+    description: |
+      Consumers: Tenancy (status update PENDING -> CLAIMED), Observability
+      (claim-rate KPI), Notifications (admin "first use" notification on
+      large allocations).
+    messages:
+      - $ref: '#/channels/tenantManaAllocationClaimed/messages/tenantManaAllocationClaimed'
+
+components:
+  messages:
+    TenantManaAllocationClaimed:
+      name: TenantManaAllocationClaimed
+      title: Tenant Mana Allocation Claimed
+      summary: A learner has first-debited mana from a subsidy allocation
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/tenancy/tenant_mana_allocation.proto#/chora.tenancy.v1.TenantManaAllocationClaimed'

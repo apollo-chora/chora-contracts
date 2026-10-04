@@ -1,0 +1,619 @@
+// =============================================================================
+// Chora Content Consumption — CompanionGrowthService (gRPC)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture/adrs/adr-149-companion-growth-stage-model.md
+//   + chora-contracts/proto/events/consumption/companion.proto (event payloads)
+//   + chora-contracts/proto/events/tenancy/companion_egg.proto (purchase upstream)
+//
+// Inter-service gRPC contract for the Companion Growth axis (per-Companion
+// 7-stage × per-breed model). DISTINCT from the existing Consumption service
+// in consumption.proto — kept separate to:
+//   1. Allow per-method backwards-compatible evolution
+//   2. Permit team-split ownership (growth lifecycle vs session lifecycle)
+//   3. Keep the existing Consumption service surface small + focused
+//
+// Companion discipline (per CLAUDE.md): Companion is a DOMAIN ENTITY in
+// Content Consumption. The AI agent that POWERS it is a separate adapter
+// in AI Kernel. These RPCs operate on the entity (growth_stage, growth_exp,
+// breed, resonant_atom_id, visible_kg_neighbors) — NOT on the agent runtime.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.services.consumption.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/consumption/v1;consumptionv1";
+
+import "google/protobuf/timestamp.proto";
+
+// -----------------------------------------------------------------------------
+// Service
+// -----------------------------------------------------------------------------
+
+service CompanionGrowth {
+  // GetCompanionGrowth — fetch the current growth state for a Companion.
+  // Used by chora-gateway BFF to render /a/companion profile + EXP bar + KG
+  // reach map. Idempotent + cacheable (TTL ~30s; cache-invalidated by
+  // CompanionStageUp / CompanionKgNeighborRevealed event subscribers).
+  rpc GetCompanionGrowth(GetCompanionGrowthRequest)
+      returns (GetCompanionGrowthResponse);
+
+  // ResolveCompanionConfig — load the full per-Companion session-bootstrap
+  // config the AI-Kernel Companion agent needs at session start (ADR-147 §7
+  // session-time per-instance config; multi-companion-per-user-2026-05-11 §2).
+  //
+  // DISTINCT from GetCompanionGrowth (growth axis only): this returns the
+  // identity + persona + specialization + configured rules + allowed-skill
+  // allowlist + growth/KG axes so the agent's instancedispatch can compose
+  // the system instruction + per-Companion tool allowlist for a REAL Companion.
+  // It is the production replacement for the AI-Kernel agent's POC stub
+  // registry (skillregistry.NewStubRegistry), which only knew canned
+  // companion_ids and refused real Companions with "companion not found".
+  //
+  // RLS + ownership enforced via caller_gcid (must own the Companion in the
+  // tenant). Idempotent + cacheable (TTL ~30s; invalidated by CompanionStageUp
+  // / CompanionKgNeighborRevealed subscribers, same as GetCompanionGrowth).
+  rpc ResolveCompanionConfig(ResolveCompanionConfigRequest)
+      returns (ResolveCompanionConfigResponse);
+
+  // AwardExp — atomically increment a Companion's growth_exp. Idempotent on
+  // the composite key (companion_id, source, idempotency_key). May trigger
+  // a stage_up if the new total crosses a threshold (publishes both
+  // CompanionExpAwarded and CompanionStageUp via the outbox). May also trigger
+  // the Stage-3 Source Revelation (publishes CompanionSourceRevelation).
+  //
+  // Called by CompanionGrowthSubscriber for source events and by the Companion
+  // runtime for direct conv_turn awards.
+  //
+  // Daily cap is enforced server-side: if the source's daily cap would be
+  // exceeded, the response carries `daily_cap_hit=true` and `clamped_delta`
+  // reflects the actual amount awarded (may be 0).
+  rpc AwardExp(AwardExpRequest) returns (AwardExpResponse);
+
+  // HatchEgg — advances a Stage-0 (Egg) Companion to Stage 1 (Baby), setting
+  // the Resonant Atom + identity bundle AND rolling the breed (lootbox).
+  // ONE-SHOT per Companion; calling on an already-hatched Companion returns
+  // FAILED_PRECONDITION.
+  //
+  // Server-side behavior:
+  //   1. Validate resonant_atom_id via chora-creation.ValidateAtomID + verify
+  //      it's in the caller's per-user KG
+  //   2. Validate the Companion is at growth_stage = 0 + hatched_at IS NULL
+  //   3. Validate tone + learner_persona against canonical enums
+  //   4. Roll breed: crypto-seeded PRNG against egg_sku.breed_distribution
+  //      (from companion_egg_catalog in chora_tenancy — fetched via cached
+  //      tenancy projection or direct read of catalog projection table)
+  //   5. Detect shiny: check caller's active roster for existing Companions
+  //      of the rolled species; if present, set shiny_variant = TRUE
+  //   6. Persist all changes in a single transaction
+  //   7. Publish CompanionBreedRevealed → CompanionHatched → CompanionStageUp
+  //      (0 → 1) via outbox, in that order
+  //
+  // Response carries the rolled breed + shiny flag so the FE reveal animation
+  // can render the correct breed art. Calls are NOT idempotent in the gacha
+  // sense — the roll is committed on first successful call. A retry against
+  // a hatched Companion returns FAILED_PRECONDITION with the existing state.
+  rpc HatchEgg(HatchEggRequest) returns (HatchEggResponse);
+
+  // PreviewEggOdds — returns the IMDA D2 transparency probability table for
+  // a given egg SKU. Public read (no caller auth required beyond tenant
+  // scope); called by the egg purchase screen pre-checkout AND by the H+
+  // admin egg catalog view (per ADR-149 §Breed lootbox + transparency).
+  //
+  // TODO(reconciliation-C2, 2026-05-23): a parallel PreviewEggOdds RPC exists
+  // in `tenancy/v1/companion_egg_service.proto`. The egg catalog (and its
+  // breed_distribution JSONB) is owned by chora-tenancy; this consumption-side
+  // RPC is a façade for the egg purchase screen. Consolidation path:
+  // chora-consumption CompanionGrowth.PreviewEggOdds becomes a thin client
+  // call to chora-tenancy CompanionEgg.PreviewEggOdds rather than a separate
+  // implementation. Tracked as audit action C2 in
+  // `~/.claude/plans/transient-hugging-dewdrop.md` §4.3.
+  rpc PreviewEggOdds(PreviewEggOddsRequest)
+      returns (PreviewEggOddsResponse);
+
+  // PickKgNeighbor — adds a user-chosen adjacent KG atom to the Companion's
+  // visible_kg_neighbors list. Available at Stage 2 (first user-pick) and
+  // at Stage 4 (second user-pick). Adjacency is validated against the
+  // caller's per-user KG hexagon cache.
+  //
+  // Calling at a stage that doesn't permit a user-pick (Stages 0, 1, 3, 5, 6)
+  // returns FAILED_PRECONDITION. Picking an already-visible neighbor returns
+  // ALREADY_EXISTS (idempotent on retry).
+  //
+  // Publishes CompanionKgNeighborRevealed (revealed_via=user_pick).
+  rpc PickKgNeighbor(PickKgNeighborRequest)
+      returns (PickKgNeighborResponse);
+
+  // TriggerSourceRevelation — opens the 24-hour Stage-3 Source Revelation
+  // preview window. Called by the Companion runtime on the FIRST conversation
+  // turn after a Stage 2 → 3 transition. ONE-SHOT per Companion lifetime;
+  // calling on a Companion with aha_moment_consumed=true returns
+  // FAILED_PRECONDITION.
+  //
+  // Server-side: derives preview_llm_tier from mana_tier (Basic→flash,
+  // Standard+Premium→pro), sets aha_moment_active_until = now() +
+  // window_duration_seconds, marks aha_moment_consumed = true.
+  //
+  // Publishes CompanionSourceRevelation via outbox.
+  rpc TriggerSourceRevelation(TriggerSourceRevelationRequest)
+      returns (TriggerSourceRevelationResponse);
+
+  // ListGrowthEvents — paginated read of the per-Companion EXP ledger.
+  // Used by /a/companion/growth-log timeline + O+ audit views.
+  rpc ListGrowthEvents(ListGrowthEventsRequest)
+      returns (ListGrowthEventsResponse);
+
+  // ReadLearnerProfile — read-only slice of the ADR-200 Global LearnerProfile
+  // read model (verified facts + recent activity), scoped to the OWNER of the
+  // supplied companion. Backs the `profile.read` agent tool (progress_mirror,
+  // goal_scribe — CHO-2013 P1.B, R4-3). Missing rows are simply absent —
+  // the projection never fabricates (fail-loud narration is the Skill's job).
+  rpc ReadLearnerProfile(ReadLearnerProfileRequest)
+      returns (ReadLearnerProfileResponse);
+
+  // RecordCompanionMemoryNote — writes ONE learner-visible memory note through
+  // the existing companion memory Record port (pgvector-embedded, RLS-bound).
+  // Backs the `memory.note` agent tool (recap_scribe — CHO-2013 P1.B, R4-3).
+  // note_type is a CLOSED enum-by-convention (v1: "recap") — the memory view
+  // + ADR-215 steer surfaces key off it.
+  rpc RecordCompanionMemoryNote(RecordCompanionMemoryNoteRequest)
+      returns (RecordCompanionMemoryNoteResponse);
+
+  // ReadWeakness — read-only top-N slice of the learner's Growth Edges
+  // (learner_weakness aggregate), scoped to the OWNER of the supplied companion
+  // and ordered by strength descending (shakiest first). Backs the
+  // `weakness.read` agent tool (weakness_sight, path_weaver — CHO-2014 R3-3).
+  // LEARNER-SAFE: emits the concept slug + natural label (+ a sanitized
+  // summary) only — NEVER the edge id, gcid, topic_id, or embedding
+  // (domain-vocabulary + no-UUID-leak discipline, CHO-2059/2060). Missing rows
+  // are simply absent — the aggregate never fabricates (fail-loud narration is
+  // the Skill's job).
+  rpc ReadWeakness(ReadWeaknessRequest) returns (ReadWeaknessResponse);
+
+  // ReadKGMap — read-only ring-scoped slice of the learner's per-user concept
+  // map (concept_graph), centred on the Companion's resonant concept, out to a
+  // reach that WIDENS with growth stage (1 ring at/below Awakened st3, 2 rings
+  // once Structural st4+). Backs the `kg.read_map` agent tool (map_sight,
+  // goal_scribe — CHO-2014 R3-3). LEARNER-SAFE: emits concept TITLES + ring
+  // distance only, never the concept UUID or atom refs. An unpicked (or pruned)
+  // resonant centre yields an empty map — the Skill narrates that honestly.
+  rpc ReadKGMap(ReadKGMapRequest) returns (ReadKGMapResponse);
+}
+
+// -----------------------------------------------------------------------------
+// ReadLearnerProfile types (CHO-2013 P1.B)
+// -----------------------------------------------------------------------------
+
+message ReadLearnerProfileRequest {
+  string tenant_id = 1;
+  string companion_id = 2;   // profile owner resolved + ownership-checked server-side
+  string caller_gcid = 3;   // must own the companion (no cross-owner disclosure)
+  string window = 4;        // week | month | all (default all)
+}
+
+message LearnerProfileFact {
+  string fact_type = 1;     // course_completed | score_recorded | cert_issued | ...
+  string ref = 2;           // opaque cross-domain ref (no FK)
+  string title = 3;
+  string detail_json = 4;   // verbatim projection detail payload
+  google.protobuf.Timestamp occurred_at = 5;
+}
+
+message LearnerProfileActivity {
+  string activity_type = 1;
+  string summary = 2;
+  google.protobuf.Timestamp occurred_at = 3;
+}
+
+message ReadLearnerProfileResponse {
+  repeated LearnerProfileFact facts = 1;
+  repeated LearnerProfileActivity recent_activity = 2;
+}
+
+// -----------------------------------------------------------------------------
+// RecordCompanionMemoryNote types (CHO-2013 P1.B)
+// -----------------------------------------------------------------------------
+
+message RecordCompanionMemoryNoteRequest {
+  string tenant_id = 1;
+  string companion_id = 2;
+  string caller_gcid = 3;   // must own the companion
+  string note_type = 4;     // closed set; v1: "recap"
+  string content = 5;       // plain-text note (≤2000 chars, server-enforced)
+}
+
+message RecordCompanionMemoryNoteResponse {
+  bool recorded = 1;
+}
+
+// -----------------------------------------------------------------------------
+// ReadWeakness types (CHO-2014 R3-3 — weakness.read tool for weakness_sight)
+// -----------------------------------------------------------------------------
+
+message ReadWeaknessRequest {
+  string tenant_id = 1;
+  string companion_id = 2;   // Growth-Edge owner resolved + ownership-checked server-side
+  string caller_gcid = 3;   // must own the companion (no cross-owner disclosure)
+  int32  limit = 4;         // top-N by strength desc; server clamps (default 10, max 50)
+}
+
+// WeaknessEdge is the learner-SAFE projection of one Growth Edge. It carries the
+// concept slug + natural label + strength + coarse metadata ONLY — never the
+// edge id, learner gcid, topic_id, embedding, or raw evidence (those are
+// platform internals / potential UUID leaks the Companion must never parrot).
+message WeaknessEdge {
+  string concept_key = 1;    // normalised slug (learner-safe; NOT a UUID)
+  string concept_label = 2;  // Companion-facing natural phrase
+  double strength = 3;       // 0..1 shakiness (1 = very weak)
+  string category = 4;       // coarse bucket ("" = none)
+  repeated string tags = 5;
+  string status = 6;         // active | grown
+  string summary = 7;        // sanitized distilled descriptor summary ("" when none)
+  google.protobuf.Timestamp last_evidenced_at = 8;
+}
+
+message ReadWeaknessResponse {
+  repeated WeaknessEdge edges = 1;
+}
+
+// -----------------------------------------------------------------------------
+// ReadKGMap types (CHO-2014 R3-3 — kg.read_map tool for map_sight)
+// -----------------------------------------------------------------------------
+
+message ReadKGMapRequest {
+  string tenant_id = 1;
+  string companion_id = 2;
+  string caller_gcid = 3;   // must own the companion (no cross-owner disclosure)
+}
+
+// MapConcept is one concept on the learner's ring-scoped map — learner-SAFE:
+// title + ring distance only (never the concept UUID or atom refs).
+message MapConcept {
+  string title = 1;
+  int32  ring = 2;        // 0 = resonant centre, 1 = adjacent, 2 = two-hop
+  bool   is_centre = 3;
+}
+
+message ReadKGMapResponse {
+  // rings — the ring reach granted by the Companion's growth stage (1 at/below
+  // Awakened st3, 2 at Structural st4+). Present even when the map is empty.
+  int32 rings = 1;
+  // centre_title — the resonant concept's title ("" when no centre is picked
+  // yet OR the centre concept was pruned; the map is then empty).
+  string centre_title = 2;
+  repeated MapConcept concepts = 3;
+}
+
+// -----------------------------------------------------------------------------
+// Common growth state types
+// -----------------------------------------------------------------------------
+
+message CompanionGrowthState {
+  string companion_id = 1;
+
+  // Current stage, 0..6.
+  int32  growth_stage = 2;
+
+  // Canonical stage name per ADR-149 (breed-neutral).
+  // egg | baby | fledgling | awakened | structural | teen | matured
+  string stage_name = 3;
+
+  // Breed/species (post-hatch; empty string at Stage 0).
+  // owl | fox | cat | dragon | phoenix | turtle | wolf | raven
+  string species = 4;
+  bool   shiny_variant = 5;
+  string rarity = 6;             // common | uncommon | rare | legendary
+
+  // Current EXP toward the NEXT threshold (resets to 0 conceptually at
+  // each stage_up — actual storage is cumulative).
+  int32  exp_current = 7;
+
+  // EXP needed to cross into the next stage (e.g., 200 for Stage 2 → 3).
+  // 0 if already at max (Stage 6).
+  int32  exp_next_threshold = 8;
+
+  // Cumulative EXP since hatching (running total used for ledger reconciliation).
+  int32  exp_cumulative = 9;
+
+  // Effective LLM tier the agent runtime should use at this stage,
+  // BOUNDED by the user's mana_tier ceiling.
+  // flash-lite | flash | flash-reasoning | pro
+  string effective_llm_tier = 10;
+
+  // Effective max output tokens at this stage + tier combination.
+  int32  effective_max_output_tokens = 11;
+
+  // Tools currently available to this Companion's agent runtime.
+  repeated string unlocked_tools = 12;
+
+  // KG reach.
+  string resonant_atom_id = 13;
+  repeated KgNeighbor visible_kg_neighbors = 14;
+
+  // Source-Revelation (Aha-moment) state.
+  bool   aha_moment_consumed = 15;
+  google.protobuf.Timestamp aha_moment_active_until = 16;
+
+  // Lifecycle timestamps.
+  google.protobuf.Timestamp hatched_at = 17;        // empty when stage=0
+  google.protobuf.Timestamp last_stage_up_at = 18;
+}
+
+message KgNeighbor {
+  string atom_id = 1;
+  int32  graph_distance = 2;     // 1 = adjacent, 2 = two-hop
+  string revealed_via = 3;        // user_pick | stage_up_hex | junction_accept | admin_grant
+  google.protobuf.Timestamp revealed_at = 4;
+}
+
+// -----------------------------------------------------------------------------
+// GetCompanionGrowth
+// -----------------------------------------------------------------------------
+
+message GetCompanionGrowthRequest {
+  string tenant_id = 1;
+  string companion_id = 2;
+  string caller_gcid = 3;        // for RLS + ownership check
+}
+
+message GetCompanionGrowthResponse {
+  CompanionGrowthState state = 1;
+}
+
+// -----------------------------------------------------------------------------
+// ResolveCompanionConfig — AI-Kernel agent session-bootstrap config
+// -----------------------------------------------------------------------------
+
+message ResolveCompanionConfigRequest {
+  string tenant_id = 1;
+  string companion_id = 2;
+  string caller_gcid = 3;        // RLS + ownership check (must own the Companion)
+}
+
+message ResolveCompanionConfigResponse {
+  CompanionInstanceConfig config = 1;
+}
+
+// CompanionInstanceConfig is the per-Companion bootstrap payload consumed by the
+// AI-Kernel agent's instancedispatch. Field-for-field mirror of the agent's
+// skillregistry.CompanionConfig (services/chora-ai-kernel-orchestrator/poc/
+// companion_chat_adk_go/internal/skillregistry/registry.go) so the gRPC registry
+// maps 1:1. All fields sourced from chora_consumption.companion_instances
+// (+ growth-axis columns from migration 0032) + the resolved skill allowlist.
+message CompanionInstanceConfig {
+  string companion_id = 1;
+  string owner_gcid = 2;
+  string tenant_id = 3;
+  string name = 4;                      // user-chosen ("Eira", "Newton", ...)
+  string specialization = 5;            // math | history | coding | music | ...
+  string age_stage = 6;                 // toddler|child|teen|young_adult|adult
+  bool   young_forever = 7;
+  string evolution_tier = 8;            // apprentice | adept | master | sage
+  int32  skill_slots_unlocked = 9;
+  int32  memory_context_capacity = 10;
+  string persona_summary = 11;
+  CompanionConfiguredRules configured_rules = 12;
+  repeated string allowed_skills = 13;  // ordered skill_key allowlist
+  string applied_accent_id = 14;        // optional voice accent (ADR-116)
+  string learner_persona = 15;          // curious-explorer|cert-focused|social-leader
+
+  // ADR-149 growth + breed + KG axes (from companion_instances 0032 columns).
+  int32  growth_stage = 16;             // 0..6
+  string species = 17;                  // owl|fox|cat|dragon|phoenix|turtle|wolf|raven
+  bool   shiny_variant = 18;
+  string resonant_atom_id = 19;
+  repeated string visible_kg_neighbor_atom_ids = 20;  // RETIRED R3-1 — always empty
+  google.protobuf.Timestamp aha_moment_active_until = 21;
+
+  // allowed_tools — the MERGED runtime tool allowlist (CHO-2013 P1.B, R4-2):
+  // innate(stage) ladder mapped to canonical agent tool names ∪ the equipped
+  // active Skills' tool_handler_refs, deduplicated + sorted. The agent's
+  // per-turn filter keys on THIS list; allowed_skills (field 13) stays the
+  // equipped skill KEYS (slot-cap check + prompt weave). Unknown names are
+  // skipped with a loud WARN agent-side — narrowing-safe degradation.
+  repeated string allowed_tools = 22;
+
+  // CHO-2015 (ADR-219 D2) — the learner's fenced free-text guidance note
+  // (<=280 chars). Model-Armor-screened at save; the agent injects it into a
+  // LOCKED-FRAME untrusted-data segment of the system prompt (never an
+  // instruction position). Empty when the learner has not authored one.
+  string guidance_note = 23;
+}
+
+// CompanionConfiguredRules is the typed expansion of the
+// companion_instances.configured_rules JSONB for prompt composition. Mirrors
+// the agent's skillregistry.ConfiguredRules (+ flattened HintPolicy).
+message CompanionConfiguredRules {
+  string tone = 1;                       // socratic | direct | encouraging
+  int32  max_hints_before_reveal = 2;
+  string hint_progression = 3;           // ladder | uniform
+  string difficulty_cap = 4;             // foundation | intermediate | advanced
+  string language = 5;                   // ISO 639-1 (e.g., "en")
+  string citation_strictness = 6;        // strict | lenient
+  // CHO-2015 (ADR-219 D2) — learner Persona knobs (additive). address_style
+  // drives how the Companion addresses the learner; interest_chips are bounded
+  // topic tags the Companion weaves in when natural.
+  string address_style = 7;              // first_name | nickname | formal
+  repeated string interest_chips = 8;    // <=8 chips, each <=32 chars
+}
+
+// -----------------------------------------------------------------------------
+// AwardExp
+// -----------------------------------------------------------------------------
+
+message AwardExpRequest {
+  string tenant_id = 1;
+  string companion_id = 2;
+  string owner_gcid = 3;
+
+  // Requested delta (before daily-cap clamping). Must be > 0.
+  int32  requested_delta = 4;
+
+  // Source taxonomy — must match a known value (see ADR-149 §EXP economy).
+  string source = 5;
+
+  // Idempotency key. For event-derived awards, the upstream event_id.
+  // For runtime conv_turn awards, use {session_id}:{turn_seq}.
+  string idempotency_key = 6;
+
+  // Optional source-event provenance (auditing).
+  string source_event_id = 7;
+  string source_topic = 8;
+  string source_session_id = 9;
+  int32  source_turn_seq = 10;
+}
+
+message AwardExpResponse {
+  // Actual EXP awarded (may be 0 if cap exhausted or duplicate).
+  int32  clamped_delta = 1;
+  bool   daily_cap_hit = 2;
+  bool   duplicate = 3;          // true if idempotency key already seen
+
+  // New state (post-award; stage may have changed).
+  CompanionGrowthState state = 4;
+
+  // True if this award triggered a stage_up (CompanionStageUp event was published).
+  bool   stage_up_triggered = 5;
+
+  // True if this award triggered Stage-3 Source Revelation (Aha moment).
+  bool   source_revelation_triggered = 6;
+}
+
+// -----------------------------------------------------------------------------
+// HatchEgg (gacha-roll breed inside)
+// -----------------------------------------------------------------------------
+
+message HatchEggRequest {
+  string tenant_id = 1;
+  string companion_id = 2;
+  string owner_gcid = 3;
+
+  string display_name = 4;
+  string tone = 5;                // socratic | direct | encouraging
+  string learner_persona = 6;     // curious-explorer | cert-focused | social-leader
+
+  // Resonant Atom anchor — MUST exist + be in caller's per-user KG.
+  string resonant_atom_id = 7;
+}
+
+message HatchEggResponse {
+  CompanionGrowthState state = 1;
+
+  // The rolled breed/species (also surfaced inside state, but pulled out
+  // here for FE reveal animation convenience).
+  // owl | fox | cat | dragon | phoenix | turtle | wolf | raven
+  string species = 2;
+
+  // Shiny variant flag (alternate color palette). TRUE if the learner already
+  // owns another Companion of this species across their active roster.
+  bool   shiny_variant = 3;
+
+  // Rarity tier of the rolled species per the egg SKU's distribution.
+  // common | uncommon | rare | legendary
+  string rarity = 4;
+
+  // The probability weight the SKU assigned to this species at the roll
+  // (e.g., 25.0 = 25% chance). Persisted for IMDA D2 transparency audits;
+  // surfaced in the reveal UI as a "the odds were X% — you got it!" line.
+  double rolled_probability = 5;
+}
+
+// -----------------------------------------------------------------------------
+// PreviewEggOdds — IMDA D2 transparency endpoint
+// -----------------------------------------------------------------------------
+
+message PreviewEggOddsRequest {
+  string tenant_id = 1;
+  string egg_sku = 2;
+}
+
+message PreviewEggOddsResponse {
+  string egg_sku = 1;
+  repeated BreedOdds odds = 2;
+
+  // Total weight (should sum to 100.0; surfaced as audit hint).
+  double total_weight = 3;
+
+  // Last-modified timestamp for the breed_distribution. Tenant admins MAY
+  // revise the table; this lets consumers detect changes.
+  google.protobuf.Timestamp distribution_updated_at = 4;
+}
+
+message BreedOdds {
+  string species = 1;        // canonical lower-case
+  double probability = 2;     // 0.0..100.0
+  string rarity = 3;          // common | uncommon | rare | legendary
+}
+
+// -----------------------------------------------------------------------------
+// PickKgNeighbor
+// -----------------------------------------------------------------------------
+
+message PickKgNeighborRequest {
+  string tenant_id = 1;
+  string companion_id = 2;
+  string owner_gcid = 3;
+
+  // The adjacent atom the user wishes to grant visibility to. Must be
+  // adjacent to resonant_atom_id (graph_distance = 1) per the per-user KG.
+  string atom_id = 4;
+}
+
+message PickKgNeighborResponse {
+  CompanionGrowthState state = 1;
+  KgNeighbor revealed = 2;
+}
+
+// -----------------------------------------------------------------------------
+// TriggerSourceRevelation
+// -----------------------------------------------------------------------------
+
+message TriggerSourceRevelationRequest {
+  string tenant_id = 1;
+  string companion_id = 2;
+  string owner_gcid = 3;
+
+  // Mana tier of the caller, snapshotted at trigger time. Bounds the
+  // preview_llm_tier.
+  // basic | standard | premium
+  string mana_tier = 4;
+
+  // Optional override for window duration (seconds). Falls back to the
+  // tenant-configured default (typically 86400 — 24h).
+  int32  window_duration_seconds_override = 5;
+}
+
+message TriggerSourceRevelationResponse {
+  CompanionGrowthState state = 1;
+  string preview_llm_tier = 2;
+  google.protobuf.Timestamp window_expires_at = 3;
+  int32  window_duration_seconds = 4;
+}
+
+// -----------------------------------------------------------------------------
+// ListGrowthEvents
+// -----------------------------------------------------------------------------
+
+message ListGrowthEventsRequest {
+  string tenant_id = 1;
+  string companion_id = 2;
+  string caller_gcid = 3;
+  int32  page_size = 4;          // default 50, max 200
+  string page_token = 5;          // empty on first call
+}
+
+message ListGrowthEventsResponse {
+  repeated GrowthEventRecord events = 1;
+  string next_page_token = 2;
+}
+
+message GrowthEventRecord {
+  string growth_event_id = 1;
+  string source = 2;
+  int32  exp_delta = 3;
+  int32  exp_total_after = 4;
+  bool   daily_cap_hit = 5;
+  bool   triggered_stage_up = 6;
+  google.protobuf.Timestamp awarded_at = 7;
+}

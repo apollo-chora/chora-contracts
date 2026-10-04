@@ -1,0 +1,81 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Content Consumption — EdgeFollowed
+  version: 1.0.0
+  description: |
+    Published when a learner follows a typed edge in the KnowledgeGraph
+    during Discovery / curiosity-driven mode.
+
+    - Domain: Content Consumption (`chora_consumption` DB)
+    - Aggregate root: `KnowledgeGraphEdge`
+    - Topic: `chora.consumption.knowledge_graph.edge_followed.v1`
+    - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
+    - Source proto: `proto/events/consumption/knowledge_graph.proto`
+       message `chora.consumption.v1.EdgeFollowed`
+
+    Per Tier 2 D7, KG traversal uses PostgreSQL Recursive CTEs in
+    `chora_consumption` — NOT a separate graph DB. Edge types are
+    `prerequisite_of`, `extends`, `analogy_of`, `contrasts_with`,
+    `applied_in`. Per-tenant RLS enforced on every recursive frame.
+
+    Distinguished from `NodeTraversed` (`node_traversed.v1`): NodeTraversed
+    records arrival at a node; EdgeFollowed records the edge-level signal
+    of which relationship the learner chose to explore.
+
+    Embeds the mandatory `chora.common.v1.EventEnvelope` as field 1.
+  contact:
+    name: Chora Platform Team (Team 3) + Team 1 (Content)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+    description: Google Cloud Pub/Sub (chora-489812 platform host)
+
+channels:
+  edgeFollowed:
+    address: chora.consumption.knowledge_graph.edge_followed.v1
+    description: Single-event topic for EdgeFollowed.
+    messages:
+      edgeFollowed:
+        $ref: '#/components/messages/EdgeFollowed'
+
+operations:
+  publishEdgeFollowed:
+    action: send
+    channel:
+      $ref: '#/channels/edgeFollowed'
+    summary: Publish an EdgeFollowed event
+    messages:
+      - $ref: '#/channels/edgeFollowed/messages/edgeFollowed'
+
+  consumeEdgeFollowed:
+    action: receive
+    channel:
+      $ref: '#/channels/edgeFollowed'
+    summary: Subscribe to EdgeFollowed events
+    description: |
+      Primary consumers:
+      - Sharing — curiosity reputation accrual (which relationship types
+        a learner explored deepens reputation in those domains)
+      - Observability — edge-popularity analytics + recommendation engine
+        seed signal (Personalisation Service per Tier 3 D14)
+    messages:
+      - $ref: '#/channels/edgeFollowed/messages/edgeFollowed'
+
+components:
+  messages:
+    EdgeFollowed:
+      name: EdgeFollowed
+      title: Edge Followed
+      summary: A learner followed a typed KnowledgeGraph edge in Discovery mode
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/consumption/knowledge_graph.proto#/chora.consumption.v1.EdgeFollowed'

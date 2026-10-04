@@ -1,0 +1,457 @@
+// =============================================================================
+// Chora Model Broker — Unified Facade Service (gRPC)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 2 D6
+//   + .claude/skills/model-broker-3-services/SKILL.md
+//   + chora-contracts/openapi/model-broker-router.yaml
+//   + chora-contracts/proto/services/model_broker_router.proto
+//   + chora-contracts/proto/services/model_broker_gateway.proto
+//   + chora-contracts/proto/services/model_broker_classifier.proto
+//
+// THIS contract is the unified caller-facing facade across the 3 Model Broker
+// services. The 3 internal services (Router + Gateway + Classifier) each have
+// their own .proto contract (proto/services/model_broker_{router,gateway,
+// classifier}.proto) and remain SEPARATE binaries — Tier 2 D6 forbids folding
+// them into a single binary (god-object reject).
+//
+// Aggregates exposed via this facade:
+//   - GenerationRequest    — caller-side shape for an end-to-end LLM call
+//   - GenerationResponse   — caller-side shape for the completed result
+//   - ModelInfo            — catalog model row (for ListModels)
+//   - TokenUsage           — per-call accounting record (TokenUsageLedger)
+//
+// Why a facade?
+//   Most callers (Python orchestrators, Go executors, agent crews) want a
+//   single end-to-end "Generate" call and a single "RouteRequest" streaming
+//   path for long-running orchestration. The facade handles the internal
+//   Router -> Gateway hop + Classifier fallback transparently.
+//
+// Long-running orchestration uses bidi streaming on RouteRequest:
+//   - Caller streams routing decisions (or revisions; a follow-up
+//     RouteRequest may carry a different cost_budget if the first attempt
+//     was rejected by Router gates).
+//   - Server streams routing decisions interleaved with intermediate
+//     events from the multi-service path (Classifier consult / fallback).
+//   - The bidi shape lets the orchestrator iterate without re-establishing
+//     auth / mTLS / trace context.
+//
+// Token usage accounting is canonical via RecordTokenUsage (writes to
+// TokenUsageLedger in chora_observability). Callers SHOULD NOT call this
+// directly — the Gateway atomically writes to the ledger inside Invoke.
+// RecordTokenUsage is exposed for backfill / out-of-band records only.
+//
+// Cross-tenant adapter loading FORBIDDEN (Tier 5 D19). Per-tenant LoRA
+// adapter URIs in GenerationRequest.adapter_uri MUST belong to the caller's
+// tenant_id; mismatch = INVALID_ARGUMENT.
+//
+// Deployed in chora-489812 team-platform pool. mTLS via Cloud Service Mesh;
+// SPIFFE identity in mesh; W3C trace context in gRPC metadata.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.services.model_broker.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/model_broker/v1;model_brokerv1";
+
+import "google/protobuf/timestamp.proto";
+
+// -----------------------------------------------------------------------------
+// Service
+// -----------------------------------------------------------------------------
+
+service ModelBroker {
+  // End-to-end generation. Internally: Router -> Gateway. Idempotent on
+  // request_id (UUIDv7); the underlying Gateway dedups via TokenUsageLedger.
+  rpc Generate(GenerationRequest) returns (GenerationResponse);
+
+  // Bidi-streaming routing for long-running orchestration. The caller
+  // streams successive RouteRequests (or revisions thereof — e.g., when a
+  // first attempt was rejected by Router gates and the caller wants to
+  // raise cost_budget); the server streams routing decisions interleaved
+  // with intermediate orchestration events (Classifier fallback consult,
+  // budget gate hit, A/B variant selection, etc.).
+  rpc RouteRequest(stream RouteStreamRequest) returns (stream RouteStreamResponse);
+
+  // Record a TokenUsageLedger row out-of-band (backfill / audit ingest).
+  // Idempotent on usage_id. Callers SHOULD NOT use this for normal flow —
+  // the Gateway writes atomically inside Invoke.
+  rpc RecordTokenUsage(RecordTokenUsageRequest) returns (RecordTokenUsageResponse);
+
+  // List the model catalog visible to a tenant. Reads from the Router's
+  // RoutableModel projection; admin operators may filter by family / tier.
+  rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
+}
+
+// -----------------------------------------------------------------------------
+// Shared enums (mirrored from internal model_broker_*.proto contracts)
+// -----------------------------------------------------------------------------
+
+// Domain enum — mirrors model_broker_router.proto Domain (deliberate
+// duplicate per cross-service no-import rule).
+enum Domain {
+  DOMAIN_UNSPECIFIED = 0;
+  DOMAIN_CREATION = 1;
+  DOMAIN_CONSUMPTION = 2;
+  DOMAIN_DELIVERY = 3;
+  DOMAIN_SHARING = 4;
+  DOMAIN_A2A = 5;
+  DOMAIN_IDENTITY = 6;
+  DOMAIN_TENANCY = 7;
+  DOMAIN_GOVERNANCE = 8;
+  DOMAIN_OBSERVABILITY = 9;
+  DOMAIN_NOTIFICATIONS = 10;
+  DOMAIN_AI_KERNEL = 11;
+}
+
+// TaskKind — high-level shape of the LLM call. Mirrors Router.
+enum TaskKind {
+  TASK_KIND_UNSPECIFIED = 0;
+  TASK_KIND_CLASSIFY = 1;
+  TASK_KIND_GENERATE = 2;
+  TASK_KIND_CRITIQUE = 3;
+  TASK_KIND_EXTRACT = 4;
+  TASK_KIND_RANK = 5;
+}
+
+// ModelKind — coarse class hint. Mirrors Router.
+enum ModelKind {
+  MODEL_KIND_UNSPECIFIED = 0;
+  MODEL_KIND_GEMINI_FLASH = 1;
+  MODEL_KIND_GEMINI_PRO = 2;
+  MODEL_KIND_GEMMA_TENANT_LORA = 3;
+  MODEL_KIND_EMBEDDING = 4;
+  MODEL_KIND_CLASSIFIER = 5;
+}
+
+// GuardrailTier — mirrors guardrail_service.proto + model_broker_*.proto.
+enum GuardrailTier {
+  GUARDRAIL_TIER_UNSPECIFIED = 0;
+  GUARDRAIL_TIER_REGEX = 1;
+  GUARDRAIL_TIER_DLP = 2;
+  GUARDRAIL_TIER_MODEL_ARMOR = 3;
+  GUARDRAIL_TIER_OUTPUT_VALIDATOR = 4;
+}
+
+// FinishReason — why generation stopped. Mirrors Gateway.
+enum FinishReason {
+  FINISH_REASON_UNSPECIFIED = 0;
+  FINISH_REASON_COMPLETE = 1;
+  FINISH_REASON_MAX_TOKENS = 2;
+  FINISH_REASON_GUARDRAIL_BLOCK = 3;
+  FINISH_REASON_ERROR = 4;
+}
+
+// RouteStreamEventKind — kind of intermediate event during bidi RouteRequest.
+enum RouteStreamEventKind {
+  ROUTE_STREAM_EVENT_KIND_UNSPECIFIED = 0;
+  ROUTE_STREAM_EVENT_KIND_DECIDED = 1;             // Router emitted a decision
+  ROUTE_STREAM_EVENT_KIND_CLASSIFIER_CONSULTED = 2; // fuzzy-fallback ran
+  ROUTE_STREAM_EVENT_KIND_BUDGET_REJECTED = 3;     // gate rejected request
+  ROUTE_STREAM_EVENT_KIND_AB_VARIANT_SELECTED = 4; // A/B chose a variant
+  ROUTE_STREAM_EVENT_KIND_GOVERNANCE_OVERRIDE = 5; // Gatekeeper overrode model
+}
+
+// -----------------------------------------------------------------------------
+// Common message types
+// -----------------------------------------------------------------------------
+
+// PromptMessage — chat-format compatible message. Mirrors Gateway.
+message PromptMessage {
+  // Chat role: typically "system", "user", "assistant", "tool".
+  string role = 1;
+
+  // Message content (string form; multimodal extensions deferred to v2).
+  string content = 2;
+}
+
+// GenerationRequest — caller-side shape for an end-to-end LLM call.
+message GenerationRequest {
+  // UUIDv7 idempotency key. Required.
+  string request_id = 1;
+
+  // Tenant scope. Required.
+  string tenant_id = 2;
+
+  // Calling agent identity (AGID). Required.
+  string agid = 3;
+
+  // Calling agent's role (e.g., "creation-validator"). Used by the Router
+  // to look up per-agent YAML config.
+  string agent_role = 4;
+
+  // Domain context. Required.
+  Domain domain = 5;
+
+  // Task kind. Required.
+  TaskKind task_kind = 6;
+
+  // Chat-format prompt messages. At least one required.
+  repeated PromptMessage prompt_messages = 7;
+
+  // Provider-neutral generation parameters (temperature, top_p, top_k,
+  // ...). Adapters parse + validate; values are strings to keep the
+  // contract provider-agnostic.
+  map<string, string> parameters = 8;
+
+  // Estimated prompt size in tokens (caller approximation). Used by the
+  // Router's cost gate.
+  int32 prompt_size_tokens = 9;
+
+  // Caller's latency budget in milliseconds. The Router rejects models
+  // whose expected p95 exceeds this budget.
+  int32 latency_budget_ms = 10;
+
+  // Caller's cost ceiling for this single invocation in USD micros (1e-6).
+  int64 cost_budget_micros = 11;
+
+  // Optional: per-tenant LoRA adapter URI. When set, the adapter is
+  // loaded for THIS request only. Cross-tenant adapter loading is rejected
+  // (Tier 5 D19).
+  optional string adapter_uri = 12;
+}
+
+// GenerationResponse — completed end-to-end generation result.
+message GenerationResponse {
+  // Echo of GenerationRequest.request_id.
+  string request_id = 1;
+
+  // Canonical model identifier the Router selected (e.g., "gemini-2.5-flash").
+  string chosen_model_id = 2;
+
+  // Coarse model class hint.
+  ModelKind model_kind = 3;
+
+  // Generated text (concatenation of streamed chunks for streaming variants).
+  string response_content = 4;
+
+  // Token accounting (provider-reported; Gateway-confirmed).
+  int32 tokens_in = 5;
+  int32 tokens_out = 6;
+
+  // Cost in USD micros (1e-6).
+  int64 cost_micros = 7;
+
+  // End-to-end latency observed by the broker.
+  int32 latency_ms = 8;
+
+  // Why the model stopped.
+  FinishReason finish_reason = 9;
+
+  // Provider-reported finish detail.
+  string finish_detail = 10;
+
+  // Set when finish_reason = GUARDRAIL_BLOCK — which guardrail tier blocked.
+  GuardrailTier blocking_tier = 11;
+
+  // Guardrail tiers that ran on this invocation (forwarded from Router).
+  repeated GuardrailTier guardrail_tier_list = 12;
+
+  // Human-readable explanation of how routing was decided
+  // (e.g., "rules: cost-optimisation chose gemini-flash").
+  string routing_reasoning = 13;
+
+  // Completion timestamp (broker clock).
+  google.protobuf.Timestamp completed_at = 14;
+}
+
+// ModelInfo — single catalog row (mirrors RoutableModel in REST schema).
+message ModelInfo {
+  // Catalog row UUIDv7.
+  string model_catalog_id = 1;
+
+  // Canonical model identifier (e.g., "gemini-2.5-flash",
+  // "gemma-4-9b-tenant-{tenant_id}").
+  string model_id = 2;
+
+  // Tenant scope (zero / empty for platform-shared catalog rows).
+  string tenant_id = 3;
+
+  // Model family ("gemini", "gemma", "embedding").
+  string family = 4;
+
+  // Coarse class.
+  ModelKind kind = 5;
+
+  // Capability score 0..100 (used by Router gates).
+  int32 capability_score = 6;
+
+  // Cost per 1k tokens in USD micros.
+  int64 cost_per_1k_tokens_micros = 7;
+
+  // p50 latency in milliseconds.
+  int32 latency_ms_p50 = 8;
+
+  // True if the model is platform-controlled (governance gate uses this
+  // to enforce Governance Gatekeeper override).
+  bool platform_controlled = 9;
+
+  // When the model was registered into the catalog.
+  google.protobuf.Timestamp created_at = 10;
+}
+
+// TokenUsage — single TokenUsageLedger record.
+message TokenUsage {
+  // UUIDv7 of the ledger row. Idempotency key.
+  string usage_id = 1;
+
+  // Tenant being charged.
+  string tenant_id = 2;
+
+  // Calling agent identity.
+  string agid = 3;
+
+  // Calling agent's role (denormalised for billing rollups).
+  string agent_role = 4;
+
+  // Model that was invoked (canonical ID).
+  string model_id = 5;
+
+  // Domain context.
+  Domain domain = 6;
+
+  // Tokens accounting.
+  int32 tokens_in = 7;
+  int32 tokens_out = 8;
+
+  // Cost in USD micros.
+  int64 cost_micros = 9;
+
+  // Originating request_id (matches GenerationRequest.request_id).
+  string request_id = 10;
+
+  // When the usage was recorded.
+  google.protobuf.Timestamp recorded_at = 11;
+}
+
+// -----------------------------------------------------------------------------
+// RouteRequest bidi streaming RPC
+// -----------------------------------------------------------------------------
+
+// RouteStreamRequest — caller-streamed request frame (initial + revisions).
+message RouteStreamRequest {
+  // UUIDv7 of the routing session. Same value across the stream's
+  // sequence of RouteStreamRequest frames. Required on the first frame.
+  string session_id = 1;
+
+  // Tenant scope. Required on the first frame.
+  string tenant_id = 2;
+
+  // Calling agent identity (AGID). Required on the first frame.
+  string agid = 3;
+
+  // Agent role.
+  string agent_role = 4;
+
+  // Domain context.
+  Domain domain = 5;
+
+  // Task kind.
+  TaskKind task_kind = 6;
+
+  // Estimated prompt size.
+  int32 prompt_size_tokens = 7;
+
+  // Latency budget in ms.
+  int32 latency_budget_ms = 8;
+
+  // Cost ceiling in USD micros. May increase across stream frames if a
+  // prior frame was BUDGET_REJECTED and the orchestrator is re-attempting.
+  int64 cost_budget_micros = 9;
+
+  // True on the final frame the caller will send. Server may close its
+  // half of the stream after emitting all queued events.
+  bool is_final_request = 10;
+}
+
+// RouteStreamResponse — server-streamed event frame.
+message RouteStreamResponse {
+  // Echo of RouteStreamRequest.session_id.
+  string session_id = 1;
+
+  // Kind of event in this frame.
+  RouteStreamEventKind event_kind = 2;
+
+  // Canonical model identifier when the event represents a decision (or
+  // an A/B variant selection); empty for non-decision events.
+  string chosen_model_id = 3;
+
+  // Coarse class hint when chosen_model_id is set.
+  ModelKind model_kind = 4;
+
+  // Guardrail tier list when the event represents a decision.
+  repeated GuardrailTier guardrail_tier_list = 5;
+
+  // Max output tokens when the event represents a decision.
+  int32 max_tokens = 6;
+
+  // Human-readable explanation of the event (e.g., "classifier-fuzzy:
+  // intent=creative-generation, model=gemini-pro" / "budget rejected:
+  // requested $0.10 vs ceiling $0.02").
+  string reasoning_summary = 7;
+
+  // Frame timestamp (server clock).
+  google.protobuf.Timestamp emitted_at = 8;
+
+  // True only on the FINAL frame from the server. Indicates the session
+  // is complete; orchestrator may close the stream.
+  bool is_final_response = 9;
+}
+
+// -----------------------------------------------------------------------------
+// Generate RPC
+// -----------------------------------------------------------------------------
+
+// (GenerationRequest / GenerationResponse defined above as common types.)
+
+// -----------------------------------------------------------------------------
+// RecordTokenUsage RPC
+// -----------------------------------------------------------------------------
+
+message RecordTokenUsageRequest {
+  // The TokenUsage row to record. usage_id MUST be UUIDv7 (idempotency).
+  TokenUsage usage = 1;
+}
+
+message RecordTokenUsageResponse {
+  // True if the row was inserted; false if the usage_id was already present
+  // in the ledger (idempotent re-call).
+  bool inserted = 1;
+
+  // Echo of the canonical row (post-insert / pre-existing).
+  TokenUsage usage = 2;
+}
+
+// -----------------------------------------------------------------------------
+// ListModels RPC
+// -----------------------------------------------------------------------------
+
+message ListModelsRequest {
+  // Tenant scope. Required.
+  string tenant_id = 1;
+
+  // Optional family filter (e.g., "gemini", "gemma", "embedding").
+  // Empty = all families.
+  string family_filter = 2;
+
+  // Optional kind filter. UNSPECIFIED = all kinds.
+  ModelKind kind_filter = 3;
+
+  // Pagination cursor (opaque). Empty for first page.
+  string cursor = 4;
+
+  // Page size (1..100, default 20).
+  int32 limit = 5;
+}
+
+message ListModelsResponse {
+  // Catalog rows in this page.
+  repeated ModelInfo models = 1;
+
+  // Cursor for the next page; empty when no more pages.
+  string next_cursor = 2;
+
+  // Total catalog size for the filtered query (NOT the page size).
+  int32 total = 3;
+}

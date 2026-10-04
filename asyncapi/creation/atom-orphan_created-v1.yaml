@@ -1,0 +1,80 @@
+asyncapi: "3.0.0"
+info:
+  title: "Chora Content Creation — atom.orphan_created.v1"
+  version: "1.0.0"
+  description: |
+    Published when chora-creation materialises the SINGLETON orphan edition
+    for a withdrawn-while-consumed atom (ADR-229 Amendment A1, CHO-2132).
+    The orphan is an immutable clone of the atom's last-published revision
+    carrying `orphaned_from`/`orphaned_at` provenance; it is never
+    discoverable, accepts no revisions, and survives the original's archive
+    and the author's account closure.
+
+    Consumers repoint their STRANDED references (grants, question-bank refs)
+    to `orphan_atom_id` via this event — never via cross-DB reads. Exactly
+    one orphan exists per (orphaned_from_atom_id, source_revision_id);
+    re-deliveries and repeat withdrawals at the same revision reuse it.
+
+    Owning team    : Team 1 (Content)
+    Owning domain  : Content Creation (chora_creation database)
+
+    Source-of-truth: docs/architecture/adrs/adr-229-atom-reuse-visibility-
+    consent-gate.md §Amendment A1 (singleton orphan edition)
+  contact:
+    name: "Chora Platform Team — Content Track"
+  license:
+    name: "Proprietary"
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  production:
+    host: "pubsub.googleapis.com"
+    protocol: googlepubsub
+    description: "Google Cloud Pub/Sub (production)"
+  emulator:
+    host: "localhost:8085"
+    protocol: googlepubsub
+    description: "Cloud Pub/Sub Emulator (local dev)"
+
+channels:
+  atomOrphanCreated:
+    address: "chora.creation.atom.orphan_created.v1"
+    description: |
+      Pub/Sub topic for AtomOrphanCreated events. Low-volume — fires only on
+      the FIRST stranding withdrawal per (atom, last-published-revision).
+    messages:
+      atomOrphanCreated:
+        $ref: "#/components/messages/AtomOrphanCreated"
+
+operations:
+  publishAtomOrphanCreated:
+    action: send
+    channel:
+      $ref: "#/channels/atomOrphanCreated"
+    summary: "Publish a singleton orphan-edition materialisation"
+    description: |
+      Producer: chora-creation service (orphan mint on
+      chora.sharing.atom_reuse.orphan_required.v1 or an in-domain
+      collection-stranding withdrawal), via the outbox.
+      Consumers:
+        - chora-sharing   -> repoint stranded AtomUsageGrants (append-only
+                             grant_events trail)
+        - chora-delivery  -> repoint AtomID-provenance question-bank refs
+        - audit log
+    messages:
+      - $ref: "#/channels/atomOrphanCreated/messages/atomOrphanCreated"
+
+components:
+  messages:
+    AtomOrphanCreated:
+      name: "AtomOrphanCreated"
+      title: "Atom Orphan Edition Created"
+      summary: "A singleton immutable orphan edition was materialised for a withdrawn-while-consumed atom"
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf;version=3
+      payload:
+        schemaFormat: "application/vnd.google.protobuf;version=3"
+        schema:
+          protoFile: "proto/events/creation/atom.proto"
+          messageName: "chora.creation.v1.AtomOrphanCreated"

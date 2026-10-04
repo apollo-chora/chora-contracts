@@ -1,0 +1,128 @@
+// =============================================================================
+// Chora Content Consumption — learner-owned Goal lifecycle events
+// =============================================================================
+//
+// The Goal aggregate (ADR-204 §2, amends ADR-203) is the LEARNER-owned
+// destination of the curious-first loop — it runs with ZERO Companions
+// (ADR-204 Constraint-1). A Goal scopes a `concept_set`; the learner's
+// verified progress is the share of that set they have MASTERED ("grown"
+// Growth Edges, derived intra-domain — never stored on the Goal, see
+// goal/progress.go). These two events make that progression OBSERVABLE +
+// rewardable instead of a silent status flip — the Goal-level analogue of
+// chora.consumption.weakness.grown.v1 (ADR-196), one tier up the aggregate
+// hierarchy (an edge grows → a Goal's progress moves → at 100% it graduates).
+//
+// EMITTER: chora-consumption (the goal-graduation subscriber consumes
+// weakness.grown.v1 and, per affected active Goal, recomputes the mastered
+// share — emitting progress_updated below 100 % and graduated at 100 %).
+//
+// Domain placement: per the topic-domain-follows-the-affected-aggregate-root
+// convention (see weakness.proto / creation/ai_assist.proto headers), BOTH
+// events live in the `consumption` domain because the affected aggregate is the
+// learner-owned Goal in chora_consumption.
+//
+// Aggregate root : goal (chora_consumption; learner-owned, ADR-204 §2)
+// Owning domain  : Content Consumption (chora_consumption)
+// Owning team    : Team 1 (Content)
+// Topic prefix   : chora.consumption.goal.*
+// Surface        : A+ (today-bar Goal %-ring + graduation celebration, CHO-1921)
+//
+// Subscribers (loosely-coupled, attach later):
+//   - chora-sharing       — award the Three-Currency Economy on graduation.
+//   - chora-consumption   — Companion reaction (the companion celebrates).
+//   - chora-observability — engagement / D1 evidence.
+// The A+ FE celebrates graduation by reading status='achieved' directly (it does
+// NOT subscribe); these events drive cross-domain reward + live progress.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.consumption.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/consumption/v1;consumptionv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// GoalGraduated — chora.consumption.goal.graduated.v1
+// -----------------------------------------------------------------------------
+//
+// Emitted by chora-consumption when a learner-owned Goal transitions
+// active→achieved — every concept in its `concept_set` is now mastered (a
+// verified-mastery graduation, ADR-204 §9, the active→achieved slice). Emitted
+// once per real transition (idempotent via the envelope idempotency_key =
+// goal_id:graduated_at); a re-graduation after a fresh weakness re-opened a
+// concept is a new event. Curiosity / empty-concept-set Goals never auto-graduate
+// (total_concepts == 0) so this never fires for them.
+//
+// Topic: chora.consumption.goal.graduated.v1
+// Consumers: chora-sharing (reward), chora-consumption (Companion reaction),
+//            chora-observability (engagement / D1 evidence).
+message GoalGraduated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // The Goal that reached achieved (goal aggregate id; UUIDv7).
+  string goal_id = 2;
+
+  // Tenant context (also envelope.tenant_id; duplicated for sharded filters).
+  string tenant_id = 3;
+
+  // The learner who owns the Goal (also envelope.gcid).
+  string learner_gcid = 4;
+
+  // Goal kind at graduation: "cert" | "course" | "path" | "theme_mastery" |
+  // "edge" | "curiosity" (ADR-204 §2). Carried so reward logic can weight
+  // credential graduations differently without a cross-DB read.
+  string kind = 5;
+
+  // The verifiable Chora object the Goal targets (cert/course/path/theme/edge
+  // ref). Empty for an open curiosity Goal.
+  string chora_target_ref = 6;
+
+  // How many concepts in the set were mastered at graduation (== total).
+  int32 mastered_concepts = 7;
+
+  // Size of the Goal's concept_set (> 0 — a zero-concept Goal cannot graduate).
+  int32 total_concepts = 8;
+
+  google.protobuf.Timestamp graduated_at = 9;
+}
+
+// -----------------------------------------------------------------------------
+// GoalProgressUpdated — chora.consumption.goal.progress_updated.v1
+// -----------------------------------------------------------------------------
+//
+// Emitted by chora-consumption when an active Goal's mastered-concept share
+// CHANGES but has NOT yet reached 100 % (the 100 % crossing emits GoalGraduated
+// instead). Drives the A+ today-bar %-ring's live movement + optional progress
+// notifications. Idempotent via the envelope idempotency_key (goal_id +
+// mastered_concepts + occurred_at) — a redelivered weakness.grown that re-derives
+// the same count does not re-fire.
+//
+// Topic: chora.consumption.goal.progress_updated.v1
+// Consumers: chora-consumption (Companion nudge), chora-observability (engagement).
+message GoalProgressUpdated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // The Goal whose progress moved (goal aggregate id; UUIDv7).
+  string goal_id = 2;
+
+  // Tenant context (also envelope.tenant_id; duplicated for sharded filters).
+  string tenant_id = 3;
+
+  // The learner who owns the Goal (also envelope.gcid).
+  string learner_gcid = 4;
+
+  // Mastered concepts after this update (0 < mastered < total).
+  int32 mastered_concepts = 5;
+
+  // Size of the Goal's concept_set (> 0).
+  int32 total_concepts = 6;
+
+  // round(100 * mastered / total), clamped to [0,100] — mirrors the pure
+  // goal.ProgressPercent so subscribers need not recompute (1..99 here).
+  int32 progress_percent = 7;
+
+  google.protobuf.Timestamp occurred_at = 8;
+}

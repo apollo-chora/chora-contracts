@@ -1,0 +1,594 @@
+openapi: "3.2.0"
+info:
+  title: "Chora Payments Admin API — H+ Transaction History"
+  version: "1.0.0"
+  description: |
+    Admin-only REST API for the H+ (Hub+) tenant-admin Transaction History
+    surface. Exposes a unified, cursor-paginated view across the 7 Purchase
+    aggregates owned by chora-payments (V1 scope renders the 5 canonical
+    aggregates: course_purchase, application_payment, companion_egg_purchase,
+    tenant_mana_topup, user_subscription; user_mana_topup + identity_kyc_fee
+    are silently included in the same envelope per ADR-164).
+
+    Phase-1 contract per AP-01 (API-First). Wave-1 wire is HTTP (FE consumed
+    via chora-gateway BFF); the matching gRPC parity lives in
+    proto/services/payments/v1/payments.proto (PaymentsAdminService) per
+    ADR-140 Wave-2.
+
+    V1 scope (locked):
+      a1) GET /api/v1/admin/payments/purchases — cursor-paginated list.
+      a2) POST /api/v1/admin/payments/{purchase_id}/refund — full refund only.
+      a3) GET /api/v1/admin/payments/export — CSV / JSON streaming export.
+      a4) GET /api/v1/admin/payments/stream — SSE feed of payment-state
+          changes across all 5 aggregates.
+
+    RETIRED at the edge (ADR-205 / CHO-1947): a1 list, a3 export and a4 stream
+    are no longer proxied by chora-gateway — the unified Contextual Transaction
+    History surface (openapi/transaction-history.yaml, /api/v1/admin/transactions
+    backed by the chora_tenancy projection) supersedes them. They are marked
+    `deprecated` below; chora-payments still implements them for internal /
+    migration use. Only a2 (refund) remains exposed at the edge (refund UX
+    re-introduction tracked as CHO-1951).
+
+    Cross-tenant operator view is gated by a new PLATFORM_OPERATOR role
+    recognised in the ChoraSession JWT roles claim. Tenant-scoped callers
+    (TENANT_ADMIN / OWNER / AUDITOR) see only their own tenant's rows;
+    tenant_id query param is ignored for them.
+
+    Three governance audit events are emitted for IMDA D1 accountability
+    (modelled in proto/events/governance/audit.proto):
+      - chora.governance.audit.tenant_admin_viewed_payments.v1
+      - chora.governance.audit.cross_tenant_payments_viewed.v1
+      - chora.governance.audit.refund_issued.v1
+
+    Owning domain : Payments (chora_payments database)
+    Owning team   : Team 3 (Platform)
+    Surface       : H+ (Hub+) tenant-admin + O+ PLATFORM_OPERATOR cross-tenant
+    Auditor role  : read-only on list / export / stream; cannot refund.
+  contact:
+    name: "Chora Platform Team (Team 3)"
+  license:
+    name: "Proprietary"
+
+servers:
+  - url: "https://api.chora.app"
+    description: "Production"
+  - url: "http://localhost:8080"
+    description: "Local development"
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Purchases
+    description: "Cross-aggregate purchase history (cursor-paginated)"
+  - name: Refunds
+    description: "Per-row refund actions (admin-initiated)"
+  - name: Export
+    description: "CSV / JSON streaming export"
+  - name: Stream
+    description: "Real-time SSE payment-state feed"
+  - name: Health
+    description: "Health check"
+
+paths:
+  /api/v1/admin/payments/purchases:
+    get:
+      operationId: listAdminPurchases
+      summary: "List purchase history (cursor-paginated, cross-aggregate)"
+      deprecated: true  # RETIRED at the edge (ADR-205/CHO-1947) → /api/v1/admin/transactions
+      description: |
+        Returns a unified, cursor-paginated view across the 5 Purchase
+        aggregates. State is the normalised 4-value FSM
+        (captured | refunded | failed | expired). The aggregate-type
+        filter is optional — omit to see all 5.
+
+        Cross-tenant rendering: when the caller has the PLATFORM_OPERATOR
+        role, the tenant_id query parameter narrows the scope to a single
+        tenant; omit it to see rows across every tenant. For non-operator
+        callers (TENANT_ADMIN / OWNER / AUDITOR), tenant_id is silently
+        ignored and the response is scoped to the caller's tenant.
+
+        Side-effect: emits one
+        `chora.governance.audit.tenant_admin_viewed_payments.v1` event per
+        successful call; when the caller is PLATFORM_OPERATOR a second
+        `chora.governance.audit.cross_tenant_payments_viewed.v1` event is
+        emitted carrying the deduped set of tenant_ids the response touched.
+      tags: [Purchases]
+      parameters:
+        - $ref: "#/components/parameters/PageTokenQuery"
+        - $ref: "#/components/parameters/PageSizeQuery"
+        - $ref: "#/components/parameters/AggregateTypeQuery"
+        - $ref: "#/components/parameters/StateQuery"
+        - $ref: "#/components/parameters/FromQuery"
+        - $ref: "#/components/parameters/ToQuery"
+        - $ref: "#/components/parameters/TenantIdQuery"
+      responses:
+        "200":
+          description: "Purchases listed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListPurchasesResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/admin/payments/{purchase_id}/refund:
+    parameters:
+      - $ref: "#/components/parameters/PurchaseIdPath"
+    post:
+      operationId: issueAdminRefund
+      summary: "Issue a full refund on a captured purchase"
+      description: |
+        Issues a full Stripe Refund for a single captured Purchase
+        (V1 scope — partial refunds are explicitly out-of-scope). The
+        aggregate_type body field is required so the chora-payments
+        gateway can route the request to the correct aggregate handler
+        without an extra lookup.
+
+        Idempotent on (purchase_id, aggregate_type). Repeats return 409 if
+        the Purchase is already in the refunded state.
+
+        Caller must hold TENANT_ADMIN, OWNER, or PLATFORM_OPERATOR.
+        AUDITOR is explicitly forbidden (403).
+
+        Side-effect: emits one
+        `chora.governance.audit.refund_issued.v1` event capturing
+        actor + amount + reason + Stripe refund id for IMDA D1.
+      tags: [Refunds]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IssueRefundRequest"
+      responses:
+        "200":
+          description: "Refund issued"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IssueRefundResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: "Already refunded"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/admin/payments/export:
+    get:
+      operationId: exportAdminPurchases
+      summary: "Stream a filtered export of purchase history (CSV or JSON)"
+      deprecated: true  # RETIRED at the edge (ADR-205/CHO-1947) → /api/v1/admin/transactions/export
+      description: |
+        Streams the same filtered result set as listAdminPurchases, but
+        without cursor pagination — the response body streams every row
+        matching the filter. format=csv produces an RFC-4180 CSV stream;
+        format=json produces a newline-delimited JSON (NDJSON) stream of
+        PurchaseHistoryItem objects.
+
+        Response content is delivered with `Content-Disposition: attachment`
+        so browsers prompt a download. Tenant-scoping rules mirror
+        listAdminPurchases (PLATFORM_OPERATOR may span tenants; others
+        are pinned to caller's tenant).
+      tags: [Export]
+      parameters:
+        - $ref: "#/components/parameters/ExportFormatQuery"
+        - $ref: "#/components/parameters/AggregateTypeQuery"
+        - $ref: "#/components/parameters/StateQuery"
+        - $ref: "#/components/parameters/FromQuery"
+        - $ref: "#/components/parameters/ToQuery"
+        - $ref: "#/components/parameters/TenantIdQuery"
+      responses:
+        "200":
+          description: "Streaming export"
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+              description: |
+                attachment; filename="payments-export-{YYYYMMDD-HHMMSS}.{ext}"
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+                description: "RFC-4180 CSV stream; header row matches PurchaseHistoryItem keys."
+            application/x-ndjson:
+              schema:
+                type: string
+                format: binary
+                description: "Newline-delimited JSON; one PurchaseHistoryItem per line."
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/admin/payments/stream:
+    get:
+      operationId: streamAdminPaymentEvents
+      summary: "Subscribe to a real-time SSE feed of payment-state changes"
+      deprecated: true  # RETIRED at the edge (ADR-205/CHO-1947) → /api/v1/admin/transactions/stream
+      description: |
+        Long-lived SSE connection. Each event is rendered as:
+
+        ```
+        event: payment_state_change
+        data: {"purchase_id":"…","aggregate_type":"course_purchase",
+               "state":"captured","occurred_at":"…","tenant_id":"…",
+               "learner_gcid":"…","amount_cents":4999,"currency":"sgd",
+               "stripe_session_id":"cs_…","metadata":{}}
+        \n\n
+        ```
+
+        Heartbeat comments (`:keepalive\n\n`) are emitted every 30s to
+        keep the connection alive through proxies.
+
+        Tenant-scoping rules mirror listAdminPurchases. AUDITOR may
+        subscribe (read-only).
+      tags: [Stream]
+      parameters:
+        - $ref: "#/components/parameters/AggregateTypeQuery"
+        - $ref: "#/components/parameters/TenantIdQuery"
+      responses:
+        "200":
+          description: "Open SSE connection"
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  SSE stream. See description for envelope shape; each
+                  `data:` line is a JSON-encoded PurchaseEventEnvelope.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /healthz:
+    get:
+      operationId: healthCheck
+      summary: "Health check"
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: "Healthy"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        ChoraSession JWT minted by chora-gateway. The roles claim MUST
+        contain at least one of: TENANT_ADMIN, OWNER, AUDITOR,
+        PLATFORM_OPERATOR. The new PLATFORM_OPERATOR role grants
+        cross-tenant scope to list / export / stream / refund operations.
+
+  parameters:
+    PurchaseIdPath:
+      name: purchase_id
+      in: path
+      required: true
+      description: "UUIDv7 of the Purchase aggregate."
+      schema:
+        type: string
+        format: uuid
+
+    PageTokenQuery:
+      name: page_token
+      in: query
+      required: false
+      description: |
+        Opaque cursor returned from a prior `next_page_token`. Omit on the
+        first call. Cursors are opaque — clients must not parse them.
+      schema:
+        type: string
+
+    PageSizeQuery:
+      name: page_size
+      in: query
+      required: false
+      description: "Page size. Allowed values: 10, 20, 50, 100. Default 20."
+      schema:
+        type: integer
+        enum: [10, 20, 50, 100]
+        default: 20
+
+    AggregateTypeQuery:
+      name: aggregate_type
+      in: query
+      required: false
+      description: |
+        Restrict to a single Purchase aggregate. Omit to span all 5.
+      schema:
+        $ref: "#/components/schemas/AggregateType"
+
+    StateQuery:
+      name: state
+      in: query
+      required: false
+      description: |
+        Restrict to a single normalised state. `all` (or omission) returns
+        every state.
+      schema:
+        type: string
+        enum: [captured, refunded, failed, expired, all]
+        default: all
+
+    FromQuery:
+      name: from
+      in: query
+      required: false
+      description: |
+        Inclusive RFC-3339 timestamp lower bound. Filters on `created_at`.
+      schema:
+        type: string
+        format: date-time
+
+    ToQuery:
+      name: to
+      in: query
+      required: false
+      description: |
+        Exclusive RFC-3339 timestamp upper bound. Filters on `created_at`.
+      schema:
+        type: string
+        format: date-time
+
+    TenantIdQuery:
+      name: tenant_id
+      in: query
+      required: false
+      description: |
+        PLATFORM_OPERATOR-only. Narrows a cross-tenant query to one tenant.
+        Silently ignored for tenant-scoped callers (TENANT_ADMIN / OWNER /
+        AUDITOR) — they always see only their own tenant.
+      schema:
+        type: string
+        format: uuid
+
+    ExportFormatQuery:
+      name: format
+      in: query
+      required: true
+      description: "Export format."
+      schema:
+        type: string
+        enum: [csv, json]
+
+  responses:
+    BadRequest:
+      description: "Bad request"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: "Missing or invalid bearer token"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: "Caller lacks the required role"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: "Resource not found"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  schemas:
+    AggregateType:
+      type: string
+      description: |
+        Which of the 5 V1 Purchase aggregates a row belongs to. Mirrors the
+        gRPC `chora.services.payments.v1.AggregateType` enum, with the 6th
+        + 7th (user_mana_topup, identity_kyc_fee) reserved for future
+        rendering — they may appear in responses but the FE filters them
+        out per V1 scope.
+      enum:
+        - course_purchase
+        - application_payment
+        - companion_egg_purchase
+        - tenant_mana_topup
+        - user_subscription
+        - user_mana_topup
+        - identity_kyc_fee
+
+    PurchaseState:
+      type: string
+      description: |
+        Normalised payment-phase state across all 7 aggregates. V1 collapses
+        the gRPC `PurchaseState` 5-value enum into 4 user-facing values
+        (CHECKOUT_STARTED is mapped server-side to `failed` if it ages
+        out, otherwise to `captured` once the webhook lands).
+      enum:
+        - captured
+        - refunded
+        - failed
+        - expired
+
+    PurchaseHistoryItem:
+      type: object
+      description: |
+        One row in the cross-aggregate purchase history table. All
+        rows carry `tenant_id` regardless of scope so the FE can
+        conditionally render the column in the PLATFORM_OPERATOR view.
+      required:
+        - purchase_id
+        - aggregate_type
+        - tenant_id
+        - learner_gcid
+        - amount_cents
+        - currency
+        - state
+        - stripe_session_id
+        - created_at
+      properties:
+        purchase_id:
+          type: string
+          format: uuid
+          description: "UUIDv7 of the Purchase aggregate."
+        aggregate_type:
+          $ref: "#/components/schemas/AggregateType"
+        tenant_id:
+          type: string
+          format: uuid
+          description: "Tenant scope. Always emitted."
+        learner_gcid:
+          type: string
+          format: uuid
+          description: |
+            GCID of the buyer. For tenant_mana_topup this is the admin
+            GCID that initiated the top-up (persisted as the buyer).
+        learner_email:
+          type: string
+          format: email
+          nullable: true
+          description: |
+            Buyer's email at time of purchase. Resolved from chora_identity
+            via the GCID; null when the GCID has been pseudonymised
+            (post-closure crypto-shred).
+        amount_cents:
+          type: integer
+          format: int64
+          description: "Charged amount in minor units."
+        currency:
+          type: string
+          description: "ISO-4217 3-letter currency code (lowercase)."
+        state:
+          $ref: "#/components/schemas/PurchaseState"
+        stripe_session_id:
+          type: string
+          description: "Stripe Checkout Session id."
+        paid_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: "Timestamp at which Stripe captured the payment."
+        refunded_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: "Timestamp at which the Stripe Refund was issued."
+        created_at:
+          type: string
+          format: date-time
+        metadata:
+          type: object
+          additionalProperties: true
+          description: |
+            Free-form aggregate-specific projection (e.g., course_id for
+            course_purchase; sku + mana_units for tenant_mana_topup;
+            plan_sku + billing_period for user_subscription). The FE
+            renders the relevant subset per aggregate_type.
+
+    ListPurchasesResponse:
+      type: object
+      required:
+        - items
+        - next_page_token
+        - has_more
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/PurchaseHistoryItem"
+        next_page_token:
+          type: string
+          nullable: true
+          description: |
+            Opaque cursor for the next page. `null` on the final page.
+        has_more:
+          type: boolean
+          description: |
+            True iff `next_page_token != null`. Provided as a convenience
+            so FE code paths don't have to null-check the cursor.
+
+    IssueRefundRequest:
+      type: object
+      required:
+        - aggregate_type
+      properties:
+        aggregate_type:
+          $ref: "#/components/schemas/AggregateType"
+        reason:
+          type: string
+          maxLength: 1000
+          description: |
+            Optional admin-supplied free-text justification. Persisted on
+            the refund row + included verbatim in the
+            `chora.governance.audit.refund_issued.v1` event.
+
+    IssueRefundResponse:
+      type: object
+      required:
+        - refund_id
+        - refunded_at
+        - amount_cents
+        - state
+      properties:
+        refund_id:
+          type: string
+          description: "Stripe Refund id (`re_…`)."
+        refunded_at:
+          type: string
+          format: date-time
+        amount_cents:
+          type: integer
+          format: int64
+          description: |
+            Refunded amount in minor units. V1 is full-refund only, so
+            this always equals the original `amount_cents_paid`.
+        state:
+          $ref: "#/components/schemas/PurchaseState"
+          description: "Always `refunded` on the happy path."
+
+    HealthResponse:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum: [ok]
+
+    Error:
+      type: object
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+          description: "Machine-readable error code (snake_case)."
+        message:
+          type: string
+          description: "Human-readable error message."
+        details:
+          type: object
+          additionalProperties: true
+          description: "Optional structured error context."

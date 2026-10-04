@@ -1,0 +1,115 @@
+// =============================================================================
+// chora.notifications.v1 — Email lifecycle events
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 1 D1
+//   (SendGrid via Twilio is the email provider)
+//
+// Owning domain : Notifications (chora_notifications database)
+// Owning team   : Team 3 (Platform)
+// Topic prefix  : chora.notifications.email.*
+//
+// Email lifecycle: Queued -> Sent -> Delivered (or Bounced).
+// SendGrid webhooks drive Sent / Delivered / Bounced events.
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.notifications.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/notifications/v1;notificationsv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// EmailQueued — chora.notifications.email.queued.v1
+// -----------------------------------------------------------------------------
+//
+// Published when an email is enqueued for SendGrid delivery (transactional
+// outbox pattern — written atomically with the originating domain event).
+message EmailQueued {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — Email aggregate root identifier.
+  string email_id = 2;
+
+  // Recipient GCID. Email address resolution happens at send-time via
+  // chora_identity lookup (so PII is not duplicated in this event).
+  string recipient_gcid = 3;
+
+  // UUIDv7 — references EmailTemplate in chora_notifications.
+  string template_id = 4;
+
+  // Locale tag for template rendering (BCP-47).
+  string locale = 5;
+
+  // Free-text subject line (max 256 chars). May be template-rendered.
+  string subject = 6;
+
+  google.protobuf.Timestamp queued_at = 7;
+}
+
+// -----------------------------------------------------------------------------
+// EmailSent — chora.notifications.email.sent.v1
+// -----------------------------------------------------------------------------
+//
+// Published when SendGrid accepts the email for delivery (HTTP 202 from the
+// SendGrid v3 API). Carries the SendGrid message_id for downstream
+// correlation with delivered / bounced events.
+message EmailSent {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string email_id = 2;
+  string recipient_gcid = 3;
+  string template_id = 4;
+
+  // SendGrid message ID for webhook correlation.
+  string sendgrid_message_id = 5;
+
+  google.protobuf.Timestamp sent_at = 6;
+}
+
+// -----------------------------------------------------------------------------
+// EmailDelivered — chora.notifications.email.delivered.v1
+// -----------------------------------------------------------------------------
+//
+// Published from SendGrid webhook "delivered" event — final positive
+// outcome.
+message EmailDelivered {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string email_id = 2;
+  string recipient_gcid = 3;
+  string template_id = 4;
+  string sendgrid_message_id = 5;
+
+  google.protobuf.Timestamp delivered_at = 6;
+}
+
+// -----------------------------------------------------------------------------
+// EmailBounced — chora.notifications.email.bounced.v1
+// -----------------------------------------------------------------------------
+//
+// Published from SendGrid webhook "bounce" / "blocked" / "dropped" events.
+// Persistent hard bounces should trigger Account / Notification preference
+// updates (mark email as undeliverable in chora_identity).
+message EmailBounced {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string email_id = 2;
+  string recipient_gcid = 3;
+  string template_id = 4;
+  string sendgrid_message_id = 5;
+
+  // Free-text bounce reason from SendGrid (e.g., "mailbox not found",
+  // "blocked by recipient policy"). Max 512 chars.
+  string bounce_reason = 6;
+
+  // Bounce classification — "HARD" (permanent failure) or "SOFT" (transient).
+  string bounce_classification = 7;
+
+  google.protobuf.Timestamp bounced_at = 8;
+}

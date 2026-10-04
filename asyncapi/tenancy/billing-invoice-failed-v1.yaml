@@ -1,0 +1,62 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Tenancy — InvoiceFailed
+  version: 1.0.0
+  description: |
+    Published when an invoice payment attempt fails. Triggers dunning flow
+    (Notifications retry email). May lead to TenantSuspended after dunning
+    exhaustion.
+
+    - Domain: Tenancy + Billing (`chora_tenancy` DB)
+    - Topic: `chora.tenancy.billing.invoice_failed.v1`
+    - Source proto: `proto/events/tenancy/billing.proto`
+       message `chora.tenancy.v1.InvoiceFailed`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  invoiceFailed:
+    address: chora.tenancy.billing.invoice_failed.v1
+    messages:
+      invoiceFailed:
+        $ref: '#/components/messages/InvoiceFailed'
+
+operations:
+  publishInvoiceFailed:
+    action: send
+    channel:
+      $ref: '#/channels/invoiceFailed'
+    messages:
+      - $ref: '#/channels/invoiceFailed/messages/invoiceFailed'
+
+  consumeInvoiceFailed:
+    action: receive
+    channel:
+      $ref: '#/channels/invoiceFailed'
+    description: |
+      Consumers: Notifications (dunning email), Tenancy
+      (post-exhaustion TenantSuspended trigger), Observability.
+    messages:
+      - $ref: '#/channels/invoiceFailed/messages/invoiceFailed'
+
+components:
+  messages:
+    InvoiceFailed:
+      name: InvoiceFailed
+      title: Invoice Failed
+      summary: A tenant invoice payment attempt failed
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/tenancy/billing.proto#/chora.tenancy.v1.InvoiceFailed'

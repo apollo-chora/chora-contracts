@@ -1,0 +1,65 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Tenancy — AddonUpgraded
+  version: 1.0.0
+  description: |
+    Published when a tenant upgrades an add-on tier in place.
+    Carries the billing delta and (when scheduled) a Stripe
+    subscription_schedule ID. Powers downstream entitlement
+    refresh and STITCH-H-ADD-4 confirmation telemetry.
+
+    - Domain: Tenancy + Billing (`chora_tenancy` DB)
+    - Topic: `chora.tenancy.addon.upgraded.v1`
+    - Source proto: `proto/events/tenancy/addon.proto`
+       message `chora.tenancy.v1.AddonUpgraded`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  addonUpgraded:
+    address: chora.tenancy.addon.upgraded.v1
+    messages:
+      addonUpgraded:
+        $ref: '#/components/messages/AddonUpgraded'
+
+operations:
+  publishAddonUpgraded:
+    action: send
+    channel:
+      $ref: '#/channels/addonUpgraded'
+    messages:
+      - $ref: '#/channels/addonUpgraded/messages/addonUpgraded'
+
+  consumeAddonUpgraded:
+    action: receive
+    channel:
+      $ref: '#/channels/addonUpgraded'
+    description: |
+      Consumers: ALL surfaces (refresh entitlement / feature flag),
+      AI Kernel (LoRA quota refresh on tier change), Notifications
+      (admin email + in-app), Billing (BigQuery streaming for tier
+      migration funnel).
+    messages:
+      - $ref: '#/channels/addonUpgraded/messages/addonUpgraded'
+
+components:
+  messages:
+    AddonUpgraded:
+      name: AddonUpgraded
+      title: Add-On Upgraded
+      summary: A tenant has upgraded an add-on tier in place
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/tenancy/addon.proto#/chora.tenancy.v1.AddonUpgraded'

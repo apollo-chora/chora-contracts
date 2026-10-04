@@ -1,0 +1,317 @@
+# =============================================================================
+# Chora Content Sharing — GraphQL SDL
+# =============================================================================
+#
+# Learner-facing read schema for the C+ Connect+ surface (Surface-3,
+# "curiosity meets connection"). Per protocol strategy:
+#   - Learner reads = GraphQL (this file)
+#   - Admin CRUD    = REST (openapi/sharing-admin.yaml)
+#   - Inter-service async = Pub/Sub (proto/events/sharing/*.proto)
+#
+# Owning team   : Team 1 (Content)
+# Owning domain : Content Sharing (chora_sharing database)
+# Topic prefix  : chora.sharing.*
+#
+# Notes:
+#   - Reactions are positive-only (LIKE, INSIGHTFUL, CURIOUS, CHEER,
+#     CELEBRATE) — negative feedback flows through the moderation queue
+#     (see openapi/sharing-admin.yaml).
+#   - DigitalSkin appears here ONLY as a non-purchasable wager artifact on
+#     a Duel. Skins are EARNED, never purchasable. There is no Mutation to
+#     buy a skin and no `price` field on DigitalSkin.
+#   - Cross-domain references (Atom, MediaAsset) carry UUIDs only — no FK,
+#     no embedded entities. Use the appropriate domain GraphQL gateway
+#     to fetch atom / media details.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Scalar Types
+# -----------------------------------------------------------------------------
+
+scalar UUID
+scalar DateTime
+
+# -----------------------------------------------------------------------------
+# Enums
+# -----------------------------------------------------------------------------
+
+"""Audience scope for a Post — drives feed-fan-out + moderation policy."""
+enum PostVisibility {
+  PUBLIC
+  FOLLOWERS_ONLY
+  TENANT_ONLY
+  GROUP_ONLY
+}
+
+"""Five positive-feedback emoji slots. No "dislike" by design."""
+enum ReactionType {
+  LIKE
+  INSIGHTFUL
+  CURIOUS
+  CHEER
+  CELEBRATE
+}
+
+"""Lifecycle of a PvP Duel."""
+enum DuelStatus {
+  INITIATED
+  ACCEPTED
+  DECLINED
+  COMPLETED
+  EXPIRED
+}
+
+"""Competitive cohort scope for a Leaderboard."""
+enum LeaderboardScope {
+  TENANT
+  COURSE
+  COHORT
+  GLOBAL
+}
+
+"""Feed scope filter for `feed(scope: ...)`."""
+enum FeedScope {
+  HOME
+  FOLLOWING
+  TENANT
+  GROUP
+}
+
+# -----------------------------------------------------------------------------
+# Query Root
+# -----------------------------------------------------------------------------
+
+type Query {
+  """
+  Personalised social feed. HOME merges followed authors + subscribed
+  groups; FOLLOWING is strict follow-graph fan-in; TENANT shows
+  tenant-only posts; GROUP requires `groupId` argument.
+  """
+  feed(
+    scope: FeedScope = HOME
+    groupId: ID
+    first: Int = 20
+    after: String
+  ): PostConnection!
+
+  """Fetch a single Post by ID (must be visible to the viewer)."""
+  post(id: ID!): Post
+
+  """The current learner's reactions across all Posts."""
+  myReactions: [Reaction!]!
+
+  """The current learner's open + recent Duels (INITIATED / ACCEPTED)."""
+  activeDuels: [Duel!]!
+
+  """Resolve a Leaderboard — current season unless seasonId is pinned."""
+  leaderboard(scope: LeaderboardScope!, scopeId: ID, seasonId: ID): Leaderboard!
+
+  """GCID profiles the viewer is following."""
+  following: [GCIDProfile!]!
+
+  """GCID profiles following the viewer."""
+  followers: [GCIDProfile!]!
+}
+
+# -----------------------------------------------------------------------------
+# Mutations (learner-facing social interactions)
+# -----------------------------------------------------------------------------
+
+type Mutation {
+  """Create a new Post."""
+  createPost(input: CreatePostInput!): Post!
+
+  """Edit an existing Post (author only)."""
+  updatePost(id: ID!, input: UpdatePostInput!): Post!
+
+  """Soft-delete a Post (author or moderator)."""
+  deletePost(id: ID!): Boolean!
+
+  """Add a Reaction to a Post (idempotent on type)."""
+  addReaction(postId: ID!, type: ReactionType!): Reaction!
+
+  """Remove a previously added Reaction."""
+  removeReaction(reactionId: ID!): Boolean!
+
+  """Initiate a PvP Duel against another learner."""
+  initiateDuel(input: InitiateDuelInput!): Duel!
+
+  """Respond to a Duel invite — accept or decline."""
+  respondToDuel(duelId: ID!, accept: Boolean!): Duel!
+
+  """Follow another learner."""
+  followLearner(targetGCID: ID!): GCIDProfile!
+
+  """Unfollow."""
+  unfollowLearner(targetGCID: ID!): Boolean!
+
+  """Block another learner (tombstones edges in both directions)."""
+  blockLearner(targetGCID: ID!, reason: String): Boolean!
+}
+
+# -----------------------------------------------------------------------------
+# Inputs
+# -----------------------------------------------------------------------------
+
+"""Input for creating a Post."""
+input CreatePostInput {
+  body: String!
+  mediaIds: [ID!]
+  visibility: PostVisibility = TENANT_ONLY
+  parentPostId: ID
+  groupId: ID
+}
+
+"""Input for editing a Post."""
+input UpdatePostInput {
+  body: String
+  mediaIds: [ID!]
+  visibility: PostVisibility
+}
+
+"""
+Input for initiating a Duel.
+
+`wagerSkinId` is OPTIONAL and references a DigitalSkin already owned by
+the challenger. Skins are EARNED-only — never purchasable. Empty / null
+means a no-stake friendly duel.
+"""
+input InitiateDuelInput {
+  opponentGCID: ID!
+  atomIds: [ID!]!
+  wagerSkinId: ID
+  inviteTtlSeconds: Int = 86400
+}
+
+# -----------------------------------------------------------------------------
+# Domain Types
+# -----------------------------------------------------------------------------
+
+"""A social Post authored by a learner."""
+type Post {
+  id: ID!
+  authorGCID: UUID!
+  body: String!
+  mediaIds: [UUID!]!
+  visibility: PostVisibility!
+  parentPostId: UUID
+  groupId: UUID
+  reactionSummary: ReactionSummary!
+  replyCount: Int!
+  createdAt: DateTime!
+  updatedAt: DateTime
+  deletedAt: DateTime
+}
+
+"""Aggregated reaction counts on a Post — one bucket per ReactionType."""
+type ReactionSummary {
+  like: Int!
+  insightful: Int!
+  curious: Int!
+  cheer: Int!
+  celebrate: Int!
+  total: Int!
+  myReaction: ReactionType
+}
+
+"""A single Reaction record."""
+type Reaction {
+  id: ID!
+  targetPostId: UUID!
+  actorGCID: UUID!
+  type: ReactionType!
+  createdAt: DateTime!
+}
+
+"""
+A PvP Duel — two GCIDs compete on a fixed atom set. Wager (if any) is a
+DigitalSkin that the winner inherits. DigitalSkins are EARNED-only.
+"""
+type Duel {
+  id: ID!
+  challengerGCID: UUID!
+  opponentGCID: UUID!
+  atomIds: [UUID!]!
+  status: DuelStatus!
+  winnerGCID: UUID
+  scoreChallenger: Float
+  scoreOpponent: Float
+
+  """Optional non-purchasable DigitalSkin staked on the duel."""
+  wagerSkin: DigitalSkin
+
+  initiatedAt: DateTime!
+  acceptedAt: DateTime
+  completedAt: DateTime
+  expiresAt: DateTime
+}
+
+"""
+A DigitalSkin — an EARNED visual reward. Not a tradable currency, not a
+purchasable item. Surfaces here only as the optional `wagerSkin` on a
+Duel; full skin inventory lives in the Tenancy / Hub+ surface.
+"""
+type DigitalSkin {
+  id: ID!
+  name: String!
+  rarity: String!
+  iconUri: String!
+}
+
+"""A Leaderboard — ranked roster of GCIDs by an XP / score axis."""
+type Leaderboard {
+  id: ID!
+  scope: LeaderboardScope!
+  scopeId: UUID
+  seasonId: UUID!
+  topEntries: [LeaderboardEntry!]!
+  myEntry: LeaderboardEntry
+  updatedAt: DateTime!
+}
+
+"""A single ranked slot in a Leaderboard top-N snapshot."""
+type LeaderboardEntry {
+  gcid: UUID!
+  score: Int!
+  rank: Int!
+  profile: GCIDProfile
+}
+
+"""
+Public-facing GCID profile carried in social-graph queries. Only fields
+that are safe to expose without consent are included; richer persona
+data lives behind CompanionExposureGrant in chora_consumption.
+"""
+type GCIDProfile {
+  gcid: UUID!
+  displayName: String!
+  avatarUri: String
+  bio: String
+  followerCount: Int!
+  followingCount: Int!
+  isFollowedByViewer: Boolean!
+  isFollowingViewer: Boolean!
+  blockedByViewer: Boolean!
+}
+
+# -----------------------------------------------------------------------------
+# Relay-Style Cursor Pagination
+# -----------------------------------------------------------------------------
+
+type PageInfo {
+  hasNextPage: Boolean!
+  hasPreviousPage: Boolean!
+  startCursor: String
+  endCursor: String
+}
+
+type PostConnection {
+  edges: [PostEdge!]!
+  pageInfo: PageInfo!
+  totalCount: Int
+}
+
+type PostEdge {
+  node: Post!
+  cursor: String!
+}

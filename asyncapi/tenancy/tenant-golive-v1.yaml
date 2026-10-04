@@ -1,0 +1,67 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Tenancy — TenantGoLive
+  version: 1.0.0
+  description: |
+    Tenant transitions PROVISIONING -> ACTIVE. Triggers Stripe Customer
+    creation, default add-on provisioning, and "workspace ready" email.
+
+    Phyllis MVP §5.2 endpoint:
+      POST /v1/tenants/{tenant_id}/golive
+
+    - Domain: Tenancy + Billing (`chora_tenancy` DB)
+    - Topic: `chora.tenancy.tenant.golive.v1`
+    - Source proto: `proto/events/tenancy/tenant.proto`
+       message `chora.tenancy.v1.TenantGoLive`
+    - IMDA: tag envelope.chora_imda_dimension = "accountability" (D1)
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  tenantGoLive:
+    address: chora.tenancy.tenant.golive.v1
+    messages:
+      tenantGoLive:
+        $ref: '#/components/messages/TenantGoLive'
+
+operations:
+  publishTenantGoLive:
+    action: send
+    channel:
+      $ref: '#/channels/tenantGoLive'
+    messages:
+      - $ref: '#/channels/tenantGoLive/messages/tenantGoLive'
+
+  consumeTenantGoLive:
+    action: receive
+    channel:
+      $ref: '#/channels/tenantGoLive'
+    description: |
+      Consumers:
+        - chora-notifications (workspace-ready email to owner)
+        - chora-creation (default catalogue scaffolding)
+        - chora-observability (tenant-go-live KPI funnel)
+        - chora-bff-gateway (cache invalidation for /me/tenants)
+    messages:
+      - $ref: '#/channels/tenantGoLive/messages/tenantGoLive'
+
+components:
+  messages:
+    TenantGoLive:
+      name: TenantGoLive
+      title: Tenant transitioned PROVISIONING -> ACTIVE
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/tenancy/tenant.proto#/chora.tenancy.v1.TenantGoLive'

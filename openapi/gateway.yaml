@@ -1,0 +1,1863 @@
+openapi: "3.2.0"
+info:
+  title: Chora Gateway API
+  version: "1.1.0"
+  description: |
+    **BFF (Backend-For-Frontend) API Gateway** for the Chora platform.
+
+    The gateway is the single entry point for all client requests. It performs
+    request routing, JWT validation, tenant context resolution, correlation ID
+    injection, rate limiting, CORS enforcement, and health aggregation. It has
+    minimal domain logic — its primary role is middleware orchestration and
+    reverse-proxying to backend services.
+
+    ## Middleware Chain
+
+    Every request passes through the following middleware in order:
+
+    ```
+    CorrelationID → RequestID → RealIP → RequestLogger → Recoverer → CORS → RateLimit → [Auth → TenantContext] → Proxy
+    ```
+
+    - **CorrelationID**: Injects `X-Correlation-ID` (UUIDv7) if not present in the request.
+    - **RequestID**: Chi built-in request ID for internal tracing.
+    - **RealIP**: Resolves client IP from proxy headers.
+    - **RequestLogger**: Structured slog logging (correlation_id, tenant_id, gcid UUID, method, path, status, latency_ms). Never logs PII.
+    - **Recoverer**: Panic recovery to prevent process crashes.
+    - **CORS**: Configured origin allowlist (never wildcard in production).
+    - **RateLimit**: Per-tenant per-endpoint rate limiting backed by Valkey.
+    - **Auth (JWTAuth)**: Validates Bearer JWT, extracts GCID and tenant claims. Applied only to routes with `RequiresAuth: true`.
+    - **TenantContext**: Validates tenant ID from JWT claims and ensures active TenantMembership. Runs after JWTAuth.
+    - **Proxy**: Reverse-proxies to the appropriate backend service.
+
+    ## BFF Proxy Routing Table
+
+    All `/api/v1/**` requests are reverse-proxied to backend services. The
+    gateway does NOT re-define these endpoints — it passes requests through
+    transparently after middleware processing. Refer to the backend service
+    specs for endpoint details.
+
+    | Path Prefix         | Backend Service   | Auth Required | Spec Reference |
+    |---------------------|-------------------|---------------|----------------|
+    | `/api/v1/gcid/**`   | chora-iam (:8080) | Yes           | `iam.yaml`     |
+    | `/api/v1/auth/**`   | chora-iam (:8080) | No            | `iam.yaml`     |
+    | `/api/v1/tenants/**`| chora-iam (:8080) | Yes           | `iam.yaml`     |
+    | `/api/v1/atoms/**`  | chora-atomic (:8081) | Yes        | `atomic.yaml`  |
+    | `/api/v1/topics/**` | chora-atomic (:8081) | Yes        | `atomic.yaml`  |
+    | `/api/v1/graphql`   | chora-atomic (:8081) | Yes        | `atomic.graphql` |
+    | `/api/v1/engagement/**` | chora-engagement (:8082) | Yes  | `engagement.yaml` |
+
+    **BFF-aggregated atom playback (WS-0b A16)**: `GET /api/atoms/{atomId}`
+    is fan-out aggregated by the gateway: chora-creation (atom + Question
+    learner-safe projection) + chora-consumption (session metadata). The
+    aggregated envelope surfaces a unified `question_payload` (discriminated
+    `type: 'mcq' | 'oe'`) alongside the legacy `mcq_payload` / `essay_payload`
+    field shims. `correct_option_id` is omitted in learner mode and only
+    included when `?mode=author` is present AND the caller's resolved role on
+    the tenant is `author` or `instructor` (BFF role gate; chora-creation does
+    NOT enforce this — defense-in-depth lives at the BFF).
+
+    **Protocol note (ADR-025)**: Learner-facing reads use GraphQL via
+    `/api/v1/graphql`. Admin CRUD uses REST via `/api/v1/atoms/**` and
+    `/api/v1/topics/**`. The gateway proxies both transparently.
+
+    The gateway strips no prefixes — backend services receive the full
+    original path. Additional backend routes will be added as services are
+    deployed (e.g., chora-choraverse, chora-companion).
+
+    **Gateway-owned endpoints** (not proxied):
+
+    | Path Prefix              | Handler      | Auth Required | Description              |
+    |--------------------------|--------------|---------------|--------------------------|
+    | `/api/v1/search/atoms`   | SearchHandler| Yes           | Full-text atom search     |
+    | `/api/v1/search/topics`  | SearchHandler| Yes           | Topic search              |
+    | `/api/v1/search/paths`   | SearchHandler| Yes           | Locked path search        |
+
+    ## Authentication Flow
+
+    1. Client sends `Authorization: Bearer {jwt}` header.
+    2. Gateway validates JWT signature, expiry, and claims.
+    3. Gateway extracts `gcid` (GCID UUID) and `tenant_id` from claims.
+    4. Gateway injects `X-GCID` and `X-Tenant-ID` headers for backend services.
+    5. Gateway proxies the request to the appropriate backend.
+
+    Routes under `/api/v1/auth/**` (login, register, token refresh) are
+    exempt from JWT validation.
+
+    ## Error Handling
+
+    All gateway errors use the standard Chora error envelope with `GATEWAY_`
+    prefixed error codes in `UPPER_SNAKE_CASE`. The `correlation_id` in every
+    error response matches the `X-Correlation-ID` response header.
+  contact:
+    name: Chora Platform Team
+  license:
+    name: MIT
+
+servers:
+  - url: http://localhost:8000
+    description: Local development (Docker Compose)
+  - url: https://api.chora.dev
+    description: Development environment
+  - url: https://api.chora.io
+    description: Production environment
+
+tags:
+  - name: Gateway Management
+    description: |
+      Gateway-owned endpoints for health aggregation and version information.
+      These are the only endpoints the gateway serves directly — all other
+      traffic is proxied to backend services.
+  - name: Search
+    description: |
+      Gateway-owned full-text search endpoints powered by Meilisearch.
+      These are BFF aggregation endpoints — the gateway queries Meilisearch
+      directly rather than proxying to a backend service.
+
+      Supports keyword search, faceted filtering, and pagination across
+      atoms, topics, and locked paths. Index updates are event-driven
+      via Pub/Sub subscriptions to `chora.creation.atom.events.v1`.
+  - name: BFF Proxy
+    description: |
+      Documentation of the reverse-proxy routing table. The gateway does not
+      define these endpoints — it transparently proxies requests to the
+      appropriate backend service after applying the middleware chain.
+
+paths:
+  /health:
+    get:
+      operationId: getGatewayHealth
+      summary: Aggregated gateway and backend service health
+      description: |
+        Returns the overall gateway health status along with the health of
+        each registered backend service. The gateway periodically checks
+        backend health and caches results.
+
+        - `healthy`: All backend services responding within SLA.
+        - `degraded`: One or more backends slow or intermittently failing.
+        - `unhealthy`: One or more backends unreachable.
+
+        This endpoint does not require authentication and is intended for
+        load balancer health checks and monitoring systems.
+      tags:
+        - Gateway Management
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIDHeader"
+      responses:
+        "200":
+          description: Gateway health status with per-service breakdown.
+          headers:
+            X-Correlation-ID:
+              $ref: "#/components/headers/X-Correlation-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GatewayHealth"
+              examples:
+                healthy:
+                  summary: All services healthy
+                  value:
+                    status: healthy
+                    services:
+                      - service_name: chora-iam
+                        status: healthy
+                        last_checked: "2026-03-12T10:30:00Z"
+                        response_time_ms: 12
+                      - service_name: chora-atomic
+                        status: healthy
+                        last_checked: "2026-03-12T10:30:00Z"
+                        response_time_ms: 8
+                degraded:
+                  summary: One service degraded
+                  value:
+                    status: degraded
+                    services:
+                      - service_name: chora-iam
+                        status: healthy
+                        last_checked: "2026-03-12T10:30:00Z"
+                        response_time_ms: 15
+                      - service_name: chora-atomic
+                        status: degraded
+                        last_checked: "2026-03-12T10:30:00Z"
+                        response_time_ms: 4500
+        "503":
+          description: Gateway itself is unhealthy (e.g., cannot reach Valkey).
+          headers:
+            X-Correlation-ID:
+              $ref: "#/components/headers/X-Correlation-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                service_unavailable:
+                  summary: Gateway infrastructure failure
+                  value:
+                    error:
+                      code: GATEWAY_SERVICE_UNAVAILABLE
+                      message: Gateway infrastructure dependency unavailable
+                      correlation_id: 019502a0-1234-7def-8abc-def012345678
+                      details: {}
+
+  /version:
+    get:
+      operationId: getGatewayVersion
+      summary: Gateway build and version information
+      description: |
+        Returns the gateway's semantic version, build date, and Go runtime
+        version. Useful for deployment verification and debugging.
+
+        This endpoint does not require authentication.
+      tags:
+        - Gateway Management
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIDHeader"
+      responses:
+        "200":
+          description: Gateway version information.
+          headers:
+            X-Correlation-ID:
+              $ref: "#/components/headers/X-Correlation-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GatewayVersion"
+              examples:
+                version:
+                  summary: Version response
+                  value:
+                    version: "1.0.0"
+                    build_date: "2026-03-12T08:00:00Z"
+                    go_version: "go1.26.1"
+
+  /api/v1/search/atoms:
+    get:
+      operationId: searchAtoms
+      summary: Full-text search across learning atoms
+      description: |
+        Searches the Meilisearch atom index with keyword matching, faceted
+        filtering, and pagination. Results are tenant-scoped — only atoms
+        belonging to the authenticated tenant are returned.
+
+        Supports filtering by atom type, difficulty level, and topic.
+        Returns faceted counts for type and difficulty to power filter UIs.
+      tags:
+        - Search
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIDHeader"
+        - $ref: "#/components/parameters/SearchQuery"
+        - name: type
+          in: query
+          required: false
+          description: |
+            Filter by atom type. Multiple values comma-separated.
+          schema:
+            type: string
+            example: multiple_choice,fill_blank
+        - name: difficulty
+          in: query
+          required: false
+          description: |
+            Filter by difficulty level (1-5). Multiple values comma-separated.
+          schema:
+            type: string
+            example: "3,4"
+        - name: topic
+          in: query
+          required: false
+          description: |
+            Filter by topic name. Exact match on the topic_names array.
+          schema:
+            type: string
+            example: "Calculus"
+        - $ref: "#/components/parameters/SearchSort"
+        - $ref: "#/components/parameters/SearchLimit"
+        - $ref: "#/components/parameters/SearchOffset"
+      responses:
+        "200":
+          description: Search results with faceted counts.
+          headers:
+            X-Correlation-ID:
+              $ref: "#/components/headers/X-Correlation-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AtomSearchResponse"
+              examples:
+                results:
+                  summary: Atoms matching "photosynthesis"
+                  value:
+                    hits:
+                      - id: "019502a0-1234-7def-8abc-000000000001"
+                        title: "Photosynthesis Light Reactions"
+                        content_excerpt: "In the light reactions of photosynthesis..."
+                        atom_type: "multiple_choice"
+                        difficulty: 3
+                        labels: ["biology", "plants"]
+                        topic_names: ["Biology", "Botany"]
+                    facets:
+                      atom_type:
+                        multiple_choice: 12
+                        fill_blank: 5
+                        true_false: 3
+                      difficulty:
+                        "3": 8
+                        "4": 7
+                        "5": 5
+                    pagination:
+                      total_hits: 20
+                      limit: 20
+                      offset: 0
+                      estimated_total: 20
+                    processing_time_ms: 4
+                    query: "photosynthesis"
+        "400":
+          description: Invalid search parameters.
+          headers:
+            X-Correlation-ID:
+              $ref: "#/components/headers/X-Correlation-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
+
+  /api/v1/search/topics:
+    get:
+      operationId: searchTopics
+      summary: Full-text search across topic nodes
+      description: |
+        Searches the Meilisearch topic index for topic nodes matching the
+        query. Returns topic name, description, and materialized path in
+        the knowledge graph. Tenant-scoped.
+      tags:
+        - Search
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIDHeader"
+        - $ref: "#/components/parameters/SearchQuery"
+        - $ref: "#/components/parameters/SearchLimit"
+        - $ref: "#/components/parameters/SearchOffset"
+      responses:
+        "200":
+          description: Topic search results.
+          headers:
+            X-Correlation-ID:
+              $ref: "#/components/headers/X-Correlation-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TopicSearchResponse"
+              examples:
+                results:
+                  summary: Topics matching "calculus"
+                  value:
+                    hits:
+                      - id: "019502a0-1234-7def-8abc-000000000010"
+                        name: "Differential Calculus"
+                        description: "Study of rates of change and slopes of curves"
+                        path: "Mathematics > Calculus > Differential Calculus"
+                        atom_count: 42
+                    pagination:
+                      total_hits: 3
+                      limit: 20
+                      offset: 0
+                      estimated_total: 3
+                    processing_time_ms: 2
+                    query: "calculus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
+
+  /api/v1/search/paths:
+    get:
+      operationId: searchPaths
+      summary: Full-text search across locked paths
+      description: |
+        Searches the Meilisearch path index for locked paths (certification
+        tracks) matching the query. Returns path title, description, and
+        associated topic names. Tenant-scoped.
+      tags:
+        - Search
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIDHeader"
+        - $ref: "#/components/parameters/SearchQuery"
+        - name: topic
+          in: query
+          required: false
+          description: |
+            Filter by associated topic name. Exact match.
+          schema:
+            type: string
+            example: "Biology"
+        - $ref: "#/components/parameters/SearchLimit"
+        - $ref: "#/components/parameters/SearchOffset"
+      responses:
+        "200":
+          description: Path search results.
+          headers:
+            X-Correlation-ID:
+              $ref: "#/components/headers/X-Correlation-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PathSearchResponse"
+              examples:
+                results:
+                  summary: Paths matching "biology"
+                  value:
+                    hits:
+                      - id: "019502a0-1234-7def-8abc-000000000020"
+                        title: "Biology Fundamentals Certification"
+                        description: "Master the core concepts of biology"
+                        topic_names: ["Biology", "Botany", "Zoology"]
+                        total_steps: 24
+                        enrollment_count: 156
+                    pagination:
+                      total_hits: 2
+                      limit: 20
+                      offset: 0
+                      estimated_total: 2
+                    processing_time_ms: 3
+                    query: "biology"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
+
+  /api/me/dashboard:
+    get:
+      operationId: getMeDashboard
+      summary: BFF-aggregated A+ multi-role dashboard (WS-5b)
+      description: |
+        Fan-out aggregator that composes the A+ landing-surface
+        `DashboardSummary` from real downstream services in parallel:
+
+        | Field                  | Source                                   |
+        |------------------------|------------------------------------------|
+        | userDisplayName        | chora-identity      `GET /me`            |
+        | currentStreakDays      | chora-consumption   `GET /v1/me/streak`  |
+        | streak                 | chora-consumption   `GET /v1/me/streak`  |
+        | learnerCourses[]       | chora-consumption   `GET /v1/me/learning-paths` |
+        | learnerCourses[].retention_state | chora-consumption (per-atom Ebbinghaus retention envelope, ADR-143) |
+        | companions[]            | chora-consumption   `GET /v1/me/companions` |
+        | instructorCourses[]    | chora-delivery      `GET /api/v1/instructors/{instructor_gcid}/courses` (role-gated) |
+
+        **Graceful degradation** (mirrors `/api/atoms/{atomId}`): a partial
+        downstream failure omits/empties that part — the response is NEVER
+        a 5xx. `partial: true` + a `part_errors` map distinguishes
+        empty-because-failed from empty-because-no-data. `known_gaps`
+        carries permanent structural gaps (e.g. the per-field
+        `instructorCourses.*` entries) and does NOT flip `partial`.
+
+        **Fail-loud per `feedback_no_stubs_real_wiring`**: when an upstream
+        method EXISTS but FAILS, the failure is recorded in `part_errors`
+        with an opaque reason (`upstream_unavailable` / `upstream_4xx` /
+        `upstream_5xx`) — the field is never silently fabricated to a
+        non-zero value.
+
+        All new fields are **OPTIONAL** for backwards-compat — FE
+        consumers handle absence gracefully.
+      tags:
+        - BFF Proxy
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIDHeader"
+      responses:
+        "200":
+          description: Composed dashboard summary (may be partial).
+          headers:
+            X-Correlation-ID:
+              $ref: "#/components/headers/X-Correlation-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "405":
+          description: Method not allowed (GET only).
+          headers:
+            X-Correlation-ID:
+              $ref: "#/components/headers/X-Correlation-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/atoms/{atomId}:
+    get:
+      operationId: getAtomEnvelope
+      summary: BFF-aggregated atom playback envelope (WS-0b A16)
+      description: |
+        Fan-out aggregator that fetches the LearningAtom from chora-creation
+        and the AtomicSession metadata from chora-consumption in parallel.
+        Returns a single envelope the FE atom playback view consumes.
+
+        The atom block carries a unified `question_payload` (discriminated
+        on `type: 'mcq' | 'oe'`) when the atom has an attached Question.
+        Legacy field shims `mcq_payload` / `essay_payload` continue to be
+        emitted for backwards-compat with existing FE consumers; new
+        consumers SHOULD prefer `question_payload`.
+
+        `question_payload.correct_option_id` is OMITTED in learner mode
+        (default). It is INCLUDED only when ALL of:
+        - `?mode=author` query parameter is present
+        - Caller's resolved role on the tenant is `author` or `instructor`
+        (BFF role gate; chora-creation never emits `correct_option_id`).
+
+        Fail-loud per `feedback_no_stubs_real_wiring`: if chora-creation
+        returns a question_payload with `type: 'mcq'` but the `options[]`
+        array is empty or missing, the BFF returns `502 GATEWAY_UPSTREAM_5XX`
+        rather than silently emitting an empty payload.
+      tags:
+        - BFF Proxy
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIDHeader"
+        - name: atomId
+          in: path
+          required: true
+          description: LearningAtom UUIDv7.
+          schema:
+            type: string
+            format: uuid
+        - name: mode
+          in: query
+          required: false
+          description: |
+            Visibility mode. `learner` (default) strips `correct_option_id`
+            from the MCQ payload. `author` includes `correct_option_id`
+            IFF the caller's tenant role is `author` or `instructor`; a
+            non-privileged caller with `?mode=author` receives the same
+            learner-safe projection (silent fall-through, not a 403 — the
+            FE may always pass `?mode=author` without a pre-flight role
+            check).
+          schema:
+            type: string
+            enum:
+              - learner
+              - author
+            default: learner
+      responses:
+        "200":
+          description: Atom playback envelope.
+          headers:
+            X-Correlation-ID:
+              $ref: "#/components/headers/X-Correlation-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LearningAtomEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Atom not found.
+          headers:
+            X-Correlation-ID:
+              $ref: "#/components/headers/X-Correlation-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: |
+            Upstream chora-creation returned a malformed `question_payload`
+            (e.g., `type: 'mcq'` with empty or missing `options[]`). The
+            BFF fails loud — never silently emits an empty payload.
+          headers:
+            X-Correlation-ID:
+              $ref: "#/components/headers/X-Correlation-ID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  securitySchemes:
+    BearerJWT:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT token issued by chora-iam. The token contains the following
+        claims used by the gateway middleware:
+
+        - `sub` (string): GCID (Global Chora ID) — opaque UUIDv7.
+        - `tenant_id` (string): Active tenant UUID for this session.
+        - `exp` (number): Token expiry (Unix timestamp).
+        - `iat` (number): Token issued-at (Unix timestamp).
+
+        The gateway validates the signature, checks expiry, extracts
+        `sub` as GCID and `tenant_id`, then forwards them to backend
+        services via `X-GCID` and `X-Tenant-ID` headers.
+
+  parameters:
+    SearchQuery:
+      name: q
+      in: query
+      required: true
+      description: |
+        Full-text search query string. Meilisearch handles typo tolerance,
+        tokenization, and ranking automatically.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 500
+      example: "photosynthesis"
+
+    SearchSort:
+      name: sort
+      in: query
+      required: false
+      description: |
+        Sort field and direction. Format: `field:asc` or `field:desc`.
+        Available sort fields depend on the index (e.g., `difficulty:asc`,
+        `title:asc`). Default: relevance ranking (no explicit sort).
+      schema:
+        type: string
+      example: "difficulty:asc"
+
+    SearchLimit:
+      name: limit
+      in: query
+      required: false
+      description: |
+        Maximum number of results to return. Default 20, max 100.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+      example: 20
+
+    SearchOffset:
+      name: offset
+      in: query
+      required: false
+      description: |
+        Number of results to skip for pagination. Default 0.
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+      example: 0
+
+    CorrelationIDHeader:
+      name: X-Correlation-ID
+      in: header
+      required: false
+      description: |
+        Client-provided correlation ID for distributed tracing. If omitted,
+        the gateway generates a UUIDv7 and injects it into the request and
+        response. All backend services receive this header.
+      schema:
+        type: string
+        format: uuid
+      example: 019502a0-1234-7def-8abc-def012345678
+
+  headers:
+    X-Correlation-ID:
+      description: |
+        Correlation ID for distributed tracing. Always present in responses —
+        either echoed from the request or generated by the gateway (UUIDv7).
+      schema:
+        type: string
+        format: uuid
+      example: 019502a0-1234-7def-8abc-def012345678
+    X-Tenant-ID:
+      description: |
+        Tenant UUID extracted from the authenticated JWT claims. Forwarded
+        to backend services by the gateway. Not present on unauthenticated
+        routes (`/api/v1/auth/**`).
+      schema:
+        type: string
+        format: uuid
+    X-GCID:
+      description: |
+        GCID (Global Chora ID) extracted from the authenticated JWT `sub`
+        claim. Opaque UUIDv7. Forwarded to backend services by the gateway.
+        Not present on unauthenticated routes (`/api/v1/auth/**`).
+      schema:
+        type: string
+        format: uuid
+    X-RateLimit-Limit:
+      description: Maximum number of requests allowed in the current rate limit window.
+      schema:
+        type: integer
+      example: 100
+    X-RateLimit-Remaining:
+      description: Number of requests remaining in the current rate limit window.
+      schema:
+        type: integer
+      example: 87
+    X-RateLimit-Reset:
+      description: |
+        Unix timestamp (seconds) when the current rate limit window resets.
+      schema:
+        type: integer
+        format: int64
+      example: 1741782600
+    Retry-After:
+      description: |
+        Seconds until the client should retry. Present only on `429 Too Many
+        Requests` responses.
+      schema:
+        type: integer
+      example: 30
+
+  schemas:
+    GatewayHealth:
+      type: object
+      description: |
+        Aggregated health status of the gateway and all registered backend
+        services. The top-level `status` reflects the worst status among all
+        services: if any service is `unhealthy`, the aggregate is `unhealthy`;
+        if any is `degraded` (but none unhealthy), the aggregate is `degraded`.
+      required:
+        - status
+        - services
+      properties:
+        status:
+          type: string
+          enum:
+            - healthy
+            - degraded
+            - unhealthy
+          description: |
+            Aggregate health status. Computed as the worst status across all
+            registered backend services.
+          example: healthy
+        services:
+          type: array
+          description: Per-service health breakdown.
+          items:
+            $ref: "#/components/schemas/ServiceHealth"
+
+    ServiceHealth:
+      type: object
+      description: |
+        Health status of a single backend service as observed by the gateway's
+        periodic health checks.
+      required:
+        - service_name
+        - status
+        - last_checked
+        - response_time_ms
+      properties:
+        service_name:
+          type: string
+          description: |
+            Canonical service name (e.g., `chora-iam`, `chora-atomic`).
+          example: chora-iam
+        status:
+          type: string
+          enum:
+            - healthy
+            - degraded
+            - unhealthy
+          description: |
+            Health status of this service based on the most recent health check.
+          example: healthy
+        last_checked:
+          type: string
+          format: date-time
+          description: |
+            ISO 8601 timestamp of the most recent health check for this service.
+          example: "2026-03-12T10:30:00Z"
+        response_time_ms:
+          type: integer
+          format: int64
+          description: |
+            Response time of the most recent health check in milliseconds.
+          example: 12
+
+    GatewayVersion:
+      type: object
+      description: Build and runtime version information for the gateway.
+      required:
+        - version
+        - build_date
+        - go_version
+      properties:
+        version:
+          type: string
+          description: Semantic version of the gateway build.
+          example: "1.0.0"
+        build_date:
+          type: string
+          format: date-time
+          description: ISO 8601 timestamp of when the gateway binary was built.
+          example: "2026-03-12T08:00:00Z"
+        go_version:
+          type: string
+          description: Go runtime version used to compile the gateway.
+          example: go1.26.1
+
+    # --- Search Response Schemas ---
+
+    AtomSearchResponse:
+      type: object
+      description: |
+        Paginated atom search results with faceted counts for filter UIs.
+      required:
+        - hits
+        - facets
+        - pagination
+        - processing_time_ms
+        - query
+      properties:
+        hits:
+          type: array
+          items:
+            $ref: "#/components/schemas/AtomSearchHit"
+        facets:
+          $ref: "#/components/schemas/AtomSearchFacets"
+        pagination:
+          $ref: "#/components/schemas/SearchPagination"
+        processing_time_ms:
+          type: integer
+          format: int64
+          description: Meilisearch processing time in milliseconds.
+        query:
+          type: string
+          description: The original search query string.
+
+    AtomSearchHit:
+      type: object
+      description: A single atom result from the search index.
+      required:
+        - id
+        - title
+        - atom_type
+        - difficulty
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: LearningAtom ID.
+        title:
+          type: string
+          description: Atom title from the latest published revision.
+        content_excerpt:
+          type: string
+          description: |
+            Truncated content excerpt with search term highlighting.
+            Meilisearch wraps matches in `<em>` tags.
+        atom_type:
+          type: string
+          description: Type of the learning atom.
+          enum:
+            - multiple_choice
+            - fill_blank
+            - true_false
+            - short_answer
+            - matching
+            - ordering
+            - code
+            - essay
+            - multimedia
+            - simulation
+        difficulty:
+          type: integer
+          minimum: 1
+          maximum: 5
+          description: Atom difficulty level.
+        labels:
+          type: array
+          items:
+            type: string
+          description: Free-form hashtag labels (AtomTag values).
+        topic_names:
+          type: array
+          items:
+            type: string
+          description: Names of TopicNodes this atom belongs to.
+
+    # --- Dashboard Summary (WS-5b) ---
+
+    DashboardSummary:
+      type: object
+      description: |
+        Composed A+ multi-role dashboard envelope returned by
+        `GET /api/me/dashboard`. Each field is sourced from a real
+        downstream call (see the operation description). Fields that have
+        no wireable downstream source today are recorded under
+        `known_gaps`; transient per-request failures are recorded under
+        `part_errors`.
+
+        Empty/zero values are honest — they reflect the real downstream
+        state. The hardcoded fixture has been deleted (per
+        `feedback_no_stubs_real_wiring`).
+      required:
+        - gcidPillLabel
+        - userDisplayName
+        - currentStreakDays
+        - learnerCourses
+        - instructorCourses
+      properties:
+        gcidPillLabel:
+          type: string
+          description: |
+            Synthesised gateway-side UI label for the A+ GCID pill (NOT
+            domain data). Mirrors the FE fixture string verbatim so the
+            rendered pill is identical pre/post BFF swap.
+          example: "ONE IDENTITY · GCID active"
+        userDisplayName:
+          type: string
+          description: |
+            Learner display name from chora-identity `GET /me`. Empty
+            string when the identity fan-out failed for this request
+            (see `part_errors.userDisplayName`).
+        currentStreakDays:
+          type: integer
+          minimum: 0
+          description: |
+            Days in the current consecutive streak. Mirrors
+            `streak.current_streak_days` and is preserved as a flat
+            scalar for backwards-compat with pre-WS-5 FE consumers.
+        learnerCourses:
+          type: array
+          description: |
+            Enrolled courses for the caller. ALWAYS an array (never null)
+            even when the upstream fan-out failed — see
+            `part_errors.learnerCourses` for the failure reason.
+          items:
+            $ref: "#/components/schemas/LearnerCourseSummary"
+        instructorCourses:
+          type: array
+          description: |
+            Courses the caller instructs, from chora-delivery
+            `GET /api/v1/instructors/{instructor_gcid}/courses` addressed
+            by the caller's OWN gcid. ALWAYS an array, never null. It is
+            empty in three distinguishable cases: the caller holds no
+            `instructor` / `admin` role, in which case the call is skipped
+            and the empty array is a fact; the call failed, recorded in
+            `part_errors.instructorCourses`; or `SVC_DELIVERY_URL` is
+            unset, recorded as a `not_configured` entry in
+            `known_gaps.instructorCourses`.
+          items:
+            $ref: "#/components/schemas/InstructorCourseSummary"
+        companions:
+          type: array
+          description: |
+            N-Companion roster (ADR-116 amendment + ADR-147 §7). Sourced
+            from chora-consumption `GET /v1/me/companions`. Empty array
+            when the learner has no hatched Companions (Mystery Egg only)
+            or when the upstream fan-out failed. **OPTIONAL** — omitted
+            in legacy BFF responses, in which case the FE renders an
+            empty roster strip without error (WS-5 fallback contract).
+          items:
+            $ref: "#/components/schemas/CompanionRosterItem"
+        streak:
+          allOf:
+            - $ref: "#/components/schemas/StreakSummary"
+          description: |
+            Structured streak summary from chora-consumption
+            `GET /v1/me/streak`. **OPTIONAL** — when absent the FE falls
+            back to the flat `currentStreakDays` scalar.
+        partial:
+          type: boolean
+          description: |
+            Set to `true` when one or more WIREABLE downstream parts
+            failed THIS request. A clean fan-out of every wireable part
+            is `partial: false` even when `known_gaps` is non-empty
+            (structural gaps never flip `partial`).
+        part_errors:
+          type: object
+          description: |
+            Per-field upstream-error map keyed by `DashboardSummary`
+            field name (e.g. `{ userDisplayName: "upstream_4xx" }`).
+            Snake_case as the BE serialises it. Omitted on a clean
+            fan-out.
+          additionalProperties:
+            type: string
+        known_gaps:
+          type: object
+          description: |
+            Per-field permanent structural-gap map keyed by field name
+            (e.g. `{ instructorCourses: "no_downstream_source: ..." }`).
+            Distinct from `part_errors` — these are gaps with no
+            downstream source AT ALL today, NOT transient per-request
+            failures. Does NOT flip `partial`.
+          additionalProperties:
+            type: string
+
+    LearnerCourseSummary:
+      type: object
+      description: |
+        A single enrolled-course tile. Fields sourced from chora-
+        consumption `GET /v1/me/learning-paths` (`course_id` / `title` /
+        `progress_percent` / `current_index` / `total_atoms`) plus the
+        Ebbinghaus `retention_state` from the per-atom retention
+        envelope (ADR-143). Fields with no downstream source today are
+        emitted at their zero value (NOT fabricated) — see the dashboard
+        package doc GAP note.
+      required:
+        - courseId
+        - title
+        - progressPct
+      properties:
+        courseId:
+          type: string
+          description: Course aggregate ID.
+        courseCode:
+          type: string
+          description: |
+            Course code (e.g. "CSM-201"). **No downstream source today
+            (GAP)** — emitted as empty string.
+        title:
+          type: string
+          description: Course title.
+        instructorName:
+          type: string
+          description: |
+            Instructor display name. **No downstream source today
+            (GAP)** — emitted as empty string.
+        progressPct:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 100
+          description: Completion percentage (0-100).
+        remainingAtoms:
+          type: integer
+          minimum: 0
+          description: |
+            Computed as `total_atoms - current_index` from
+            `/v1/me/learning-paths` mePathSummary.
+        xpEarned:
+          type: integer
+          minimum: 0
+          description: |
+            XP accrued in this course. **No downstream source today
+            (GAP)** — emitted as 0.
+        memoryPct:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: |
+            Aggregate retention percent across the course atoms. **No
+            downstream source today (GAP)** — emitted as 0.
+        dayNumber:
+          type: integer
+          minimum: 0
+          description: |
+            Day number within the linear Straight-Up cadence. **No
+            downstream source today (GAP)** — emitted as 0.
+        dayTotal:
+          type: integer
+          minimum: 0
+          description: |
+            Total days in the Straight-Up cadence. **No downstream
+            source today (GAP)** — emitted as 0.
+        retention_state:
+          type: string
+          enum:
+            - high
+            - medium
+            - low
+            - unknown
+          description: |
+            Ebbinghaus retention level for the last-played atom in this
+            course (ADR-143 spaced-repetition envelope). **OPTIONAL** —
+            absent when no AtomicSession exists yet or when the upstream
+            method is not present in chora-consumption (the FE defaults
+            to rendering an explicit `unknown` dot; the card is NEVER
+            hidden).
+
+    InstructorCourseSummary:
+      type: object
+      description: |
+        A single instructor-course tile, projected from chora-delivery
+        `GET /api/v1/instructors/{instructor_gcid}/courses`
+        (`publicCourseDTO`).
+
+        Only `courseId` (from `id`), `title` and `studentsEnrolled` (from
+        `enrolled_count`) have a downstream source. `courseCode`,
+        `atomsAuthored`, `averageScorePct`, `pendingReviews` and `isLive`
+        ride at their zero value and are declared per field under
+        `DashboardSummary.known_gaps` as `instructorCourses.<field>`; they
+        are NEVER fabricated. `averageScorePct` and `pendingReviews` both
+        wait on the cross-assessment grading rollup, which does not exist
+        yet.
+      required:
+        - courseId
+        - title
+      properties:
+        courseId:
+          type: string
+        courseCode:
+          type: string
+        title:
+          type: string
+        studentsEnrolled:
+          type: integer
+          minimum: 0
+        atomsAuthored:
+          type: integer
+          minimum: 0
+        averageScorePct:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 100
+        pendingReviews:
+          type: integer
+          minimum: 0
+        isLive:
+          type: boolean
+
+    CompanionRosterItem:
+      type: object
+      description: |
+        A single Companion in the learner's N-Companion roster strip.
+        Projected from chora-consumption `GET /v1/me/companions`
+        (`instanceResp` with inline `growth_state`). Per ADR-116
+        amendment a learner owns 1:N specialised Companions; the FE
+        renders the strip horizontally with one chip per Companion.
+      required:
+        - companion_id
+        - name
+      properties:
+        companion_id:
+          type: string
+          format: uuid
+          description: Companion Instance aggregate ID (UUIDv7).
+        name:
+          type: string
+          description: Companion display name.
+        species:
+          type: string
+          description: |
+            Species key used by the FE to pick the FontAwesome species
+            icon (fox / owl / dragon / cat / robot / phoenix). Today
+            derived from the `instanceResp.specialization` field
+            (chora-consumption stores the Companion's specialization
+            class rather than a dedicated species axis); empty string
+            when no specialization is recorded. The FE falls back to a
+            generic star icon when the key is unknown.
+        evolution_level:
+          type: integer
+          minimum: 0
+          description: |
+            Numeric evolution tier (1-6) sourced from
+            `instanceResp.growth_state.stage`. 0 when the growth
+            projection is absent (pre-hatch / legacy adapter).
+        stage_label:
+          type: string
+          description: |
+            Growth stage label (egg / hatchling / fledgling / apprentice
+            / adept / sage) from
+            `instanceResp.growth_state.stage_name`. Empty string when
+            the growth projection is absent.
+        avatar_url:
+          type: string
+          format: uri
+          description: |
+            **OPTIONAL** avatar image URL. **No downstream source
+            today** — omitted from the wire. Reserved for the future
+            DigitalSkin grant projection.
+
+    StreakSummary:
+      type: object
+      description: |
+        Structured streak summary sourced from chora-consumption
+        `GET /v1/me/streak`. Mirrors the upstream `streakResp` with
+        BFF-side field renames (`count` → `current_streak_days`,
+        `last_activity_at` → `last_completion_at`) so the FE contract
+        matches the daily-dose-service terminology the WS-5 model file
+        documents.
+      required:
+        - current_streak_days
+      properties:
+        current_streak_days:
+          type: integer
+          minimum: 0
+          description: |
+            Days in the current consecutive streak. 0 means no active
+            streak (FE renders the "Start streak today" CTA).
+        last_completion_at:
+          type: string
+          format: date-time
+          description: |
+            ISO-8601 timestamp of the last completed activity. Optional.
+
+    # --- Atom Playback Envelope (WS-0b A16) ---
+
+    LearningAtomEnvelope:
+      type: object
+      description: |
+        Aggregated envelope returned by `GET /api/atoms/{atomId}`. Contains
+        the LearningAtom (with learner-safe Question projection) plus an
+        optional `session` block (chora-consumption fan-out) and an
+        optional `session_error` indicator for graceful degradation when
+        the session sub-fetch fails.
+      required:
+        - atom
+      properties:
+        atom:
+          $ref: "#/components/schemas/LearningAtomDetail"
+        session:
+          type: object
+          description: |
+            AtomicSession metadata from chora-consumption. Present when the
+            session fan-out succeeded. Schema is passed through verbatim;
+            full shape lives in `consumption.yaml`.
+          additionalProperties: true
+        session_error:
+          type: string
+          description: |
+            Non-fatal indicator that the session fan-out failed. Present
+            ONLY when `session` is absent. Value is an opaque error code
+            (e.g., `upstream_unavailable`); the FE renders the atom block
+            and a partial-banner without blocking playback.
+          example: upstream_unavailable
+
+    LearningAtomDetail:
+      type: object
+      description: |
+        LearningAtom block with optional `question_payload` (unified
+        discriminated envelope) and legacy `mcq_payload` / `essay_payload`
+        field shims. The atom shape is otherwise passed through from
+        chora-creation verbatim — see `creation-admin.yaml` for the full
+        LearningAtom shape.
+      required:
+        - atom_id
+        - tenant_id
+        - gcid
+        - status
+        - mode
+        - revision
+        - created_at
+        - updated_at
+      properties:
+        atom_id:
+          type: string
+          format: uuid
+          description: LearningAtom aggregate ID (UUIDv7).
+        tenant_id:
+          type: string
+          format: uuid
+          description: Owning tenant aggregate ID (UUIDv7).
+        gcid:
+          type: string
+          format: uuid
+          description: Author GCID (UUIDv7) — opaque.
+        title:
+          type: string
+          description: Atom display title (may be empty for stem-only atoms).
+        body:
+          type: string
+          description: Atom content body (markdown).
+        atom_type:
+          type: string
+          description: |
+            Atom render-mode discriminant. `outline` = text-reading;
+            `mcq` = multiple-choice; `essay` = open-ended.
+          enum:
+            - outline
+            - mcq
+            - essay
+            - flashcard
+            - video
+        question_type:
+          type: string
+          description: |
+            Canonical 16-enum question type per ADR-156 Phase 1 (mcq | oe |
+            reserved_*). Present when an attached Question exists.
+        stem:
+          type: string
+          description: Question stem (ADR-156 Phase 1).
+        subject:
+          type: string
+        cognitive_level:
+          type: string
+        difficulty:
+          type: integer
+          minimum: 1
+          maximum: 5
+        mode:
+          type: string
+          enum:
+            - straight-up
+            - discovery
+        status:
+          type: string
+          enum:
+            - draft
+            - published
+            - archived
+        revision:
+          type: integer
+        tags:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        question_payload:
+          $ref: "#/components/schemas/QuestionPayload"
+        mcq_payload:
+          type: object
+          description: |
+            **Legacy field shim** — kept for backwards-compat with existing
+            FE consumers (test-set-editor.model.ts, atomic-session.model.ts).
+            New consumers SHOULD use `question_payload` instead. Mirrors
+            the learner-safe MCQ projection (no `correct_option_id`,
+            `is_correct`, or `explainer`).
+          additionalProperties: true
+        essay_payload:
+          type: object
+          description: |
+            **Legacy field shim** — kept for backwards-compat. New consumers
+            SHOULD use `question_payload` with `type: 'oe'`.
+          additionalProperties: true
+
+    QuestionPayload:
+      description: |
+        Unified discriminated question payload (WS-0b A16). One of MCQ | OE.
+        `correct_option_id` is the only field gated by `?mode=author` +
+        tenant role; all other fields are learner-safe.
+      oneOf:
+        - $ref: "#/components/schemas/MCQQuestionPayload"
+        - $ref: "#/components/schemas/OEQuestionPayload"
+      discriminator:
+        propertyName: type
+        mapping:
+          mcq: "#/components/schemas/MCQQuestionPayload"
+          oe: "#/components/schemas/OEQuestionPayload"
+
+    MCQQuestionPayload:
+      type: object
+      description: |
+        Multiple-Choice question payload. `marker` is positional (A/B/C/D)
+        and auto-computed at render time — NEVER stored or carried on the
+        wire (per `feedback_mcq_option_naming`).
+      required:
+        - type
+        - question_id
+        - options
+        - xp_on_correct
+      properties:
+        type:
+          type: string
+          enum: [mcq]
+        question_id:
+          type: string
+          format: uuid
+          description: Question aggregate ID (UUIDv7).
+        prompt:
+          type: string
+          description: Question prompt text.
+        options:
+          type: array
+          minItems: 2
+          maxItems: 8
+          items:
+            $ref: "#/components/schemas/MCQOption"
+        correct_option_id:
+          type: string
+          description: |
+            ID of the correct option. **Omitted in learner mode.** Included
+            only when `?mode=author` is present AND caller's tenant role is
+            `author` or `instructor`. The BFF strips this field as a
+            defense-in-depth measure even if upstream emits it.
+        xp_on_correct:
+          type: integer
+          minimum: 0
+          description: Companion economy XP reward when the learner picks the correct option.
+        timer_seconds:
+          type: integer
+          minimum: 0
+          description: Optional UI countdown hint.
+        image_url:
+          type: string
+          description: |
+            Optional QUESTION/STEM illustration URL (signed, learner-visible —
+            CHO-1638). chora-creation's learner-safe projection surfaces ONLY
+            the question illustration here; the model-answer illustration is
+            NEVER projected to a learner pre-grade (Security-wins). There is no
+            `answer_image_url` on the learner question_payload.
+
+    MCQOption:
+      type: object
+      description: |
+        One MCQ option. `text` and `label` carry the author-typed answer
+        choice content (e.g. "Newton"). `explainer` is the post-release
+        reveal text and is OMITTED in learner mode (only surfaced
+        post-grade via chora-consumption SubmitAnswer).
+      required:
+        - option_id
+      properties:
+        option_id:
+          type: string
+          description: Stable option ID.
+        label:
+          type: string
+          description: |
+            Author-typed answer choice text. Per `feedback_mcq_option_naming`
+            the positional marker (A/B/C/D) is computed at render time, NOT
+            stored. `label` is the canonical author-typed payload field.
+        text:
+          type: string
+          description: |
+            Author-typed answer choice text (alias for `label`). Provided
+            for cross-endpoint shape symmetry with the assessments wire
+            DTO; consumers MAY use either field interchangeably.
+        explainer:
+          type: string
+          description: |
+            Optional post-release reveal text. OMITTED in learner mode;
+            surfaced only post-grade by chora-consumption.
+
+    OEQuestionPayload:
+      type: object
+      description: |
+        Open-Ended question payload. `rubric` is the LEARNER-safe rubric
+        (visible criteria; `model_answer` always stripped). `max_score` is
+        derived from the rubric weight totals (100 by default per OE
+        domain invariant).
+      required:
+        - type
+        - question_id
+        - max_score
+      properties:
+        type:
+          type: string
+          enum: [oe]
+        question_id:
+          type: string
+          format: uuid
+        prompt:
+          type: string
+          description: Question prompt text.
+        rubric:
+          $ref: "#/components/schemas/OERubric"
+        max_score:
+          type: integer
+          minimum: 1
+          description: |
+            Maximum achievable score. Derived from rubric weight totals;
+            defaults to 100 when no weighted rubric is set.
+          example: 100
+        timer_seconds:
+          type: integer
+          minimum: 0
+
+    OERubric:
+      type: object
+      description: |
+        Learner-safe rubric — surfaces the grading criteria so the learner
+        understands how the response will be evaluated, but never exposes
+        the `model_answer` (which remains stripped per OEPayload.LearnerProjection).
+      required:
+        - criteria
+      properties:
+        criteria:
+          type: array
+          items:
+            $ref: "#/components/schemas/OERubricCriterion"
+
+    OERubricCriterion:
+      type: object
+      required:
+        - criterion_id
+        - description
+        - weight_percent
+      properties:
+        criterion_id:
+          type: string
+        description:
+          type: string
+        weight_percent:
+          type: integer
+          minimum: 0
+          maximum: 100
+
+    AtomSearchFacets:
+      type: object
+      description: |
+        Faceted counts for atom search. Used by the frontend to display
+        filter options with result counts.
+      properties:
+        atom_type:
+          type: object
+          additionalProperties:
+            type: integer
+          description: |
+            Count of results per atom type.
+            Keys are atom type values, values are counts.
+          example:
+            multiple_choice: 12
+            fill_blank: 5
+        difficulty:
+          type: object
+          additionalProperties:
+            type: integer
+          description: |
+            Count of results per difficulty level.
+            Keys are difficulty levels (as strings), values are counts.
+          example:
+            "3": 8
+            "4": 7
+
+    TopicSearchResponse:
+      type: object
+      description: Paginated topic search results.
+      required:
+        - hits
+        - pagination
+        - processing_time_ms
+        - query
+      properties:
+        hits:
+          type: array
+          items:
+            $ref: "#/components/schemas/TopicSearchHit"
+        pagination:
+          $ref: "#/components/schemas/SearchPagination"
+        processing_time_ms:
+          type: integer
+          format: int64
+        query:
+          type: string
+
+    TopicSearchHit:
+      type: object
+      description: A single topic result from the search index.
+      required:
+        - id
+        - name
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: TopicNode ID.
+        name:
+          type: string
+          description: Topic display name.
+        description:
+          type: string
+          description: Topic description text.
+        path:
+          type: string
+          description: |
+            Materialized path in the knowledge graph
+            (e.g., "Mathematics > Calculus > Differential Calculus").
+        atom_count:
+          type: integer
+          description: Number of atoms in this topic.
+
+    PathSearchResponse:
+      type: object
+      description: Paginated locked path search results.
+      required:
+        - hits
+        - pagination
+        - processing_time_ms
+        - query
+      properties:
+        hits:
+          type: array
+          items:
+            $ref: "#/components/schemas/PathSearchHit"
+        pagination:
+          $ref: "#/components/schemas/SearchPagination"
+        processing_time_ms:
+          type: integer
+          format: int64
+        query:
+          type: string
+
+    PathSearchHit:
+      type: object
+      description: A single locked path result from the search index.
+      required:
+        - id
+        - title
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: LockedPath ID.
+        title:
+          type: string
+          description: Path display title.
+        description:
+          type: string
+          description: Path description text.
+        topic_names:
+          type: array
+          items:
+            type: string
+          description: Names of topics covered by this path.
+        total_steps:
+          type: integer
+          description: Total number of steps in the path.
+        enrollment_count:
+          type: integer
+          description: Number of learners currently enrolled.
+
+    SearchPagination:
+      type: object
+      description: Pagination metadata for search results.
+      required:
+        - total_hits
+        - limit
+        - offset
+      properties:
+        total_hits:
+          type: integer
+          description: |
+            Number of hits returned in this page. May be less than
+            `estimated_total` due to pagination.
+        limit:
+          type: integer
+          description: Maximum results per page (as requested).
+        offset:
+          type: integer
+          description: Number of results skipped.
+        estimated_total:
+          type: integer
+          description: |
+            Meilisearch's estimated total number of matching documents.
+            May not be exact for large result sets.
+
+    ErrorResponse:
+      type: object
+      description: |
+        Standard Chora error response envelope. All gateway errors use
+        `GATEWAY_` prefixed error codes in `UPPER_SNAKE_CASE`.
+      required:
+        - error
+      properties:
+        error:
+          $ref: "#/components/schemas/ErrorEnvelope"
+
+    ErrorEnvelope:
+      type: object
+      description: Inner error object within the standard error response.
+      required:
+        - code
+        - message
+        - correlation_id
+      properties:
+        code:
+          type: string
+          description: |
+            `UPPER_SNAKE_CASE` domain-prefixed error code. Gateway errors
+            use the `GATEWAY_` prefix.
+          example: GATEWAY_RATE_LIMIT_EXCEEDED
+        message:
+          type: string
+          description: |
+            Human-readable error message. Safe for logging but NOT for
+            direct display in UI — frontend MUST map through
+            `ErrorMessageMapperService`.
+          example: Rate limit exceeded for this tenant
+        correlation_id:
+          type: string
+          format: uuid
+          description: |
+            Correlation ID matching the `X-Correlation-ID` response header.
+            The only technical detail safe to show end-users.
+          example: 019502a0-1234-7def-8abc-def012345678
+        details:
+          type: object
+          description: |
+            Optional additional context. May contain `retry_after` for rate
+            limit errors, or field-level validation details.
+          additionalProperties: true
+          example: {}
+
+    # --- Gateway-specific error code documentation ---
+    # These are not standalone schemas but documented here for codegen
+    # and tooling consumption.
+
+    RateLimitHeaders:
+      type: object
+      description: |
+        Rate limit metadata returned in response headers on every proxied
+        request. When the limit is exceeded, a `429` response is returned
+        with the `Retry-After` header.
+      properties:
+        X-RateLimit-Limit:
+          type: integer
+          description: Maximum requests per window.
+        X-RateLimit-Remaining:
+          type: integer
+          description: Remaining requests in current window.
+        X-RateLimit-Reset:
+          type: integer
+          format: int64
+          description: Unix timestamp when the window resets.
+        Retry-After:
+          type: integer
+          description: Seconds until retry (present only on 429).
+
+  responses:
+    RateLimitExceeded:
+      description: |
+        Tenant has exceeded the rate limit for this endpoint. The client
+        should wait for the duration specified in the `Retry-After` header
+        before retrying.
+      headers:
+        X-Correlation-ID:
+          $ref: "#/components/headers/X-Correlation-ID"
+        X-RateLimit-Limit:
+          $ref: "#/components/headers/X-RateLimit-Limit"
+        X-RateLimit-Remaining:
+          $ref: "#/components/headers/X-RateLimit-Remaining"
+        X-RateLimit-Reset:
+          $ref: "#/components/headers/X-RateLimit-Reset"
+        Retry-After:
+          $ref: "#/components/headers/Retry-After"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            rate_limited:
+              summary: Rate limit exceeded
+              value:
+                error:
+                  code: GATEWAY_RATE_LIMIT_EXCEEDED
+                  message: Rate limit exceeded for this tenant
+                  correlation_id: 019502a0-1234-7def-8abc-def012345678
+                  details:
+                    retry_after: 30
+
+    Unauthorized:
+      description: |
+        Authentication failed. One of three causes:
+        - Missing `Authorization` header (`GATEWAY_MISSING_AUTH_HEADER`)
+        - Invalid JWT token (`GATEWAY_INVALID_JWT`)
+        - Expired JWT token (`GATEWAY_JWT_EXPIRED`)
+      headers:
+        X-Correlation-ID:
+          $ref: "#/components/headers/X-Correlation-ID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            missing_auth:
+              summary: Missing Authorization header
+              value:
+                error:
+                  code: GATEWAY_MISSING_AUTH_HEADER
+                  message: Authorization header is required
+                  correlation_id: 019502a0-1234-7def-8abc-def012345678
+                  details: {}
+            invalid_jwt:
+              summary: Invalid JWT token
+              value:
+                error:
+                  code: GATEWAY_INVALID_JWT
+                  message: JWT token validation failed
+                  correlation_id: 019502a0-1234-7def-8abc-def012345678
+                  details: {}
+            expired_jwt:
+              summary: Expired JWT token
+              value:
+                error:
+                  code: GATEWAY_JWT_EXPIRED
+                  message: JWT token has expired
+                  correlation_id: 019502a0-1234-7def-8abc-def012345678
+                  details: {}
+
+    TenantNotResolved:
+      description: |
+        Tenant context could not be determined from the JWT claims.
+        Either the `tenant_id` claim is missing or the value is not a
+        valid UUID.
+      headers:
+        X-Correlation-ID:
+          $ref: "#/components/headers/X-Correlation-ID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            tenant_not_resolved:
+              summary: Tenant not resolved
+              value:
+                error:
+                  code: GATEWAY_TENANT_NOT_RESOLVED
+                  message: Tenant context could not be resolved from JWT claims
+                  correlation_id: 019502a0-1234-7def-8abc-def012345678
+                  details: {}
+
+    ServiceUnavailable:
+      description: |
+        A backend service required to fulfill the request is unreachable.
+      headers:
+        X-Correlation-ID:
+          $ref: "#/components/headers/X-Correlation-ID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            service_unavailable:
+              summary: Backend service unavailable
+              value:
+                error:
+                  code: GATEWAY_SERVICE_UNAVAILABLE
+                  message: Backend service is unavailable
+                  correlation_id: 019502a0-1234-7def-8abc-def012345678
+                  details: {}
+
+    BackendTimeout:
+      description: |
+        A proxied request to a backend service exceeded the configured
+        timeout threshold.
+      headers:
+        X-Correlation-ID:
+          $ref: "#/components/headers/X-Correlation-ID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            backend_timeout:
+              summary: Backend timeout
+              value:
+                error:
+                  code: GATEWAY_BACKEND_TIMEOUT
+                  message: Backend service did not respond within the timeout
+                  correlation_id: 019502a0-1234-7def-8abc-def012345678
+                  details: {}
+
+    RouteNotFound:
+      description: |
+        No route in the proxy routing table matches the requested path.
+      headers:
+        X-Correlation-ID:
+          $ref: "#/components/headers/X-Correlation-ID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            route_not_found:
+              summary: No matching route
+              value:
+                error:
+                  code: GATEWAY_ROUTE_NOT_FOUND
+                  message: No route matches the requested path
+                  correlation_id: 019502a0-1234-7def-8abc-def012345678
+                  details: {}
+
+# Default security: Bearer JWT required.
+# Individual operations override with `security: []` where auth is not needed.
+security:
+  - BearerJWT: []

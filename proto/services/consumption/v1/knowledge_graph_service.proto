@@ -1,0 +1,353 @@
+// =============================================================================
+// Chora KnowledgeGraph Service (gRPC)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture/adrs/adr-143-per-user-knowledge-graph-hexagonal-fog.md
+//   + chora-contracts/openapi/learner-knowledge-graph.yaml
+//   + chora-contracts/proto/events/consumption/knowledge_graph.proto
+//   + memory project_chora_data_plane.md
+//
+// Inter-service gRPC contract for the per-user Knowledge Graph aggregate
+// family in Content Consumption (chora_consumption database, Team 1 / Content).
+// REST surface in chora-contracts/openapi/learner-knowledge-graph.yaml is the
+// learner-facing equivalent; gRPC is for internal service-to-service sync
+// calls (mTLS via Cloud Service Mesh per CLAUDE.md §4 protocol strategy).
+//
+// Aggregates owned:
+//   - MapCluster   — disconnected per-user knowledge map (the entity that
+//                    Join merges)
+//   - Exploration  — seed-rooted journey within a cluster
+//   - HexagonNode  — cached focal + 6 neighbors (hybrid persistence)
+//   - TrailHop     — append-only path history
+//
+// JunctionOpportunity is transient (computed via index probe over
+// kg_hexagon_nodes; not persisted; surfaced via Subscription push).
+//
+// Primary callers:
+//   - chora-bff-gateway   — fronts learner REST + GraphQL
+//   - chora-consumption   — internal cross-aggregate calls
+//   - chora-realtime      — WebSocket subscription resolvers
+//
+// Idempotency: every mutation RPC requires idempotency_key. Identical keys
+// returning the same result.
+//
+// Deployed in chora-content (Team 1 pool). mTLS via Cloud Service Mesh;
+// SPIFFE identity in mesh; W3C trace context in gRPC metadata.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.services.consumption.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/consumption/v1;consumptionv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/consumption/v1/knowledge_graph.proto";
+
+// -----------------------------------------------------------------------------
+// Service
+// -----------------------------------------------------------------------------
+
+service KnowledgeGraphService {
+  // Create a new MapCluster seeded by a topic. Returns 409 ALREADY_EXISTS
+  // when the user is at max_concurrent_kg_clusters_per_user.
+  // Idempotent on idempotency_key. Emits MapClusterCreated +
+  // ExplorationCreated.
+  rpc CreateMapCluster(CreateMapClusterRequest) returns (CreateMapClusterResponse);
+
+  // List the caller's MapClusters. Filterable by status. Active-first sort.
+  rpc ListMyMapClusters(ListMyMapClustersRequest) returns (ListMyMapClustersResponse);
+
+  // Get a single MapCluster. Returns NOT_FOUND when not in caller's tenant
+  // or not the caller's cluster (RLS enforced).
+  rpc GetMapCluster(GetMapClusterRequest) returns (GetMapClusterResponse);
+
+  // Merge two clusters via a junction atom. The smaller cluster (by
+  // node_count) is marked MERGED_INTO; the larger absorbs it.
+  // Trail histories preserved; surviving cluster's display_name defaults
+  // to "{a.seed_topic} + {b.seed_topic}".
+  // Idempotent on idempotency_key. Emits MapClusterMerged.
+  rpc MergeMapClusters(MergeMapClustersRequest) returns (MergeMapClustersResponse);
+
+  // Archive a MapCluster. Status → ARCHIVED. Sweeper deletes hex_nodes
+  // for the cluster's explorations after grace × 12. Emits MapClusterArchived.
+  rpc ArchiveMapCluster(ArchiveMapClusterRequest) returns (ArchiveMapClusterResponse);
+
+  // Create a new Exploration within an active cluster. (Cluster creation
+  // implicitly creates the first Exploration; this RPC is for additional
+  // explorations within an already-active cluster — typically post-merge.)
+  // Emits ExplorationCreated.
+  rpc CreateExploration(CreateExplorationRequest) returns (CreateExplorationResponse);
+
+  // Get the hexagon (focal + 6 neighbors) for the current focal of an
+  // exploration, OR for any focal_atom_id within the exploration's history.
+  // Cache-aware: returns fresh cached row when invalidated_at IS NULL,
+  // OR triggers synchronous fog regeneration via FogOrchestrator.GenerateFog
+  // (typically P50 < 2.5s, P99 < 6s).
+  rpc GetHexagonAroundFocal(GetHexagonAroundFocalRequest) returns (GetHexagonAroundFocalResponse);
+
+  // Click-to-graduate: move the exploration's focal node to one of the
+  // current 6 neighbors. Atomically appends a kg_exploration_trail row
+  // and updates kg_user_explorations.current_focal_atom_id under OCC.
+  // Triggers fog gen (synchronous) for the new focal. Returns the new
+  // HexagonLayout. Emits ExplorationFocalNodeChanged.
+  // Idempotent on idempotency_key (UUIDv7 derived from
+  // (exploration_id, target_atom_id, generation_epoch) recommended).
+  rpc MoveFocalNode(MoveFocalNodeRequest) returns (MoveFocalNodeResponse);
+}
+
+// -----------------------------------------------------------------------------
+// Common message types
+// -----------------------------------------------------------------------------
+
+// MapClusterDTO — projection of a kg_user_map_clusters row.
+message MapClusterDTO {
+  string cluster_id = 1;
+  string user_gcid = 2;
+  string display_name = 3;
+  string seed_topic = 4;
+  string seed_atom_id = 5;
+  chora.consumption.v1.MapClusterStatus status = 6;
+  string merged_into_cluster_id = 7;       // empty unless status=MERGED_INTO
+  string merged_via_atom_id = 8;           // empty unless status=MERGED_INTO
+  int32 node_count = 9;
+  int32 version = 10;                       // OCC
+  google.protobuf.Timestamp created_at = 11;
+  google.protobuf.Timestamp updated_at = 12;
+}
+
+// ExplorationDTO — projection of a kg_user_explorations row.
+message ExplorationDTO {
+  string exploration_id = 1;
+  string cluster_id = 2;
+  string user_gcid = 3;
+  string started_at_atom_id = 4;
+  string current_focal_atom_id = 5;
+  chora.consumption.v1.ExplorationStatus status = 6;
+  int32 version = 7;                        // OCC
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+}
+
+// HexagonLayoutDTO — the focal-plus-6 surface to the UI.
+message HexagonLayoutDTO {
+  string hex_node_id = 1;
+  string exploration_id = 2;
+  string cluster_id = 3;
+  string focal_atom_id = 4;
+
+  // Always exactly 6 records.
+  repeated chora.consumption.v1.HexagonNeighbor neighbors = 5;
+
+  string generated_by_run_id = 6;
+  string generated_by_model_id = 7;
+
+  google.protobuf.Timestamp generated_at = 8;
+  google.protobuf.Timestamp invalidated_at = 9;          // null when fresh
+  chora.consumption.v1.FogInvalidationReason invalidation_reason = 10;
+  bool is_cache_fresh = 11;
+}
+
+// TrailHopDTO — projection of a kg_exploration_trail row.
+message TrailHopDTO {
+  string trail_id = 1;
+  string exploration_id = 2;
+  string from_focal_atom_id = 3;
+  string to_focal_atom_id = 4;
+  chora.consumption.v1.NeighborRelation relation = 5;
+  int32 step_index = 6;
+  google.protobuf.Timestamp traversed_at = 7;
+}
+
+// JunctionOpportunityDTO — surfaced via Subscription, never persisted.
+message JunctionOpportunityDTO {
+  string via_atom_id = 1;
+  string current_cluster_id = 2;
+  string other_cluster_id = 3;
+  string current_cluster_display_name = 4;
+  string other_cluster_display_name = 5;
+}
+
+// -----------------------------------------------------------------------------
+// CreateMapCluster RPC
+// -----------------------------------------------------------------------------
+
+message CreateMapClusterRequest {
+  // GCID of the user creating the cluster. Required.
+  string user_gcid = 1;
+  // Tenant context. Required for RLS scope.
+  string tenant_id = 2;
+  // Seed topic string (e.g., "agile"). Required, max 128 chars.
+  string seed_topic = 3;
+  // Optional pre-resolved seed_atom_id. When empty, server resolves via
+  // Meilisearch + LLM fallback.
+  string seed_atom_id = 4;
+  // Optional display_name override (default: seed_topic).
+  string display_name = 5;
+  // Required idempotency key (UUIDv7 recommended).
+  string idempotency_key = 6;
+}
+
+message CreateMapClusterResponse {
+  MapClusterDTO cluster = 1;
+  ExplorationDTO initial_exploration = 2;
+}
+
+// -----------------------------------------------------------------------------
+// ListMyMapClusters RPC
+// -----------------------------------------------------------------------------
+
+message ListMyMapClustersRequest {
+  string user_gcid = 1;
+  string tenant_id = 2;
+
+  // Filter by status. Empty = all (active + archived + merged_into).
+  chora.consumption.v1.MapClusterStatus status_filter = 3;
+
+  // Pagination cursor (opaque).
+  string cursor = 4;
+  int32 limit = 5;
+}
+
+message ListMyMapClustersResponse {
+  repeated MapClusterDTO clusters = 1;
+
+  // Active count (used to validate cap on UI side).
+  int32 active_count = 2;
+  // The tenant's effective cap.
+  int32 max_concurrent_per_user = 3;
+
+  string next_cursor = 4;
+}
+
+// -----------------------------------------------------------------------------
+// GetMapCluster RPC
+// -----------------------------------------------------------------------------
+
+message GetMapClusterRequest {
+  string cluster_id = 1;
+  string user_gcid = 2;
+  string tenant_id = 3;
+}
+
+message GetMapClusterResponse {
+  MapClusterDTO cluster = 1;
+  // All explorations for the cluster (active + archived).
+  repeated ExplorationDTO explorations = 2;
+}
+
+// -----------------------------------------------------------------------------
+// MergeMapClusters RPC
+// -----------------------------------------------------------------------------
+
+message MergeMapClustersRequest {
+  // The cluster the user is currently in (becomes one side of the merge —
+  // server picks survivor based on node_count, not this side).
+  string cluster_id = 1;
+  // The other cluster the user is consenting to merge.
+  string target_cluster_id = 2;
+  // The atom_id that triggered the junction (must match a focal in BOTH
+  // clusters — server validates).
+  string via_atom_id = 3;
+
+  string user_gcid = 4;
+  string tenant_id = 5;
+
+  string idempotency_key = 6;
+}
+
+message MergeMapClustersResponse {
+  // The surviving cluster (with updated display_name + node_count + status
+  // changes already applied).
+  MapClusterDTO surviving_cluster = 1;
+  // The merged-in cluster (status=MERGED_INTO; included for UI confirmation).
+  MapClusterDTO merged_cluster = 2;
+}
+
+// -----------------------------------------------------------------------------
+// ArchiveMapCluster RPC
+// -----------------------------------------------------------------------------
+
+message ArchiveMapClusterRequest {
+  string cluster_id = 1;
+  string user_gcid = 2;
+  string tenant_id = 3;
+}
+
+message ArchiveMapClusterResponse {
+  MapClusterDTO cluster = 1;
+}
+
+// -----------------------------------------------------------------------------
+// CreateExploration RPC
+// -----------------------------------------------------------------------------
+
+message CreateExplorationRequest {
+  string cluster_id = 1;
+  string user_gcid = 2;
+  string tenant_id = 3;
+
+  // Atom ID to start the exploration from. Must be a focal atom that exists
+  // in the cluster (server validates).
+  string started_at_atom_id = 4;
+
+  string idempotency_key = 5;
+}
+
+message CreateExplorationResponse {
+  ExplorationDTO exploration = 1;
+}
+
+// -----------------------------------------------------------------------------
+// GetHexagonAroundFocal RPC
+// -----------------------------------------------------------------------------
+
+message GetHexagonAroundFocalRequest {
+  string exploration_id = 1;
+  // The atom to centre the hexagon on. Typically the exploration's
+  // current_focal_atom_id, but can also be any past focal in the trail
+  // (for "look back" navigation).
+  string focal_atom_id = 2;
+
+  string user_gcid = 3;
+  string tenant_id = 4;
+
+  // When true, force regenerate even if cache fresh (e.g., user pressed
+  // "Reset fog"). Bypass requires RLS-confirmed ownership of the cluster.
+  bool force_regenerate = 5;
+}
+
+message GetHexagonAroundFocalResponse {
+  HexagonLayoutDTO hexagon = 1;
+
+  // Junctions detected during this fetch (empty when no overlap).
+  // Subscription.junctionDetected pushes the same content asynchronously;
+  // callers may use this synchronous field to render the modal immediately.
+  repeated JunctionOpportunityDTO junctions = 2;
+}
+
+// -----------------------------------------------------------------------------
+// MoveFocalNode RPC
+// -----------------------------------------------------------------------------
+
+message MoveFocalNodeRequest {
+  string exploration_id = 1;
+  // Must be one of the 6 atom_ids in the current cached hexagon. Server
+  // validates against the cached neighbors_json.
+  string target_atom_id = 2;
+
+  string user_gcid = 3;
+  string tenant_id = 4;
+
+  string idempotency_key = 5;
+}
+
+message MoveFocalNodeResponse {
+  ExplorationDTO exploration = 1;
+  HexagonLayoutDTO new_hexagon = 2;
+  TrailHopDTO trail_hop = 3;
+
+  // Junctions detected for the new focal (same semantics as
+  // GetHexagonAroundFocalResponse.junctions).
+  repeated JunctionOpportunityDTO junctions = 4;
+}

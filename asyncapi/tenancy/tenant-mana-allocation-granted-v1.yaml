@@ -1,0 +1,65 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Tenancy — TenantManaAllocationGranted
+  version: 1.0.0
+  description: |
+    Published when a tenant admin or auto-allocation policy issues mana
+    to a specific learner from the tenant's pool. Debits the pool
+    atomically with the event publish. chora-identity consumes and
+    credits the learner's UserMana wallet (UserManaCredited;
+    reason=tenant_subsidy).
+
+    - Domain: Tenancy + Billing (`chora_tenancy` DB)
+    - Topic: `chora.tenancy.tenant_mana_allocation.granted.v1`
+    - Source proto: `proto/events/tenancy/tenant_mana_allocation.proto`
+       message `chora.tenancy.v1.TenantManaAllocationGranted`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  tenantManaAllocationGranted:
+    address: chora.tenancy.tenant_mana_allocation.granted.v1
+    messages:
+      tenantManaAllocationGranted:
+        $ref: '#/components/messages/TenantManaAllocationGranted'
+
+operations:
+  publishTenantManaAllocationGranted:
+    action: send
+    channel:
+      $ref: '#/channels/tenantManaAllocationGranted'
+    messages:
+      - $ref: '#/channels/tenantManaAllocationGranted/messages/tenantManaAllocationGranted'
+
+  consumeTenantManaAllocationGranted:
+    action: receive
+    channel:
+      $ref: '#/channels/tenantManaAllocationGranted'
+    description: |
+      Consumers: Identity (credit learner UserMana wallet with
+      reason=tenant_subsidy), Notifications (learner notification),
+      Observability (allocation funnel KPI).
+    messages:
+      - $ref: '#/channels/tenantManaAllocationGranted/messages/tenantManaAllocationGranted'
+
+components:
+  messages:
+    TenantManaAllocationGranted:
+      name: TenantManaAllocationGranted
+      title: Tenant Mana Allocation Granted
+      summary: A learner has been granted mana from the tenant's pool
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/tenancy/tenant_mana_allocation.proto#/chora.tenancy.v1.TenantManaAllocationGranted'

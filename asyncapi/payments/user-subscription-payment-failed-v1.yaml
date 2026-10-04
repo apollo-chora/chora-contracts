@@ -1,0 +1,62 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Payments — UserSubscriptionPaymentFailed
+  version: 1.0.0
+  description: |
+    Stripe `invoice.payment_failed` — chora-identity transitions the
+    UserSubscription to GRACE state. Stripe's smart-retry policy attempts
+    up to 3 retries over ~21 days; carries `next_attempt_at` for
+    informed-decision UI.
+
+    - Domain: Payments (`chora_payments` DB)
+    - Topic: `chora.payments.user_subscription.payment_failed.v1`
+    - Source proto: `proto/events/payments/user_subscription.proto`
+       message `chora.payments.v1.UserSubscriptionPaymentFailed`
+    - Aggregate: UserSubscription
+    - Per ADR-164 (chora-payments service + 13th DB).
+    - IMDA: envelope.chora_imda_dimension = "accountability"
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  userSubscriptionPaymentFailed:
+    address: chora.payments.user_subscription.payment_failed.v1
+    messages:
+      userSubscriptionPaymentFailed:
+        $ref: '#/components/messages/UserSubscriptionPaymentFailed'
+
+operations:
+  publishUserSubscriptionPaymentFailed:
+    action: send
+    channel:
+      $ref: '#/channels/userSubscriptionPaymentFailed'
+    messages:
+      - $ref: '#/channels/userSubscriptionPaymentFailed/messages/userSubscriptionPaymentFailed'
+
+  consumeUserSubscriptionPaymentFailed:
+    action: receive
+    channel:
+      $ref: '#/channels/userSubscriptionPaymentFailed'
+    messages:
+      - $ref: '#/channels/userSubscriptionPaymentFailed/messages/userSubscriptionPaymentFailed'
+
+components:
+  messages:
+    UserSubscriptionPaymentFailed:
+      name: UserSubscriptionPaymentFailed
+      title: Stripe failed to charge a subscription invoice
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/payments/user_subscription.proto#/chora.payments.v1.UserSubscriptionPaymentFailed'

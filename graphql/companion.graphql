@@ -1,0 +1,77 @@
+# =============================================================================
+# Chora Companion subschema — federated GraphQL
+# =============================================================================
+#
+# Owns the Companion DOMAIN entity (in-game RPG companion) for learner reads.
+#
+# CRITICAL distinction (per memory `feedback_companion_vs_agent`):
+#   The Companion exposed here is a DOMAIN ENTITY ONLY — species, level,
+#   bonded_at, equipped skin, mood. It does NOT expose the AI agent that
+#   produces Companion responses (model name, prompt, embeddings, model
+#   identifiers). Those live behind a separate AI Kernel adapter and are
+#   gated through `CompanionExposureGrant` consent.
+#
+# Owning team   : Team 1 (Content)
+# Domain        : Content Consumption (chora_consumption DB)
+# Surface       : A+ Companion Profile page
+# =============================================================================
+
+directive @key(fields: String!, resolvable: Boolean = true) repeatable on OBJECT | INTERFACE
+
+scalar UUID
+scalar DateTime
+
+enum CompanionSpecies {
+  OWL
+  FOX
+  CAT
+  DRAGON
+  PHOENIX
+  TURTLE
+  WOLF
+  RAVEN
+}
+
+enum CompanionMood {
+  CURIOUS
+  PROUD
+  SLEEPY
+  ENERGETIC
+  CONTEMPLATIVE
+}
+
+# -----------------------------------------------------------------------------
+# Query root — companion subschema
+# -----------------------------------------------------------------------------
+
+type Query {
+  """The current learner's Companion (single Companion per learner)."""
+  myCompanion: Companion
+}
+
+# -----------------------------------------------------------------------------
+# Domain types — DOMAIN ATTRIBUTES ONLY (never AI agent details)
+# -----------------------------------------------------------------------------
+
+type Companion @key(fields: "id") {
+  id: ID!
+  ownerGcid: UUID!
+  species: CompanionSpecies!
+  level: Int!
+  mood: CompanionMood!
+  equippedSkin: DigitalSkin
+  bondedAt: DateTime!
+  retiredAt: DateTime
+}
+
+"""
+A DigitalSkin — earned visual reward for a Companion. Per CLAUDE.md domain
+vocabulary: NEVER purchasable. Earned-only.
+"""
+type DigitalSkin {
+  id: ID!
+  name: String!
+  description: String
+  rarity: String!
+  assetUrl: String!
+}

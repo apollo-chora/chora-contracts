@@ -1,0 +1,60 @@
+// =============================================================================
+// chora.delivery.v1 — Enrollment domain events (per-learner course lifecycle)
+// =============================================================================
+//
+// Owning domain  : Content Delivery (chora_delivery database)
+// Owning team    : Team 2 (Delivery)
+// Topic prefix   : chora.delivery.enrollment.*
+//
+// An Enrollment is a learner's place in a Course/Class. EnrollmentCompleted
+// marks the per-learner terminal "I finished this course" fact — DISTINCT from
+// the class-lifecycle chora.delivery.course.completed.v1 (a whole class ending,
+// instructor-scoped), from chora.delivery.certification.issued.v1 (a credential
+// that not every completion issues), and from
+// chora.consumption.learning_path.completed.v1 (a self-paced atom path).
+//
+// Consumed by the Companion Global LearnerProfile read-model (ADR-200) as a
+// per-learner course-completion fact + by companion verified-EXP (ADR-203).
+//
+// Cross-domain references (no FK):
+//   - learner_gcid : Identity (UUID, no FK)
+//
+// NB: chora.delivery.enrollment.created.v1 is currently a JSON event with no
+// proto message; this file establishes the proto home for enrollment events.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.delivery.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/delivery/v1;deliveryv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// EnrollmentCompleted — chora.delivery.enrollment.completed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a learner's enrollment in a Course/Class reaches the COMPLETED
+// terminal state — the per-learner counterpart to the class-lifecycle
+// course.completed event. Drives the LearnerProfile read-model (ADR-200) and
+// companion verified-EXP (ADR-203, tier S).
+message EnrollmentCompleted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUID of the chora_delivery.enrollments row that completed.
+  string enrollment_id = 2;
+
+  // GCID of the learner who completed. Cross-domain — no FK.
+  string learner_gcid = 3;
+
+  // UUID of the completed Course/Class (same DB).
+  string course_id = 4;
+
+  // Whether the learner met the passing requirements (vs completed without
+  // passing). Drives the LearnerProfile assessment-result framing.
+  bool passed = 5;
+
+  google.protobuf.Timestamp completed_at = 6;
+}

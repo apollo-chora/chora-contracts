@@ -1,0 +1,167 @@
+asyncapi: "3.0.0"
+info:
+  title: "Chora Content Creation — question.generation_completed.v2"
+  version: "1.0.0"
+  description: |
+    Published by the chora-creation question-generation worker on terminal
+    compose-job status (SUCCEEDED, FAILED, or CANCELLED). The .v2 (ADR-195 WS7 /
+    D7) REPLACES the retired `job_type` (QuestionGenerationJobType) discriminant
+    with the unified compose model carried explicitly as three new fields:
+
+      - operation  — always "compose" (the single unified authoring operation).
+      - intent     — "new_question" | "model_answer_fill" | "image_regen".
+      - input_kind — "prompt" | "source_files" | "by_hand".
+
+    The candidate_drafts JSONB is NOT inlined into this event — consumers fetch
+    via GET /api/atoms/{atom_id}/question-jobs/{job_id} or the per-domain gRPC
+    accessor (inlining would bloat past the Schema-Registry-friendly size cap;
+    a batch can carry up to 50 candidates).
+
+    Cutover — PARALLEL-PUBLISH (ADR-195 D7): chora-creation publishes BOTH v1
+    (with `job_type`) and v2 (with the compose trio) during the migration
+    window. The completed-consumers (chora-observability, chora-governance,
+    chora-notifications) consume this GENERICALLY — none branch on the
+    discriminant — so the v1 -> v2 repoint is back-compat by construction.
+
+    Wire-compat: every non-discriminant field keeps its v1 proto tag, so a v1
+    reader of a v2 payload sees fields 2-11 unchanged (and ignores 12-14). Proto
+    tag 5 is RESERVED (was `job_type`) and is NEVER reused.
+
+    Per ADR-141 (IMDA dimension labels): envelope.chora_imda_dimension SHOULD be
+    set to "accountability" (D1) for these terminal events.
+
+    Publisher invariants (chora-creation worker):
+      - emitted on terminal status only (SUCCEEDED / FAILED / CANCELLED) — the
+        ACCEPTED / PARTIALLY_ACCEPTED transitions happen later at /accept time
+        and produce QuestionAuthored events instead;
+      - on FAILED, mana_refunded mirrors the up-front debit when the LLM call
+        failed end-to-end (chora-consumption mana_quoter refund pattern);
+      - BINARY-encoded at the publish bridge against the Schema Registry flat
+        schema (proto/events-flat/creation/question/generation_completed.v2.proto).
+
+    Owning team    : Team 1 (Content)
+    Owning domain  : Content Creation (chora_creation database)
+    Surface (admin): A+ Creator mode
+
+    Source-of-truth: docs/architecture/adrs/adr-195 (D1 compose model, D2 agent
+    layer unchanged, D7 .v2 cutover) + proto/events/creation/question.proto
+    + .claude/rules/ddd-enforcement.md
+  contact:
+    name: "Chora Platform Team — Content Track"
+  license:
+    name: "Proprietary"
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  production:
+    host: "pubsub.googleapis.com"
+    protocol: googlepubsub
+    description: "Google Cloud Pub/Sub (production)"
+  emulator:
+    host: "localhost:8085"
+    protocol: googlepubsub
+    description: "Cloud Pub/Sub Emulator (local dev via PUBSUB_EMULATOR_HOST)"
+
+channels:
+  questionGenerationCompleted:
+    address: "chora.creation.question.generation_completed.v2"
+    description: |
+      Pub/Sub topic for QuestionGenerationCompletedV2 events. Topic resides in
+      the centralised platform host project (`chora-489812`) with a paired
+      dead-letter topic `chora.dlq.creation.question.generation_completed.v2`.
+      Schema Registry validates the BINARY Protobuf payload at publish time
+      (flat schema: proto/events-flat/creation/question/generation_completed.v2.proto).
+      Parallel-published alongside the v1 topic during the ADR-195 D7 cutover.
+    messages:
+      questionGenerationCompleted:
+        $ref: "#/components/messages/QuestionGenerationCompletedV2"
+
+operations:
+  publishQuestionGenerationCompleted:
+    action: send
+    channel:
+      $ref: "#/channels/questionGenerationCompleted"
+    summary: "Publish a compose question-generation terminal-status event (v2)"
+    description: |
+      Producer: chora-creation question-generation worker (transactional outbox,
+      BINARY encode at the publish bridge, terminal-status only).
+      Consumers (all GENERIC — none branch on the discriminant):
+        - chora-observability -> job latency + cost + per-tier success metrics
+        - chora-governance    -> per-job IMDA D1 accountability evidence
+        - chora-notifications -> notify the author the job is ready for review
+                                 or has failed and mana has been refunded
+    messages:
+      - $ref: "#/channels/questionGenerationCompleted/messages/questionGenerationCompleted"
+
+components:
+  messages:
+    QuestionGenerationCompletedV2:
+      name: "QuestionGenerationCompletedV2"
+      title: "Question Generation Completed (v2 — compose model)"
+      summary: "A compose question-generation job reached terminal status (replaces the retired job_type discriminant)"
+      description: |
+        Payload fields (proto/events/creation/question.proto ->
+        chora.creation.v1.QuestionGenerationCompletedV2). The leading `f{N}` is
+        the proto field tag. Tag 5 is RESERVED (was `job_type`) and never reused.
+
+          f1  envelope (chora.common.v1.EventEnvelope)
+              Mandatory event envelope — tenant_id, gcid, occurred_at,
+              published_at, traceparent, tracestate, schema_version, IMDA
+              dimension tagging (SHOULD = "accountability").
+
+          f2  job_id (string)
+              UUIDv7 of the compose job row.
+
+          f3  atom_id (string)
+              UUIDv7 of the target LearningAtom.
+
+          f4  author_gcid (string)
+              GCID (UUIDv7) of the author who initiated the job.
+
+          f5  RESERVED (was `job_type`)
+              Retired (ADR-195 D1/D7). Reserved; the compose model rides on
+              operation / intent / input_kind below.
+
+          f6  status (QuestionGenerationJobStatus)
+              Terminal status — typically SUCCEEDED, FAILED, or CANCELLED.
+
+          f7  candidate_count (int32)
+              Number of candidate questions produced by the worker (0 on
+              failure). Available via GET /api/atoms/{atom_id}/question-jobs/{job_id}.
+
+          f8  failure_category (string)
+              On FAILED: short error category — one of "vertex_ai_5xx" |
+              "model_armor_blocked" | "doc_parser_failed" | "timeout" |
+              "quota_exceeded" | "internal_error". Empty on SUCCEEDED.
+
+          f9  failure_message (string)
+              On FAILED: human-readable redacted error message (safe to surface
+              in UI).
+
+          f10 mana_refunded (int32)
+              Units refunded to the author's mana balance on FAILED. 0 on
+              SUCCEEDED; equals the up-front debit when the LLM call failed
+              end-to-end.
+
+          f11 completed_at (google.protobuf.Timestamp)
+              When the worker transitioned the row to its terminal status.
+
+        -- ADR-195 WS7 compose model (replaces the retired job_type discriminant) --
+
+          f12 operation (string)
+              Operation discriminant. Always "compose" (ADR-195 D1).
+
+          f13 intent (string)
+              The compose Intent: "new_question" | "model_answer_fill" |
+              "image_regen".
+
+          f14 input_kind (string)
+              The compose Input kind: "prompt" | "source_files" | "by_hand".
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf;version=3
+      payload:
+        schemaFormat: "application/vnd.google.protobuf;version=3"
+        schema:
+          protoFile: "proto/events/creation/question.proto"
+          messageName: "chora.creation.v1.QuestionGenerationCompletedV2"

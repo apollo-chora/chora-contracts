@@ -1,0 +1,81 @@
+// =============================================================================
+// GENERATED — DO NOT EDIT.
+// Source : events/creation/question.proto message QuestionAuthored
+// Tool   : chora-contracts/internal/protoflatten
+// Why    : GCP Pub/Sub Schema Registry rejects (a) schemas with `import`
+//          statements and (b) schemas with more than one top-level message.
+//          This flat copy contains exactly ONE top-level message;
+//          EventEnvelope + Timestamp + transitive deps are nested inside.
+// Path C : see chora-contracts/CHANGELOG.md and m10-data-plane main.tf.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.creation.v1;
+
+message QuestionAuthored {
+  // Inlined chora.common.v1.EventEnvelope (nested for self-contained schema).
+  message Envelope {
+    string event_id = 1;
+    string idempotency_key = 2;
+    string tenant_id = 3;
+    string gcid = 4;
+    Timestamp occurred_at = 5;
+    Timestamp published_at = 6;
+    string traceparent = 7;
+    string tracestate = 8;
+    string source_project = 9;
+    string source_service = 10;
+    int32 schema_version = 11;
+    string correlation_id = 12;
+    string causation_id = 13;
+    string chora_imda_dimension = 14;
+    string imda_lifecycle_stage = 15;
+  }
+
+  // Inlined google.protobuf.Timestamp (nested; wire-compatible).
+  message Timestamp {
+    int64 seconds = 1;
+    int32 nanos = 2;
+  }
+
+  // Inlined enum dep: QuestionSourceType
+  enum QuestionSourceType {
+    QUESTION_SOURCE_TYPE_UNSPECIFIED = 0;
+    QUESTION_SOURCE_TYPE_MANUAL = 1;
+    QUESTION_SOURCE_TYPE_AI_ASSIST = 2;
+    QUESTION_SOURCE_TYPE_COMMUNITY_ATOM_BANK = 3;
+  }
+
+  // Inlined enum dep: QuestionType
+  enum QuestionType {
+    QUESTION_TYPE_UNSPECIFIED = 0;
+    QUESTION_TYPE_MCQ = 1;
+    QUESTION_TYPE_OE = 2;
+    QUESTION_TYPE_RESERVED_CODE_EXECUTION = 3;
+    QUESTION_TYPE_RESERVED_COMPLETION = 4;
+    QUESTION_TYPE_RESERVED_DRAG_DROP = 5;
+    QUESTION_TYPE_RESERVED_FILL_BLANK = 6;
+    QUESTION_TYPE_RESERVED_MATCHING = 7;
+    QUESTION_TYPE_RESERVED_MULTI_SELECT = 8;
+    QUESTION_TYPE_RESERVED_MULTIMEDIA = 9;
+    QUESTION_TYPE_RESERVED_ORAL = 10;
+    QUESTION_TYPE_RESERVED_ORDERING = 11;
+    QUESTION_TYPE_RESERVED_PEER_GRADED = 12;
+    QUESTION_TYPE_RESERVED_SHORT_ANSWER = 13;
+    QUESTION_TYPE_RESERVED_SIMULATION = 14;
+    QUESTION_TYPE_RESERVED_TABLE_COMPLETION = 15;
+    QUESTION_TYPE_RESERVED_TRUE_FALSE = 16;
+  }
+
+  Envelope envelope = 1;
+  string question_id = 2;
+  string atom_id = 3;
+  QuestionType question_type = 4;
+  QuestionSourceType source_type = 5;
+  string author_gcid = 6;
+  int32 revision_number = 7;
+  string revision_id = 8;
+  string source_job_id = 9;
+  Timestamp authored_at = 10;
+}

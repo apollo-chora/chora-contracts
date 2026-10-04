@@ -1,0 +1,310 @@
+// =============================================================================
+// Chora Governance Service (gRPC)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 5 (D18)
+//   + .claude/rules/ddd-enforcement.md (Governance supporting domain)
+//   + chora-contracts/openapi/governance.yaml
+//   + memory project_chora_governance_ai.md
+//   + ADR-141 (IMDA Dimension Labels Reconciliation against AI Verify + IMDA
+//     MGF v2 Gold Standard).
+//
+// Inter-service gRPC contract for the Governance supporting domain
+// (chora_governance database, Team 3 / Platform). REST surfaces under
+// /api/policies, /api/gatekeeper/evaluate, /api/audit, /api/imda/*,
+// /api/compliance/reports remain the human / admin-facing equivalents;
+// this gRPC contract is for internal service-to-service sync calls only
+// (mTLS via Cloud Service Mesh per CLAUDE.md §4 protocol strategy).
+//
+// HTTP→gRPC RPC mapping (G-FULL Wave-1 closes the systemic ADR-140
+// violation tracked in docs/m13/grpc-mass-remediation-2026-05-16.md):
+//
+//   POST /api/policies              -> CreatePolicy
+//   GET  /api/policies/{id}         -> GetPolicy
+//   GET  /api/policies              -> ListPolicies
+//   POST /api/gatekeeper/evaluate   -> Evaluate
+//   GET  /api/audit                 -> QueryAuditEvents
+//   POST /api/imda/assessments      -> RecordAssessment
+//   GET  /api/imda/dashboard        -> GetIMDADashboard
+//   POST /api/compliance/reports    -> GenerateComplianceReport
+//   GET  /governance/{tenant_id}    -> GetIMDADashboard (Phase 6 alias —
+//                                      same response shape; chora-gateway
+//                                      HTTPUpstream.GetGovernance maps here).
+//
+// Per ADR-141 the canonical IMDA dimension labels are accountability (D1) /
+// transparency (D2) / safety_and_robustness (D3) / fairness_and_human_oversight
+// (D4); deprecated v1 aliases accepted via imda.Canonicalise() — the proto
+// enum carries ONLY canonical labels because servers persist canonical form.
+//
+// Append-only invariant: AuditEvent is append-only — NO UpdateAuditEvent /
+// DeleteAuditEvent RPC by design; gRPC reads only.
+//
+// Deployed in chora-489812 namespace `governance` (Team 3 Platform pool).
+// mTLS via Cloud Service Mesh; SPIFFE identity in mesh; W3C trace context
+// propagated through gRPC metadata. Authorization scoped via
+// chora-infra/k8s/services/chora-governance/authz-allow-governance-grpc.yaml.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.services.governance.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/governance/v1;governancev1";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+// -----------------------------------------------------------------------------
+// Service
+// -----------------------------------------------------------------------------
+
+service Governance {
+  // PolicyRule management
+  rpc CreatePolicy(CreatePolicyRequest) returns (CreatePolicyResponse);
+  rpc GetPolicy(GetPolicyRequest) returns (GetPolicyResponse);
+  rpc ListPolicies(ListPoliciesRequest) returns (ListPoliciesResponse);
+
+  // Synchronous Gatekeeper evaluation. Always emits an AuditEvent.
+  rpc Evaluate(EvaluateRequest) returns (EvaluateResponse);
+
+  // Append-only audit read-side.
+  rpc QueryAuditEvents(QueryAuditEventsRequest) returns (QueryAuditEventsResponse);
+
+  // IMDA 4-dimension assessment + dashboard (ADR-141 canonical labels).
+  rpc RecordAssessment(RecordAssessmentRequest) returns (RecordAssessmentResponse);
+  rpc GetIMDADashboard(GetIMDADashboardRequest) returns (GetIMDADashboardResponse);
+
+  // Derived compliance report (audit + IMDA snapshot).
+  rpc GenerateComplianceReport(GenerateComplianceReportRequest) returns (GenerateComplianceReportResponse);
+}
+
+// -----------------------------------------------------------------------------
+// Shared enums
+// -----------------------------------------------------------------------------
+
+enum IMDADimension {
+  IMDA_DIMENSION_UNSPECIFIED = 0;
+  IMDA_DIMENSION_ACCOUNTABILITY = 1;                // D1
+  IMDA_DIMENSION_TRANSPARENCY = 2;                  // D2
+  IMDA_DIMENSION_SAFETY_AND_ROBUSTNESS = 3;         // D3
+  IMDA_DIMENSION_FAIRNESS_AND_HUMAN_OVERSIGHT = 4;  // D4
+}
+
+enum PolicyEnforcementMode {
+  POLICY_ENFORCEMENT_MODE_UNSPECIFIED = 0;
+  POLICY_ENFORCEMENT_MODE_ALLOW = 1;
+  POLICY_ENFORCEMENT_MODE_WARN = 2;
+  POLICY_ENFORCEMENT_MODE_DENY = 3;
+}
+
+enum PolicyStatus {
+  POLICY_STATUS_UNSPECIFIED = 0;
+  POLICY_STATUS_ACTIVE = 1;
+  POLICY_STATUS_INACTIVE = 2;
+}
+
+enum PolicyConditionOp {
+  POLICY_CONDITION_OP_UNSPECIFIED = 0;
+  POLICY_CONDITION_OP_EQUALS = 1;
+  POLICY_CONDITION_OP_NOT_EQUALS = 2;
+  POLICY_CONDITION_OP_IN = 3;
+}
+
+enum AuditDecision {
+  AUDIT_DECISION_UNSPECIFIED = 0;
+  AUDIT_DECISION_PERMITTED = 1;
+  AUDIT_DECISION_DENIED = 2;
+}
+
+// -----------------------------------------------------------------------------
+// Common message types
+// -----------------------------------------------------------------------------
+
+message PolicyCondition {
+  string field = 1;
+  PolicyConditionOp op = 2;
+  google.protobuf.Value value = 3;
+}
+
+message PolicyRule {
+  string rule_id = 1;
+  string name = 2;
+  string tenant_id = 3;
+  PolicyEnforcementMode enforcement_mode = 4;
+  repeated PolicyCondition conditions = 5;
+  int32 version = 6;
+  PolicyStatus status = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+}
+
+message IMDADimensionAssessment {
+  string assessment_id = 1;
+  string tenant_id = 2;
+  IMDADimension dimension = 3;
+  int32 score = 4;
+  repeated string indicators = 5;
+  google.protobuf.Timestamp assessed_at = 6;
+  string assessor_gcid = 7;
+}
+
+message AuditEvent {
+  string event_id = 1;
+  string tenant_id = 2;
+  string gcid = 3;
+  string agid = 4;
+  string action = 5;
+  string resource = 6;
+  AuditDecision decision = 7;
+  string reason = 8;
+  string subject_type = 9;
+  string subject_id = 10;
+  string actor_gcid = 11;
+  string before = 12;
+  string after = 13;
+  string traceparent = 14;
+  string tracestate = 15;
+  google.protobuf.Timestamp created_at = 16;
+  string prev_hash = 17;
+  string entry_hash = 18;
+}
+
+message ComplianceReport {
+  string report_id = 1;
+  string tenant_id = 2;
+  google.protobuf.Timestamp generated_at = 3;
+  int32 audit_event_count = 4;
+  int32 audit_denied_count = 5;
+  repeated IMDADimensionAssessment imda_dashboard = 6;
+  repeated AuditEvent recent_audits = 7;
+}
+
+// -----------------------------------------------------------------------------
+// CreatePolicy RPC
+// -----------------------------------------------------------------------------
+
+message CreatePolicyRequest {
+  string name = 1;
+  string tenant_id = 2;
+  PolicyEnforcementMode enforcement_mode = 3;
+  repeated PolicyCondition conditions = 4;
+  bool global = 5;
+}
+
+message CreatePolicyResponse {
+  PolicyRule rule = 1;
+}
+
+// -----------------------------------------------------------------------------
+// GetPolicy RPC
+// -----------------------------------------------------------------------------
+
+message GetPolicyRequest {
+  string rule_id = 1;
+}
+
+message GetPolicyResponse {
+  PolicyRule rule = 1;
+}
+
+// -----------------------------------------------------------------------------
+// ListPolicies RPC
+// -----------------------------------------------------------------------------
+
+message ListPoliciesRequest {
+  string tenant_id = 1;
+  string cursor = 2;
+  int32 limit = 3;
+  int32 offset = 4;
+}
+
+message ListPoliciesResponse {
+  repeated PolicyRule rules = 1;
+  int32 total = 2;
+  string next_cursor = 3;
+}
+
+// -----------------------------------------------------------------------------
+// Evaluate RPC
+// -----------------------------------------------------------------------------
+
+message EvaluateRequest {
+  string tenant_id = 1;
+  string gcid = 2;
+  string agid = 3;
+  string action = 4;
+  string resource = 5;
+  google.protobuf.Struct context = 6;
+  string traceparent = 7;
+  string tracestate = 8;
+}
+
+message EvaluateResponse {
+  AuditDecision decision = 1;
+  bool warned = 2;
+  string reason = 3;
+  repeated PolicyRule matched_rules = 4;
+  string audit_event_id = 5;
+}
+
+// -----------------------------------------------------------------------------
+// QueryAuditEvents RPC
+// -----------------------------------------------------------------------------
+
+message QueryAuditEventsRequest {
+  string tenant_id = 1;
+  string subject_type = 2;
+  string subject_id = 3;
+  google.protobuf.Timestamp from = 4;
+  google.protobuf.Timestamp to = 5;
+  string cursor = 6;
+  int32 limit = 7;
+  int32 offset = 8;
+}
+
+message QueryAuditEventsResponse {
+  repeated AuditEvent events = 1;
+  int32 total = 2;
+  string next_cursor = 3;
+}
+
+// -----------------------------------------------------------------------------
+// RecordAssessment RPC
+// -----------------------------------------------------------------------------
+
+message RecordAssessmentRequest {
+  string tenant_id = 1;
+  IMDADimension dimension = 2;
+  int32 score = 3;
+  repeated string indicators = 4;
+  string assessor_gcid = 5;
+}
+
+message RecordAssessmentResponse {
+  IMDADimensionAssessment assessment = 1;
+}
+
+// -----------------------------------------------------------------------------
+// GetIMDADashboard RPC
+// -----------------------------------------------------------------------------
+
+message GetIMDADashboardRequest {
+  string tenant_id = 1;
+}
+
+message GetIMDADashboardResponse {
+  string tenant_id = 1;
+  repeated IMDADimensionAssessment dimensions = 2;
+}
+
+// -----------------------------------------------------------------------------
+// GenerateComplianceReport RPC
+// -----------------------------------------------------------------------------
+
+message GenerateComplianceReportRequest {
+  string tenant_id = 1;
+}
+
+message GenerateComplianceReportResponse {
+  ComplianceReport report = 1;
+}

@@ -1,0 +1,769 @@
+openapi: "3.2.0"
+info:
+  title: Chora Sharing Admin API
+  version: "1.0.0"
+  description: |
+    Admin moderation REST API for the Content Sharing domain.
+
+    Surfaces: O+ Observability+ (moderation queue / governance dashboards) +
+    H+ Hub+ (tenant-scoped community oversight). C+ Connect+ is the
+    learner-facing surface; learner reads use the GraphQL schema in
+    `graphql/sharing.graphql` (see ADR pattern: learner reads = GraphQL,
+    admin CRUD = REST).
+
+    Auth: Identity Platform JWT (Bearer). All routes are tenant-scoped via
+    the `X-Tenant-ID` header. Endpoints require an entitled admin /
+    moderator role; RBAC enforced server-side.
+
+    Owning team   : Team 1 (Content)
+    Owning domain : Content Sharing (chora_sharing database)
+    Topic prefix  : chora.sharing.*
+
+    AP-01: This contract exists BEFORE implementation.
+  contact:
+    name: Chora Platform Team — Content Track
+  license:
+    name: Proprietary
+
+servers:
+  - url: https://api.chora.io
+    description: Production
+  - url: http://localhost:8094
+    description: Local development
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Posts
+    description: Post moderation (flag, remove, restore)
+  - name: Reactions
+    description: Reaction reporting + audit (admin lookup; rarely actioned)
+  - name: Duels
+    description: Duel admin lookup + dispute review
+  - name: Leaderboards
+    description: Leaderboard administration (snapshot, season rollover)
+  - name: FollowGraph
+    description: Follow-graph reports + safety review
+  - name: Health
+    description: Service health
+
+paths:
+  # ---------------------------------------------------------------------------
+  # Health
+  # ---------------------------------------------------------------------------
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Service health check
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  # ---------------------------------------------------------------------------
+  # Posts — moderation
+  # ---------------------------------------------------------------------------
+  /api/v1/posts/{postId}/flag:
+    post:
+      operationId: flagPost
+      summary: Flag a Post for moderator review
+      description: |
+        Records a flag against a Post. Publishes
+        `chora.sharing.post.flagged.v1`. Does NOT remove the Post (use
+        /posts/{postId}/remove for that). Idempotent on
+        (post_id, flagged_by_gcid, flag_reason).
+      tags: [Posts]
+      parameters:
+        - $ref: "#/components/parameters/PostID"
+        - $ref: "#/components/parameters/X-Tenant-ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FlagPostRequest"
+      responses:
+        "201":
+          description: Post flagged
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FlagResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/posts/{postId}/remove:
+    post:
+      operationId: removePost
+      summary: Soft-delete a Post (moderator action)
+      description: |
+        Performs a moderator-authored soft-delete (`deleted_at` set).
+        Publishes `chora.sharing.post.deleted.v1`. Per ddd-enforcement
+        invariant #5 this is NEVER a hard delete — audit + reaction
+        history are preserved.
+      tags: [Posts]
+      parameters:
+        - $ref: "#/components/parameters/PostID"
+        - $ref: "#/components/parameters/X-Tenant-ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RemovePostRequest"
+      responses:
+        "200":
+          description: Post removed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminPostResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---------------------------------------------------------------------------
+  # Reactions — reporting
+  # ---------------------------------------------------------------------------
+  /api/v1/reactions:
+    get:
+      operationId: listReactions
+      summary: List Reactions (admin reporting)
+      description: |
+        Cursor-paginated list of reactions for an audit / abuse-pattern
+        review. Filterable by post, actor, reaction type, time window.
+      tags: [Reactions]
+      parameters:
+        - $ref: "#/components/parameters/X-Tenant-ID"
+        - name: post_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: actor_gcid
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: reaction_type
+          in: query
+          schema:
+            $ref: "#/components/schemas/ReactionType"
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: cursor
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 200
+      responses:
+        "200":
+          description: Reaction list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReactionListResponse"
+
+  # ---------------------------------------------------------------------------
+  # Duels — admin lookup
+  # ---------------------------------------------------------------------------
+  /api/v1/duels:
+    get:
+      operationId: listDuels
+      summary: Admin lookup of Duels
+      description: |
+        Cursor-paginated lookup of duels by status / participant /
+        time window. Surfaced in O+ for dispute review and abuse detection.
+      tags: [Duels]
+      parameters:
+        - $ref: "#/components/parameters/X-Tenant-ID"
+        - name: status
+          in: query
+          description: One of INITIATED / ACCEPTED / DECLINED / COMPLETED / EXPIRED
+          schema:
+            type: string
+            enum: [INITIATED, ACCEPTED, DECLINED, COMPLETED, EXPIRED]
+        - name: participant_gcid
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: cursor
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 25
+            minimum: 1
+            maximum: 100
+      responses:
+        "200":
+          description: Duel list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DuelListResponse"
+
+  /api/v1/duels/{duelId}:
+    get:
+      operationId: getDuel
+      summary: Admin view of a single Duel
+      tags: [Duels]
+      parameters:
+        - $ref: "#/components/parameters/DuelID"
+        - $ref: "#/components/parameters/X-Tenant-ID"
+      responses:
+        "200":
+          description: Duel details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminDuelResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---------------------------------------------------------------------------
+  # Leaderboards — admin
+  # ---------------------------------------------------------------------------
+  /api/v1/leaderboards/{leaderboardId}:
+    get:
+      operationId: getLeaderboard
+      summary: Admin view of a Leaderboard snapshot
+      description: |
+        Returns the current top-N snapshot (admin width up to 200, vs.
+        50 in the learner-facing GraphQL view).
+      tags: [Leaderboards]
+      parameters:
+        - $ref: "#/components/parameters/LeaderboardID"
+        - $ref: "#/components/parameters/X-Tenant-ID"
+        - name: season_id
+          in: query
+          description: Optional season pin; defaults to active season.
+          schema:
+            type: string
+            format: uuid
+        - name: top_n
+          in: query
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 200
+      responses:
+        "200":
+          description: Leaderboard snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminLeaderboardResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    post:
+      operationId: rolloverLeaderboardSeason
+      summary: Force a Leaderboard season rollover (admin)
+      description: |
+        Closes the active season and opens a new one. Idempotent on
+        (leaderboard_id, requested_new_season_id). Publishes
+        `chora.sharing.leaderboard.season_rolled.v1`.
+      tags: [Leaderboards]
+      parameters:
+        - $ref: "#/components/parameters/LeaderboardID"
+        - $ref: "#/components/parameters/X-Tenant-ID"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RolloverSeasonRequest"
+      responses:
+        "200":
+          description: Season rolled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminLeaderboardResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Rollover already in progress
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ---------------------------------------------------------------------------
+  # Follow graph — reports
+  # ---------------------------------------------------------------------------
+  /api/v1/follow-graph/reports:
+    get:
+      operationId: getFollowGraphReport
+      summary: Follow-graph admin report
+      description: |
+        Aggregate report of follow / block edges scoped to a target GCID.
+        Surfaces patterns relevant to safety review (e.g., mass-block,
+        fan-out anomaly, brigading).
+      tags: [FollowGraph]
+      parameters:
+        - $ref: "#/components/parameters/X-Tenant-ID"
+        - name: subject_gcid
+          in: query
+          required: true
+          description: GCID of the subject (followee for incoming, follower for outgoing).
+          schema:
+            type: string
+            format: uuid
+        - name: direction
+          in: query
+          description: "incoming = subject is followee; outgoing = subject is follower."
+          schema:
+            type: string
+            enum: [incoming, outgoing]
+            default: incoming
+        - name: include_blocks
+          in: query
+          schema:
+            type: boolean
+            default: true
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+            minimum: 1
+            maximum: 1000
+      responses:
+        "200":
+          description: Follow graph report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FollowGraphReportResponse"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    X-Tenant-ID:
+      name: X-Tenant-ID
+      in: header
+      required: true
+      description: Tenant scope for the request (UUIDv7).
+      schema:
+        type: string
+        format: uuid
+    PostID:
+      name: postId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    DuelID:
+      name: duelId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    LeaderboardID:
+      name: leaderboardId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unauthorized:
+      description: Authentication required
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status, service]
+      properties:
+        status:
+          type: string
+          example: "ok"
+        service:
+          type: string
+          example: "chora-sharing-admin"
+
+    ErrorResponse:
+      type: object
+      required: [error, code]
+      properties:
+        error:
+          type: string
+        code:
+          type: string
+        correlation_id:
+          type: string
+          nullable: true
+
+    # -- Shared enums --
+    PostVisibility:
+      type: string
+      enum: [PUBLIC, FOLLOWERS_ONLY, TENANT_ONLY, GROUP_ONLY]
+
+    ReactionType:
+      type: string
+      enum: [LIKE, INSIGHTFUL, CURIOUS, CHEER, CELEBRATE]
+
+    LeaderboardScope:
+      type: string
+      enum: [TENANT, COURSE, COHORT, GLOBAL]
+
+    DuelStatus:
+      type: string
+      enum: [INITIATED, ACCEPTED, DECLINED, COMPLETED, EXPIRED]
+
+    # -- Post moderation --
+    FlagPostRequest:
+      type: object
+      required: [flag_reason]
+      properties:
+        flag_reason:
+          type: string
+          description: |
+            UPPER_SNAKE_CASE taxonomy aligned with ContentPolicyViolationLog.
+            Examples: HARASSMENT, SPAM, PII_LEAK, HATE_SPEECH, OFF_TOPIC,
+            MISINFORMATION, GUARDRAIL_AUTO.
+          example: HARASSMENT
+        flag_detail:
+          type: string
+          maxLength: 1024
+          nullable: true
+
+    FlagResponse:
+      type: object
+      required: [post_id, flagged_at, flag_reason]
+      properties:
+        post_id:
+          type: string
+          format: uuid
+        flagged_by_gcid:
+          type: string
+          format: uuid
+          nullable: true
+        flag_reason:
+          type: string
+        flag_detail:
+          type: string
+          nullable: true
+        flagged_at:
+          type: string
+          format: date-time
+
+    RemovePostRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          maxLength: 512
+          description: Free-text moderator rationale.
+
+    AdminPostResponse:
+      type: object
+      required: [post_id, author_gcid, visibility, created_at]
+      properties:
+        post_id:
+          type: string
+          format: uuid
+        author_gcid:
+          type: string
+          format: uuid
+        body:
+          type: string
+        media_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+        visibility:
+          $ref: "#/components/schemas/PostVisibility"
+        parent_post_id:
+          type: string
+          format: uuid
+          nullable: true
+        group_id:
+          type: string
+          format: uuid
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+        deleted_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    # -- Reaction reporting --
+    AdminReactionResponse:
+      type: object
+      required: [reaction_id, target_post_id, actor_gcid, reaction_type, created_at]
+      properties:
+        reaction_id:
+          type: string
+          format: uuid
+        target_post_id:
+          type: string
+          format: uuid
+        actor_gcid:
+          type: string
+          format: uuid
+        reaction_type:
+          $ref: "#/components/schemas/ReactionType"
+        created_at:
+          type: string
+          format: date-time
+        deleted_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    ReactionListResponse:
+      type: object
+      required: [reactions]
+      properties:
+        reactions:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminReactionResponse"
+        next_cursor:
+          type: string
+          nullable: true
+        has_next:
+          type: boolean
+
+    # -- Duel admin --
+    AdminDuelResponse:
+      type: object
+      required: [duel_id, challenger_gcid, opponent_gcid, status]
+      properties:
+        duel_id:
+          type: string
+          format: uuid
+        challenger_gcid:
+          type: string
+          format: uuid
+        opponent_gcid:
+          type: string
+          format: uuid
+        atom_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+        wager_skin_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            Optional DigitalSkin wager. DigitalSkins are EARNED-only —
+            never purchasable. Empty = no-stake friendly duel.
+        status:
+          $ref: "#/components/schemas/DuelStatus"
+        winner_gcid:
+          type: string
+          format: uuid
+          nullable: true
+        score_challenger:
+          type: number
+          format: float
+          nullable: true
+        score_opponent:
+          type: number
+          format: float
+          nullable: true
+        initiated_at:
+          type: string
+          format: date-time
+          nullable: true
+        accepted_at:
+          type: string
+          format: date-time
+          nullable: true
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+        expired_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    DuelListResponse:
+      type: object
+      required: [duels]
+      properties:
+        duels:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminDuelResponse"
+        next_cursor:
+          type: string
+          nullable: true
+        has_next:
+          type: boolean
+
+    # -- Leaderboard admin --
+    LeaderboardEntry:
+      type: object
+      required: [gcid, score, rank]
+      properties:
+        gcid:
+          type: string
+          format: uuid
+        score:
+          type: integer
+          format: int64
+        rank:
+          type: integer
+
+    AdminLeaderboardResponse:
+      type: object
+      required: [leaderboard_id, scope, season_id, top_entries, updated_at]
+      properties:
+        leaderboard_id:
+          type: string
+          format: uuid
+        scope:
+          $ref: "#/components/schemas/LeaderboardScope"
+        scope_id:
+          type: string
+          format: uuid
+          nullable: true
+        season_id:
+          type: string
+          format: uuid
+        top_entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/LeaderboardEntry"
+        updated_at:
+          type: string
+          format: date-time
+
+    RolloverSeasonRequest:
+      type: object
+      properties:
+        new_season_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            Optional override for the new season UUID. If omitted, the
+            server allocates a UUIDv7. Used for idempotent rollover
+            requests from external schedulers.
+
+    # -- Follow graph --
+    FollowGraphReportResponse:
+      type: object
+      required: [subject_gcid, direction, edges]
+      properties:
+        subject_gcid:
+          type: string
+          format: uuid
+        direction:
+          type: string
+          enum: [incoming, outgoing]
+        edges:
+          type: array
+          items:
+            $ref: "#/components/schemas/FollowEdge"
+        block_count:
+          type: integer
+          description: Number of block edges in scope (informational).
+        anomaly_flags:
+          type: array
+          description: |
+            Heuristic anomaly markers raised by the safety scoring job
+            (e.g., MASS_BLOCK, FAN_OUT_SPIKE, BRIGADING_PATTERN).
+          items:
+            type: string
+
+    FollowEdge:
+      type: object
+      required: [follower_gcid, followee_gcid, kind, created_at]
+      properties:
+        follower_gcid:
+          type: string
+          format: uuid
+        followee_gcid:
+          type: string
+          format: uuid
+        kind:
+          type: string
+          enum: [FOLLOW, BLOCK]
+        created_at:
+          type: string
+          format: date-time
+        removed_at:
+          type: string
+          format: date-time
+          nullable: true

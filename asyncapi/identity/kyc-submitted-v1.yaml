@@ -1,0 +1,64 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Identity — KycSubmitted
+  version: 1.0.0
+  description: |
+    Published when a user submits KYC documents (manual_doc) or initiates
+    a Singpass / SkillsFuture flow. For singpass / skillsfuture, the
+    SUBMITTED state typically transitions immediately to VERIFIED on
+    provider callback; manual_doc holds in SUBMITTED until reviewer action.
+
+    - Domain: Identity (`chora_identity` DB)
+    - Topic: `chora.identity.kyc.submitted.v1`
+    - Source proto: `proto/events/identity/kyc.proto`
+       message `chora.identity.v1.KycSubmitted`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  kycSubmitted:
+    address: chora.identity.kyc.submitted.v1
+    messages:
+      kycSubmitted:
+        $ref: '#/components/messages/KycSubmitted'
+
+operations:
+  publishKycSubmitted:
+    action: send
+    channel:
+      $ref: '#/channels/kycSubmitted'
+    messages:
+      - $ref: '#/channels/kycSubmitted/messages/kycSubmitted'
+
+  consumeKycSubmitted:
+    action: receive
+    channel:
+      $ref: '#/channels/kycSubmitted'
+    description: |
+      Consumers: Notifications (submission acknowledgement),
+      Observability (KYC funnel metrics + provider mix), Governance
+      (compliance audit log).
+    messages:
+      - $ref: '#/channels/kycSubmitted/messages/kycSubmitted'
+
+components:
+  messages:
+    KycSubmitted:
+      name: KycSubmitted
+      title: KYC Submitted
+      summary: A KYC verification has been submitted
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/identity/kyc.proto#/chora.identity.v1.KycSubmitted'

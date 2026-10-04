@@ -1,0 +1,63 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Identity — UserSubscriptionCancelled
+  version: 1.0.0
+  description: |
+    Published when a per-user subscription is cancelled (user-initiated
+    or system non-payment after dunning). Mana balance is PRESERVED — see
+    ADR-142 prepaid-credit semantics. NO UserManaForfeited event exists.
+
+    - Domain: Identity (`chora_identity` DB)
+    - Topic: `chora.identity.user_subscription.cancelled.v1`
+    - Source proto: `proto/events/identity/user_subscription.proto`
+       message `chora.identity.v1.UserSubscriptionCancelled`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  userSubscriptionCancelled:
+    address: chora.identity.user_subscription.cancelled.v1
+    messages:
+      userSubscriptionCancelled:
+        $ref: '#/components/messages/UserSubscriptionCancelled'
+
+operations:
+  publishUserSubscriptionCancelled:
+    action: send
+    channel:
+      $ref: '#/channels/userSubscriptionCancelled'
+    messages:
+      - $ref: '#/channels/userSubscriptionCancelled/messages/userSubscriptionCancelled'
+
+  consumeUserSubscriptionCancelled:
+    action: receive
+    channel:
+      $ref: '#/channels/userSubscriptionCancelled'
+    description: |
+      Consumers: Notifications (cancellation confirmation + mana-persists
+      reminder), Observability (churn KPI / cancel-reason mix),
+      AI Kernel (refresh per-user entitlement budgets at effective_at).
+    messages:
+      - $ref: '#/channels/userSubscriptionCancelled/messages/userSubscriptionCancelled'
+
+components:
+  messages:
+    UserSubscriptionCancelled:
+      name: UserSubscriptionCancelled
+      title: User Subscription Cancelled
+      summary: A per-user subscription has been cancelled
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/identity/user_subscription.proto#/chora.identity.v1.UserSubscriptionCancelled'

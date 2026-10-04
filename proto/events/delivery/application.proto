@@ -1,0 +1,270 @@
+// =============================================================================
+// chora.delivery.v1 — Course Application aggregate events
+// =============================================================================
+//
+// Source-of-truth:
+//   - docs/design/ux_course_application.md (7-screen application UX)
+//   - docs/m13/audit-content-fillgaps.md §3.3 (Application aggregate gap)
+//   - Phyllis Comic-mode Application storyline (Singpass MyInfo retrieve,
+//     Stripe Elements payment, tax invoice, SkillsFutures funding lines)
+//   - .claude/skills/domain-content-delivery/SKILL.md
+//
+// Owning domain : Content Delivery (chora_delivery database)
+// Owning team   : Team 2 (Delivery)
+// Topic prefix  : chora.delivery.application.*
+// Surface       : R+ Rhythm+ admin queue + A+ learner-facing application UX
+//
+// State machine: Draft -> Submitted -> UnderReview -> OfferMade ->
+//                Accepted/Withdrawn -> Paid -> Enrolled
+//
+// Withdrawal allowed at Draft / Submitted / UnderReview / OfferMade /
+// Accepted (pre-payment). After Paid, withdrawal becomes a refund flow
+// (chora.tenancy.billing.refund_issued.v1) — NOT modeled here.
+//
+// Cross-domain references (UUID, no FK):
+//   - applicant_gcid : Identity
+//   - course_id      : Delivery (this domain)
+//   - reviewer_gcid  : Identity
+//   - stripe_payment_intent_id : Tenancy / Stripe (string, not UUID)
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.delivery.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/delivery/v1;deliveryv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// ApplicationStatus — full state machine.
+// -----------------------------------------------------------------------------
+enum ApplicationStatus {
+  APPLICATION_STATUS_UNSPECIFIED = 0;
+  APPLICATION_STATUS_DRAFT = 1;
+  APPLICATION_STATUS_SUBMITTED = 2;
+  APPLICATION_STATUS_UNDER_REVIEW = 3;
+  APPLICATION_STATUS_OFFER_MADE = 4;
+  APPLICATION_STATUS_ACCEPTED = 5;
+  APPLICATION_STATUS_WITHDRAWN = 6;
+  APPLICATION_STATUS_PAID = 7;
+  APPLICATION_STATUS_ENROLLED = 8;
+  APPLICATION_STATUS_REJECTED = 9;       // Reviewer rejection (terminal, not withdrawal)
+}
+
+// -----------------------------------------------------------------------------
+// FundingSource — tax-invoice line-item attribution.
+// -----------------------------------------------------------------------------
+//
+// SkillsFutures (SG SSG) is one of several funding sources that may apply
+// to a single course application. Tax invoice lines reflect each.
+enum FundingSource {
+  FUNDING_SOURCE_UNSPECIFIED = 0;
+  FUNDING_SOURCE_LEARNER_PAID = 1;       // Out-of-pocket
+  FUNDING_SOURCE_SKILLSFUTURES = 2;      // SG SSG
+  FUNDING_SOURCE_EMPLOYER_SPONSORED = 3;
+  FUNDING_SOURCE_TENANT_SUBSIDY = 4;     // Tenant pays via TenantManaPool
+  FUNDING_SOURCE_SCHOLARSHIP = 5;
+}
+
+// -----------------------------------------------------------------------------
+// ApplicationSubmitted — chora.delivery.application.submitted.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a learner submits a Course Application from Draft. Marks
+// Draft -> Submitted. Triggers reviewer queue placement + applicant
+// confirmation email.
+message ApplicationSubmitted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — Application aggregate root identifier.
+  string application_id = 2;
+
+  // Cross-domain reference to chora_identity.users (UUID, no FK).
+  string applicant_gcid = 3;
+
+  // Cross-domain reference within chora_delivery.courses (UUID, no FK in
+  // multi-DB sense — this IS the same DB, but documented for parity).
+  string course_id = 4;
+
+  // Optional Singpass MyInfo retrieval timestamp — non-empty if applicant
+  // pre-populated profile data via chora-identity Singpass adapter.
+  google.protobuf.Timestamp myinfo_retrieved_at = 5;
+
+  // GCS URI of submitted application document(s) (resume, certifications,
+  // etc.). Opaque path (no PII in URI).
+  string supporting_docs_uri = 6;
+
+  google.protobuf.Timestamp submitted_at = 7;
+}
+
+// -----------------------------------------------------------------------------
+// ApplicationOfferMade — chora.delivery.application.offer_made.v1
+// -----------------------------------------------------------------------------
+//
+// Published when the reviewing instructor / admin makes an offer to the
+// applicant. Marks UnderReview -> OfferMade. Triggers applicant offer-letter
+// email + offer-acceptance UX availability.
+message ApplicationOfferMade {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string application_id = 2;
+  string applicant_gcid = 3;
+  string course_id = 4;
+
+  // GCID of the reviewing instructor / admin.
+  string reviewer_gcid = 5;
+
+  // Offer expiration timestamp — applicant must accept before this.
+  google.protobuf.Timestamp offer_expires_at = 6;
+
+  // Quoted course price in micros at offer time (for applicant clarity).
+  int64 price_micros = 7;
+
+  // ISO 4217 currency code.
+  string currency = 8;
+
+  // Free-form offer notes (max 2048 chars). Plain text only.
+  string notes = 9;
+
+  google.protobuf.Timestamp offered_at = 10;
+}
+
+// -----------------------------------------------------------------------------
+// ApplicationAccepted — chora.delivery.application.accepted.v1
+// -----------------------------------------------------------------------------
+//
+// Published when applicant accepts the offer. Marks OfferMade -> Accepted.
+// Triggers payment intent creation (chora-tenancy Stripe Elements server-side
+// PaymentIntent). Concurrent with chora.identity.role.granted.v1 for the
+// learner role projection.
+message ApplicationAccepted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string application_id = 2;
+  string applicant_gcid = 3;
+  string course_id = 4;
+
+  google.protobuf.Timestamp accepted_at = 5;
+}
+
+// -----------------------------------------------------------------------------
+// ApplicationWithdrawn — chora.delivery.application.withdrawn.v1
+// -----------------------------------------------------------------------------
+//
+// Published when the applicant withdraws (pre-payment). Marks any pre-Paid
+// state -> Withdrawn (terminal). Distinct from REJECTED (reviewer-side
+// terminal).
+message ApplicationWithdrawn {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string application_id = 2;
+  string applicant_gcid = 3;
+  string course_id = 4;
+
+  // Status the application was in when withdrawn (audit dimension).
+  ApplicationStatus prior_status = 5;
+
+  // Free-form withdrawal reason (max 1024 chars).
+  string reason = 6;
+
+  google.protobuf.Timestamp withdrawn_at = 7;
+}
+
+// -----------------------------------------------------------------------------
+// ApplicationPaid — chora.delivery.application.paid.v1
+// -----------------------------------------------------------------------------
+//
+// Published when the Stripe PaymentIntent for the application has been
+// CAPTURED. Marks Accepted -> Paid. Carries the funding-source breakdown
+// for tax-invoice generation.
+//
+// Triggers tax-invoice PDF generation + email-with-attachment to applicant.
+message ApplicationPaid {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string application_id = 2;
+  string applicant_gcid = 3;
+  string course_id = 4;
+
+  // Stripe PaymentIntent ID (idempotency anchor; mirrors
+  // chora.tenancy.tenant.payment_captured.v1.stripe_payment_intent_id).
+  string stripe_payment_intent_id = 5;
+
+  // Total captured in micros.
+  int64 total_micros = 6;
+
+  string currency = 7;
+
+  // Funding-source breakdown (multiple sources may be combined per line).
+  // Sum of FundingLine.amount_micros MUST equal total_micros.
+  repeated FundingLine funding_lines = 8;
+
+  google.protobuf.Timestamp paid_at = 9;
+}
+
+// -----------------------------------------------------------------------------
+// FundingLine — single tax-invoice line item by funding source.
+// -----------------------------------------------------------------------------
+message FundingLine {
+  FundingSource source = 1;
+
+  // Amount in micros attributed to this funding source. Always >= 0.
+  int64 amount_micros = 2;
+
+  // Optional reference (e.g., SkillsFutures claim ID, employer purchase
+  // order number, scholarship grant ID).
+  string reference_id = 3;
+}
+
+// -----------------------------------------------------------------------------
+// ApplicationEnrolled — chora.delivery.application.enrolled.v1
+// -----------------------------------------------------------------------------
+//
+// Published when the application closes successfully — Paid -> Enrolled.
+// Concurrent with chora.delivery.enrollment.created.v1 (enrolment is the
+// downstream side-effect; this event closes the application's lifecycle).
+//
+// Distinct from EnrollmentCreated:
+//   - ApplicationEnrolled = "the Application aggregate reached terminal Enrolled"
+//   - EnrollmentCreated   = "a course Enrolment row was inserted in chora_delivery.enrollments"
+// They share course_id + applicant_gcid but lifecycle membership differs.
+message ApplicationEnrolled {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string application_id = 2;
+  string applicant_gcid = 3;
+  string course_id = 4;
+
+  // Cross-reference to the chora_delivery.enrollments row that was inserted
+  // (UUIDv7).
+  string enrollment_id = 5;
+
+  google.protobuf.Timestamp enrolled_at = 6;
+}
+
+// -----------------------------------------------------------------------------
+// ApplicationRejected — chora.delivery.application.rejected.v1
+// -----------------------------------------------------------------------------
+//
+// Published when the reviewer rejects an application (UnderReview ->
+// Rejected, terminal). Distinct from Withdrawn (applicant-side terminal).
+// Triggers applicant rejection email.
+message ApplicationRejected {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string application_id = 2;
+  string applicant_gcid = 3;
+  string course_id = 4;
+
+  // GCID of the reviewing instructor / admin.
+  string reviewer_gcid = 5;
+
+  // Free-form rejection reason. Auditor-visible (max 2048 chars).
+  string reason = 6;
+
+  google.protobuf.Timestamp rejected_at = 7;
+}

@@ -1,0 +1,104 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Closure — Per-Domain Account Pseudonymised (ack family)
+  version: 1.0.0
+  description: |
+    Per-domain pseudonymisation acknowledgement back to the Closure
+    Orchestrator — the CANONICAL ack topic family (CHO-1719 gap-4
+    reconciliation, 2026-06-11). One topic per participating domain:
+
+      `chora.{domain}.account.pseudonymised.v1`
+      for domain ∈ {creation, consumption, delivery, sharing, a2a,
+                    identity, tenancy, governance, observability,
+                    notifications}
+
+    Emitted by each domain's `closure_subscriber.go` AFTER it has applied
+    its `PII_Closure_Map.yaml` duty for the GCID (status flip + tombstone
+    + per-domain DEK shred where applicable). Consumed by the
+    closure-orchestrator `DomainAckHandler`, which records the ack on the
+    saga; COLD_ARCHIVED is gated on all 10 acks.
+
+    History: the Go services previously emitted
+    `chora.{domain}.pii.pseudonymise.completed.v1` while Terraform/IAM,
+    this contract tree and the `account-closure-saga` skill expected
+    `chora.{domain}.account.pseudonymised.v1`. Reconciled to the
+    taxonomy-correct `{aggregate}.{event_type}` form (`account` is the
+    aggregate; `pii` is not) by renaming the code-side constants —
+    nothing was live on either name, so the rename had zero runtime
+    blast radius.
+
+    - Publishers: all 10 domain services (closure subscribers)
+    - Consumer  : chora-closure-orchestrator (saga ack recording)
+    - Payload   : JSON (Protobuf swap tracked with the M14 outbox work;
+      mirror message `chora.closure.v1.ClosurePseudonymisePerDomainAck`
+      intent in `proto/events/closure/saga.proto` comments)
+    - IMDA: tag envelope.chora_imda_dimension = "accountability"
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/json
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  accountPseudonymised:
+    address: "chora.{domain}.account.pseudonymised.v1"
+    parameters:
+      domain:
+        description: Participating closure domain
+        enum:
+          - creation
+          - consumption
+          - delivery
+          - sharing
+          - a2a
+          - identity
+          - tenancy
+          - governance
+          - observability
+          - notifications
+    messages:
+      accountPseudonymised:
+        $ref: '#/components/messages/AccountPseudonymised'
+
+operations:
+  publishAccountPseudonymised:
+    action: send
+    channel:
+      $ref: '#/channels/accountPseudonymised'
+    summary: Domain service acks its pseudonymisation duty
+  consumeAccountPseudonymised:
+    action: receive
+    channel:
+      $ref: '#/channels/accountPseudonymised'
+    summary: Closure Orchestrator records the saga ack
+
+components:
+  messages:
+    AccountPseudonymised:
+      name: AccountPseudonymised
+      title: Per-domain pseudonymisation ack
+      payload:
+        type: object
+        required: [saga_id, gcid, tenant_id, domain, completed_at]
+        properties:
+          saga_id:
+            type: string
+            format: uuid
+          gcid:
+            type: string
+            format: uuid
+          tenant_id:
+            type: string
+            format: uuid
+          domain:
+            type: string
+            description: Acking domain (matches the topic's {domain})
+          completed_at:
+            type: string
+            format: date-time

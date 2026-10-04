@@ -1,0 +1,75 @@
+asyncapi: "3.0.0"
+info:
+  title: "Chora Content Creation — atom.created.v1"
+  version: "1.0.0"
+  description: |
+    Published when an author creates a new LearningAtom in DRAFT status.
+    LearningAtom is the PRIMARY AGGREGATE ROOT of the Chora platform —
+    collections in other domains (LearningPath, Course, Booking) QUERY
+    atoms; they NEVER own them.
+
+    At publish time no AtomRevision exists yet (revisions are appended via
+    a separate `chora.creation.revision.published.v1` event per AP-01).
+
+    Owning team    : Team 1 (Content)
+    Owning domain  : Content Creation (chora_creation database)
+    Surface (admin): A+ Creator mode
+
+    Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 2 D8
+    + .claude/rules/ddd-enforcement.md
+  contact:
+    name: "Chora Platform Team — Content Track"
+  license:
+    name: "Proprietary"
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  production:
+    host: "pubsub.googleapis.com"
+    protocol: googlepubsub
+    description: "Google Cloud Pub/Sub (production)"
+  emulator:
+    host: "localhost:8085"
+    protocol: googlepubsub
+    description: "Cloud Pub/Sub Emulator (local dev via PUBSUB_EMULATOR_HOST)"
+
+channels:
+  atomCreated:
+    address: "chora.creation.atom.created.v1"
+    description: |
+      Pub/Sub topic for AtomCreated events. Topic resides in the centralised
+      platform host project (`chora-489812`); subscriptions are owned by
+      consuming projects (chora-content, chora-delivery) via cross-project
+      IAM. Schema Registry validates the Protobuf payload at publish time.
+    messages:
+      atomCreated:
+        $ref: "#/components/messages/AtomCreated"
+
+operations:
+  publishAtomCreated:
+    action: send
+    channel:
+      $ref: "#/channels/atomCreated"
+    summary: "Publish a new LearningAtom (DRAFT) creation event"
+    description: |
+      Producer: chora-creation service.
+      Consumers: chora-consumption (knowledge-graph indexer), Meilisearch
+      indexer, AI Kernel content-validator agent (kicks off the 6-agent
+      content gate), audit log.
+    messages:
+      - $ref: "#/channels/atomCreated/messages/atomCreated"
+
+components:
+  messages:
+    AtomCreated:
+      name: "AtomCreated"
+      title: "Atom Created"
+      summary: "A new LearningAtom has been created in DRAFT status"
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf;version=3
+      payload:
+        schemaFormat: "application/vnd.google.protobuf;version=3"
+        schema:
+          protoFile: "proto/events/creation/atom.proto"
+          messageName: "chora.creation.v1.AtomCreated"

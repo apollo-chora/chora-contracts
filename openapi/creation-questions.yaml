@@ -1,0 +1,2405 @@
+openapi: 3.2.0
+info:
+  title: "Chora Content Creation — Question Authoring API"
+  version: "1.6.0"
+  description: |
+    Author-facing REST API for the Question sub-entity of LearningAtom in
+    the Content Creation domain. Covers manual authoring (MCQ + OE), adhoc
+    AI assistance, AI-draft new question, and batch generation from source
+    material.
+
+    Source-of-truth: docs/m14/cr-question-authoring-design-2026-05-15.md
+      §1 — UX flow (4 paths)
+      §2 — Domain model (Question sub-entity + 16-value question_type enum)
+      §3 — Mana model integration (D1 per-user Companion mana)
+      §4 — OpenAPI 3.2 draft (this spec; appended/standalone form)
+      §5 — A16 reconciliation (mcq_payload / essay_payload on GET /api/atoms/{id})
+      §6 — Async + Pub/Sub topology
+
+    Plan: ~/.claude/plans/golden-hopping-owl.md
+      D1 — Per-user mana (NOT TenantManaPool)
+      D2 — 1 atom = 1 question (atomic)
+      D3 — atom_type renamed to question_type per ADR-156 Decision #2
+            (DB column rename + protobuf field rename + OpenAPI schema rename;
+            wire-compatible enum string values unchanged)
+      D4 — ALL AI calls are async (202 + job_id; uniform QuestionGenerationJob)
+
+    Surface (admin) : A+ Creator mode
+    Owning team     : Team 1 (Content)
+    Owning domain   : Content Creation (chora_creation database)
+    Topic prefix    : chora.creation.question.*
+
+    Endpoints summary:
+      - GET    /atoms/question-types
+      - GET    /atoms/questions/search           (filter + sort + paginate — ADR-155 D1)
+      - POST   /atoms/{atom_id}/questions
+      - PATCH  /atoms/{atom_id}/questions/{question_id}
+      - POST   /atoms/{atom_id}/questions/{question_id}/ai-model-answer-jobs
+      - POST   /atoms/{atom_id}/question-jobs    (ai_draft + batch_source_material)
+      - GET    /atoms/{atom_id}/question-jobs/{job_id}
+      - POST   /atoms/{atom_id}/question-jobs/{job_id}/accept
+      - GET    /atoms/{atom_id}                  (extended with mcq_payload / essay_payload — A16)
+
+    All endpoints are bearer-authenticated against Identity Platform JWTs.
+    Tenant scope is derived from the JWT claim `tenant_id`; cross-tenant
+    requests are rejected at the auth interceptor.
+
+    402 responses use the canonical InsufficientManaUpsell envelope from
+    learner-economy.yaml (extended with optional stripe_checkout_url per
+    design §3.3).
+
+    v1.1.0 (2026-06-01): W8 image-generation + pipeline-trace enrichment
+    (additive). `AiAssistCandidate.image_url` (optional GCS/CDN URL of a
+    generated diagram/scene image, routed through the Model Gateway so
+    tier-routing + Cloud Model Armor + budget apply; absent when no image).
+    `PipelineTraceStep` gains `candidate_json` (serialized candidate on a
+    `generate` row), `accepted` (critic verdict on a `critique` row), and
+    `suggested_revisions` (critic suggestions on a `critique` row) to
+    document the orchestrator's now-enriched trace rows per AP-01.
+
+    v1.2.0 (2026-06-02): W8 AUTHOR-OPT-IN image vertical (additive). Authors
+    explicitly opt in to a generated image for the question part and/or the
+    model-answer part. `AiAssistGenerateRequest` gains `image_for_stem`
+    (boolean, default false) + `image_for_answer` (boolean, default false).
+    `AiAssistCandidate` gains a SECOND image slot `answer_image_url` (the
+    model-answer image); the existing `image_url` is clarified as the
+    question/stem image. Flags travel FE → POST /atoms/ai-assist →
+    chora.creation.ai_assist.started.v1 (image_for_stem / image_for_answer
+    proto fields) → orchestrator → generation agent.
+
+    v1.3.0 (2026-06-02): W8 image-gen PERSISTENCE (additive). The generated
+    `image_url` (question/stem) + `answer_image_url` (model-answer) are now
+    accepted on the SAVE path and persisted verbatim. Both are added (optional)
+    to `CreateQuestionRequest` + `EditQuestionRequest` (top-level request wire
+    shape) AND to `MCQPayload` + `OEPayload` (where they physically persist in
+    the mcq_payload / oe_payload JSONB column — no migration; JSONB is
+    schema-flexible). Persisted strings survive into the published atom, the
+    gRPC SnapshotQuestionByID test-set snapshot consumed by chora-delivery,
+    and the learner GraphQL read (payload JSONB returned verbatim). Wire names
+    `image_url` / `answer_image_url` are IDENTICAL across the FE request, the
+    BE DTO json tags, the BE domain payload json tags, and these schemas.
+    Durable re-home into chora-atom-media is a separate production follow-up.
+
+    v1.5.0 (2026-06-10, Lane 1c — CHO-1703 / ADR-180, additive): batch →
+    test-set compose. (a) Multipart gains `files[]` (1..5 sources) + optional
+    `rubric_file` (dedicated mark-scheme part) + image MIMEs
+    (png/jpeg/webp) — legacy single `file` kept; (b) `AiAssistCandidate` +
+    candidate_drafts gain `citations[]` (NEW QuestionCitation — page-ref
+    excerpt + creation-side `verified` stamp per D9/D15; image sources are
+    "AI-reported"); (c) NEW ProposedTestSet (composer's LLM-proposed
+    title/description/order/marks-extracted points) surfaced on
+    QuestionGenerationJob.proposed_test_set + riding the completed.v1
+    candidate_payload_json as BatchCandidatePayload (object envelope —
+    parsers branch on first char `[` legacy array vs `{`); (d) accept
+    request gains optional `test_set` block (curated title/desc/items) —
+    absent ⇒ pre-1c behaviour bit-identical; present ⇒ creation publishes
+    `chora.creation.question_batch.accepted.v1` (proto
+    events/creation/question_batch.proto; BINARY; exactly-once per job) and
+    delivery assembles ONE DRAFT test set idempotent on
+    test_sets.source_job_id (see delivery-test-sets.yaml v1.1.0).
+  contact:
+    name: "Chora Platform Team — Content Track"
+  license:
+    name: "Proprietary"
+
+servers:
+  - url: "https://api.chora.site/creation/v1"
+    description: "Production"
+  - url: "https://api.staging.chora.site/creation/v1"
+    description: "Staging"
+  - url: "http://localhost:8081/creation/v1"
+    description: "Local dev"
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: question-types
+    description: "Catalogue of supported QuestionType enum values."
+  - name: questions
+    description: "Manual authoring of Question sub-entity on a LearningAtom."
+  - name: questions-search
+    description: |
+      Cross-atom filter+sort+paginate over the tenant's Question catalogue.
+      Powers the A+ test-set-editor question-picker grid (ADR-155 D1).
+  - name: questions-ai
+    description: "AI-assisted authoring — model-answer fill + new-question draft. All async."
+  - name: questions-ai-batch
+    description: "Async batch generation from source material upload."
+  - name: atoms-projection
+    description: "GET /atoms/{id} read-side projection (A16 reconciliation)."
+
+paths:
+  # ---------------------------------------------------------------------------
+  # Question Types catalogue
+  # ---------------------------------------------------------------------------
+  /atoms/question-types:
+    get:
+      tags: [question-types]
+      operationId: listQuestionTypes
+      summary: "List supported question types"
+      description: |
+        Static list of all 16 enum values. UI uses `enabled=false` rows to render
+        future types as greyed-out placeholders. Phyllis scope = MCQ + OE only.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/QuestionTypeOption"
+              examples:
+                default:
+                  value:
+                    items:
+                      - code: mcq
+                        label_en: "Multiple Choice"
+                        enabled: true
+                        scope: phyllis
+                      - code: oe
+                        label_en: "Open-Ended"
+                        enabled: true
+                        scope: phyllis
+                      - code: reserved_short_answer
+                        label_en: "Short Answer"
+                        enabled: false
+                        scope: reserved
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # ---------------------------------------------------------------------------
+  # Question Search — cross-atom filter + sort + paginate (ADR-155 D1)
+  # ---------------------------------------------------------------------------
+  /atoms/questions/search:
+    get:
+      tags: [questions-search]
+      operationId: searchQuestions
+      summary: "Filter + sort + paginate questions for test-set authoring"
+      description: |
+        Cross-atom query of the caller's tenant Question catalogue. Powers the
+        A+ test-set-editor question-picker grid (ADR-155 D1). Returns a light
+        `QuestionSearchResult` projection — FE fetches the full question via
+        `GET /api/atoms/{atom_id}/questions/{question_id}` on click for the
+        rich detail panel.
+
+        **Filter semantics** (all multi-value params apply AND across families
+        but OR within a family — i.e. `?question_type=mcq&question_type=oe`
+        matches both types, `?topic_node_id=A&topic_node_id=B` matches atoms
+        tagged with either A or B):
+
+          * `question_type` — one or more enum values from `QuestionType`.
+            Reserved_* values pass through (return empty until backlog land).
+          * `topic_node_id` — UUIDv7 of TopicNode (canonical KG placement —
+            see chora-contracts/proto/events/creation/atom.proto `topic_node_ids`).
+            Matches questions whose **parent atom** is tagged with the node.
+          * `tag` — free-form `QuestionMetadata.tags` string. Question-level
+            tags (per-question; distinct from atom-level `topic_node_ids`).
+          * `atom_id` — restrict to questions on a specific atom (multi-value
+            for "questions on any of these atoms").
+          * `state` — `DRAFT` (atom in DRAFT) / `PUBLISHED` (atom PUBLISHED) /
+            `ARCHIVED` (atom soft-deleted; default-excluded — must opt in).
+            **Default**: PUBLISHED only (test-set editor is for production
+            questions; explicit `state=DRAFT` opt-in needed to surface drafts).
+          * `q` — optional free-text needle searched against `prompt` (case-
+            insensitive substring; ranks the result by relevance when supplied).
+
+        **Sort syntax** — `{field}:{direction}` where direction is `asc` or
+        `desc`. Supported fields:
+          * `created_at`    (default — newest first per user direction 2026-05-16)
+          * `updated_at`
+          * `title`         (alphabetical — lexicographic on the atom title)
+          * `question_type` (groups by type — mcq/essay/…)
+          * `prompt`        (alias for `title`; kept for back-compat)
+        `title` + `question_type` are the live atom-question-picker sort options
+        (CHO-1907). Default: `created_at:desc`. Comma-separated multi-key sort
+        accepted (e.g. `sort=title:asc,created_at:desc`) — first key is primary.
+        A non-whitelisted field or direction is rejected with 400.
+
+        **Pagination** — cursor-based (stable under concurrent inserts):
+          * `page_size` ∈ {10, 20, 50, 100} (default 20). Explicit enum (not
+            free integer) per user direction 2026-05-16 — FE picks via
+            Material Mat-Select.
+          * `page_token` — opaque base64 cursor returned by previous response.
+            **First page**: omit (or empty string).
+          * `next_page_token` in response is `null` when at end of result set
+            (terminal page). FE's "Next 100" button hides on null.
+          * `total` is OPTIONAL (only returned on first page request OR when
+            `include_total=true`) — for showing "X questions" count. Computing
+            total on every page is expensive at scale; clients should rely
+            primarily on `next_page_token` for end-of-list detection.
+
+        **Tenant scope**: enforced at the auth interceptor — questions only
+        match if the parent atom's `tenant_id` matches the bearer token's
+        `tenant_id` claim. RLS at the DB layer is the defence-in-depth.
+
+        **RLS composition note**: this endpoint compiles to a query over
+        `chora_creation.questions JOIN chora_creation.atoms ON atom_id`. Both
+        tables have row-level security policies; the JOIN is RLS-scoped on
+        both sides. See `.claude/skills/multi-tenant-rls/SKILL.md`.
+      parameters:
+        - name: question_type
+          in: query
+          required: false
+          description: "Multi-value filter on QuestionType enum (OR within family)."
+          explode: true
+          schema:
+            type: array
+            items:
+              $ref: "#/components/schemas/QuestionType"
+        - name: topic_node_id
+          in: query
+          required: false
+          description: |
+            Multi-value filter on parent atom's TopicNode IDs (UUIDv7).
+            Canonical field name: `topic_node_ids` per
+            chora-contracts/proto/events/creation/atom.proto. Matches if the
+            atom's `topic_node_ids` intersects the supplied set.
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+              format: uuid
+        - name: tag
+          in: query
+          required: false
+          description: |
+            Multi-value filter on question-level `QuestionMetadata.tags`
+            (free-form strings, distinct from atom-level `topic_node_ids`).
+            Both are supported because authors tag at both granularities —
+            `topic_node_ids` is structured KG placement; `tags` is per-question
+            free-form labels (e.g. "exam-2026", "review-pass-1").
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+              minLength: 1
+              maxLength: 64
+        - name: atom_id
+          in: query
+          required: false
+          description: "Restrict to questions on these atoms (UUIDv7; multi-value)."
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+              format: uuid
+        - name: author_gcid
+          in: query
+          required: false
+          description: |
+            Filter on the parent atom's author GCID (UUIDv7). Drops the FE
+            client-side `author_gcid == caller` filter hack in `myAtomsList`
+            (Atom Sharing Redesign — server-enrolled author filter).
+          schema:
+            type: string
+            format: uuid
+        - name: source
+          in: query
+          required: false
+          description: |
+            Picker source filter (ux_unified_atom_picker.md). Controls which
+            atoms the search returns:
+
+              * `mine`  — atoms authored by the caller (`gcid = caller`).
+              * `saved` — atoms the caller bookmarked via C+
+                (`chora_sharing.atom_bookmarks`), hydrated from
+                `chora_creation.learning_atoms` where `status = published`.
+              * `all`   (default) — union of `mine` + `saved`.
+
+            The legacy behaviour (all tenant atoms) is intentionally NOT the
+            default — surfacing atoms the caller has no relationship with
+            was a bug. `source=all` here is the union of the caller's own
+            working set, not the tenant catalogue.
+          schema:
+            type: string
+            enum: [mine, saved, all]
+            default: all
+        - name: state
+          in: query
+          required: false
+          description: |
+            Filter on parent atom's lifecycle state. Default = `PUBLISHED` only.
+            Multi-value supported (e.g., `state=DRAFT&state=PUBLISHED`).
+            `ARCHIVED` MUST be supplied explicitly to surface soft-deleted atoms.
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+              enum: [DRAFT, PUBLISHED, ARCHIVED]
+        - name: q
+          in: query
+          required: false
+          description: "Optional free-text needle (case-insensitive substring against `prompt`)."
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 200
+        - name: sort
+          in: query
+          required: false
+          description: |
+            Canonical sort syntax `{field}:{direction}`. Supported fields:
+            `created_at`, `updated_at`, `title`, `question_type`, `prompt`
+            (alias for `title`). Comma-separated multi-key sort accepted.
+            Default `created_at:desc`. Examples: `created_at:desc`,
+            `title:asc`, `question_type:asc`, `title:asc,created_at:desc`.
+            A non-whitelisted field or direction is rejected with 400.
+          schema:
+            type: string
+            default: "created_at:desc"
+            pattern: '^[a-z_]+:(asc|desc)(,[a-z_]+:(asc|desc))*$'
+        - name: page_size
+          in: query
+          required: false
+          description: |
+            Page size — explicit enum {10, 20, 50, 100} per user direction
+            2026-05-16. FE picks via Material Mat-Select. Default 20.
+          schema:
+            type: integer
+            enum: [10, 20, 50, 100]
+            default: 20
+        - name: page_token
+          in: query
+          required: false
+          description: |
+            Opaque base64 cursor from previous response's `next_page_token`.
+            Omit (or empty) for the first page. Cursor encodes (sort key,
+            row_id) for stability under concurrent inserts.
+          schema:
+            type: string
+            maxLength: 512
+        - name: include_total
+          in: query
+          required: false
+          description: |
+            When true, response includes `total` (full result count). Expensive
+            at scale — FE SHOULD only set this on the first-page fetch for the
+            "X questions" header count, then rely on `next_page_token` for
+            pagination thereafter.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: "Search results."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuestionSearchResponse"
+              examples:
+                default:
+                  summary: "Default page (no filters, newest first, page_size=20)"
+                  value:
+                    items:
+                      - id: "01985e7f-1234-7abc-8def-000000000a01"
+                        title: "SOLID — Open-Closed Principle"
+                        stem: "Which of the following statements best describes the Open-Closed Principle in SOLID..."
+                        question_type: mcq
+                        tenant_id: "11111111-1111-7111-8111-111111111111"
+                        author_gcid: "00000000-0000-7000-8000-000000001999"
+                        created_at: "2026-05-15T08:12:33Z"
+                        updated_at: "2026-05-15T09:02:11Z"
+                    next_page_token: "eyJjcmVhdGVkX2F0IjoiMjAyNi0wNS0xNVQwODoxMjozM1oiLCJpZCI6IjAxOTg1ZTdmIn0="
+                    total: 47
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # ---------------------------------------------------------------------------
+  # Questions — manual authoring (0 mana)
+  # ---------------------------------------------------------------------------
+  /atoms/{atom_id}/questions:
+    post:
+      tags: [questions]
+      operationId: createQuestionManual
+      summary: "Manual create — MCQ or OE — 0 mana"
+      description: |
+        Default manual authoring path (path 1 in design §1). Saves a Question
+        as a sub-entity of the parent atom; appends a new QuestionRevision
+        (append-only); bumps the parent AtomRevision. No AI call; no mana
+        debit. Cardinality is 1:0..1 per atom (D2) — POSTing a second question
+        to the same atom returns 409.
+      parameters:
+        - name: atom_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateQuestionRequest"
+            examples:
+              mcq:
+                summary: "Manual MCQ create"
+                value:
+                  type: mcq
+                  prompt: "Which of the following are characteristics of Agile estimation?"
+                  metadata:
+                    difficulty: 3
+                    cognitive_level: applying
+                    tags: [agile, estimation]
+                  mcq:
+                    scoring: { mode: single_correct, partial_credit_policy: none }
+                    shuffle_options: true
+                    options:
+                      - label: A
+                        text: "Story points are absolute time units."
+                        is_correct: false
+                        explainer: "Story points are relative, not absolute time."
+                      - label: B
+                        text: "Planning poker promotes collective ownership."
+                        is_correct: true
+                        explainer: "Planning poker forces each team member to commit a number, surfacing disagreement early."
+                      - label: C
+                        text: "Estimates are commitments to a delivery date."
+                        is_correct: false
+                        explainer: "Estimates are forecasts; commitments belong on the iteration plan."
+                      - label: D
+                        text: "Velocity is computed cross-team."
+                        is_correct: false
+                        explainer: "Velocity is a per-team metric and is not comparable across teams."
+              oe:
+                summary: "Manual OE create"
+                value:
+                  type: oe
+                  prompt: "Explain why story points are preferred over hours for Agile estimation."
+                  metadata:
+                    difficulty: 3
+                    cognitive_level: evaluating
+                    tags: [agile, estimation]
+                  oe:
+                    model_answer: "Story points are relative and capture complexity + risk + effort in a single unit. Hours invite false precision and are confounded by per-developer pace."
+                    rubric:
+                      - criterion_id: r1
+                        title: "Relative vs absolute"
+                        description: "Mentions story points are relative, not absolute time."
+                        weight: 0.4
+                      - criterion_id: r2
+                        title: "Complexity capture"
+                        description: "Notes points capture more than just effort."
+                        weight: 0.3
+                      - criterion_id: r3
+                        title: "False precision"
+                        description: "Calls out the false-precision pitfall of hour-based estimation."
+                        weight: 0.3
+                    min_response_chars: 80
+                    max_response_chars: 600
+      responses:
+        "201":
+          description: "Question created; new atom revision."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuestionWithRevision"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/AtomNotFound"
+        "409":
+          description: "Atom already has a non-deleted question (D2 — 1 atom = 1 question)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: "Validation failed (e.g., < 2 options, missing explainer)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "501":
+          description: "Question type is in the reserved_* slot — not yet implemented."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /atoms/{atom_id}/questions/{question_id}:
+    get:
+      tags: [questions]
+      operationId: getQuestion
+      summary: "Get a question — AUTHOR projection (full answer key + minted media)"
+      description: |
+        Full AUTHOR projection of a persisted question — includes the per-option
+        answer key (`is_correct` + `explainer`) and the W8 illustration refs
+        (`mcq.image_url` / `mcq.answer_image_url`; likewise on `oe`). Per
+        CHO-1638 any durable `gs://chora-atom-media-*` image ref is minted to a
+        fresh short-lived V4 signed GET URL before serialisation (an `<img>`
+        cannot carry the bearer JWT, and a PUBLISHED atom stores the canonical
+        `gs://` ref). Transient `https` refs pass through unchanged; a mint
+        failure drops that ref (a raw `gs://` is NEVER emitted to the wire) and
+        the response is still `200`. This is the editor re-open / author path —
+        the learner-safe shape (no answer key, no model-answer image) is served
+        by `GET /api/atoms/{atom_id}`.
+      parameters:
+        - name: atom_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: question_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuestionWithRevision"
+        "404":
+          $ref: "#/components/responses/QuestionNotFound"
+
+    patch:
+      tags: [questions]
+      operationId: editQuestion
+      summary: "Edit a question — appends new QuestionRevision; bumps AtomRevision"
+      description: |
+        Partial edit. Only fields present in the request body are updated.
+        Type is immutable. Each successful edit creates a new QuestionRevision
+        (append-only) and bumps the parent atom revision.
+      parameters:
+        - name: atom_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: question_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EditQuestionRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuestionWithRevision"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/QuestionNotFound"
+        "422":
+          description: "Validation failed."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    delete:
+      tags: [questions]
+      operationId: deleteQuestion
+      summary: "Soft-delete a question (FE A18)"
+      description: |
+        Soft-delete (`deleted_at` set; row preserved per ddd-enforcement #5).
+        Idempotent — re-deleting an already-deleted question still returns 204
+        (no body). The parent atom is unaffected (D2 — 1 atom = 1 question;
+        deleting the question doesn't delete the atom — the atom may still
+        host a fresh new Question via POST).
+
+        Applies uniformly to manual / AI-generated / batch-generated questions
+        — once persisted, all are Question rows and use this endpoint.
+
+        Batch deletion (FE multi-select on batch-generated questions): FE
+        orchestrates N parallel DELETE calls — one per question_id. Each
+        atom/question is independently RLS-scoped + auditable; bulk endpoints
+        risk partial-failure ambiguity. For N ≤ 200 (the batch cap, ADR-251), parallel
+        single-DELETE is the canonical shape.
+
+        Auth: only the question author (matching `gcid`) or a tenant admin can
+        delete. Non-owner non-admin → 403.
+
+        Cascades:
+        - A soft-deleted question's `QuestionRevision` rows remain (history is
+          retained per append-only invariant).
+        - Emits `chora.creation.question.deleted.v1` (post-MVP; not in the v1
+          topic plane).
+      parameters:
+        - name: atom_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: question_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "204":
+          description: "Question soft-deleted (or was already deleted — idempotent)."
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: "Caller is neither the question author nor a tenant admin."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/QuestionNotFound"
+
+  # ---------------------------------------------------------------------------
+  # AI model-answer job (single existing question) — D4 async
+  # ---------------------------------------------------------------------------
+  /atoms/{atom_id}/questions/{question_id}/ai-model-answer-jobs:
+    post:
+      tags: [questions-ai]
+      operationId: createAIModelAnswerJob
+      summary: "Async AI fill of model answer for an existing manual question (5 mana)"
+      description: |
+        Path 2 in design §1. D4 ASYNC: returns 202 + job_id. Author polls
+        `GET /atoms/{atom_id}/question-jobs/{job_id}` until status reaches a
+        terminal state, then either edits the live question (PATCH) using the
+        AI candidate payload, or accepts via `POST .../accept`.
+
+        Mana is debited at job creation under the `question_authoring_model_answer`
+        action_code (5 mana). On LLM failure the worker refunds via
+        ManaService.CreditMana (design §3.4).
+      parameters:
+        - name: atom_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: question_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tone_hint:
+                  type: string
+                  description: "Optional author hint, e.g. 'concise' / 'detailed'."
+      responses:
+        "202":
+          description: "Job accepted. Poll status via the returned URL."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobAcceptedResponse"
+        "402":
+          description: "Insufficient mana."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InsufficientManaErrorResponse"
+        "404":
+          $ref: "#/components/responses/QuestionNotFound"
+
+  # ---------------------------------------------------------------------------
+  # AI new-question + batch source-material — D4 async
+  # ---------------------------------------------------------------------------
+  /atoms/{atom_id}/question-jobs:
+    post:
+      tags: [questions-ai-batch]
+      operationId: createQuestionJob
+      summary: "Start an async AI question-generation job (D4)"
+      description: |
+        Two job types share this endpoint per D4 uniform-async:
+
+          - `ai_draft` (10 mana — `question_authoring_ai_draft`): AI drafts a
+            complete new question from prompt + type + metadata. application/json
+            request body.
+          - `batch_source_material` (~50 mana — `question_authoring_batch_parse`
+            at start, + 5 mana per accepted candidate at accept-time
+            — `question_authoring_batch_per_item`): multipart upload of
+            1..5 source files (PDF/DOCX/MD/TXT + PNG/JPEG/WebP) + optional
+            dedicated `rubric_file`, ≤ 32MB total. chora-creation extracts
+            text-bearing sources into page-referenced source_material_chunks
+            (chora_creation, RLS, embeddings-ready — Lane 1c D9), then the
+            qgen batch crew (GKE orchestrator) grounds generation on ALL
+            files as Gemini multimodal inlineData parts via the model
+            gateway. No separate doc-parser service.
+
+        Both return 202 + job_id. Poll via
+        `GET /atoms/{atom_id}/question-jobs/{job_id}`. Accept via
+        `POST /atoms/{atom_id}/question-jobs/{job_id}/accept`.
+      parameters:
+        - name: atom_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AIDraftJobRequest"
+            examples:
+              ai_draft_mcq:
+                summary: "AI-draft a new MCQ"
+                value:
+                  job_type: ai_draft
+                  type: mcq
+                  prompt: "Generate one MCQ on the SOLID 'O' principle (Open-Closed), 4 options, difficulty 3."
+                  metadata:
+                    difficulty: 3
+                    cognitive_level: understanding
+                    tags: [solid, oop]
+                  mcq_hint:
+                    option_count: 4
+                    scoring_mode: single_correct
+          multipart/form-data:
+            schema:
+              type: object
+              required: [settings]
+              description: |
+                Lane 1c (CHO-1703 / ADR-180): multi-file + image sources + a
+                dedicated optional rubric part. Exactly ONE of `file` (legacy
+                single-source) or `files` (1..5 sources) MUST be present.
+                Total request size cap 32MB (`maxBatchUploadBytes`).
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: |
+                    LEGACY single source-file part — kept for back-compat.
+                    PDF/DOCX/MD/TXT (+ PNG/JPEG/WebP since 1c). Equivalent to
+                    `files` with one entry. New clients SHOULD use `files`.
+                files:
+                  type: array
+                  maxItems: 5
+                  items:
+                    type: string
+                    format: binary
+                  description: |
+                    1..5 source-material files (role="source"). Allowed MIMEs:
+                    application/pdf, DOCX, text/markdown, text/plain,
+                    image/png, image/jpeg, image/webp. Images ground the crew
+                    multimodally but produce NO text chunks (their citations
+                    surface as model-reported / "AI-reported" — D9).
+                rubric_file:
+                  type: string
+                  format: binary
+                  description: |
+                    OPTIONAL dedicated rubric / mark-scheme file (role=
+                    "rubric", ≤1). Same MIME allowlist as `files`. The crew
+                    aligns per-OE-question rubric criteria AND the points
+                    distribution to it (D6); marks cues ("[5 marks]") drive
+                    per-question points extraction with uniform-10 fallback.
+                settings:
+                  type: string
+                  description: "JSON-encoded QuestionJobSettings. job_type MUST be `batch_source_material`."
+            encoding:
+              file:
+                contentType: application/pdf, application/vnd.openxmlformats-officedocument.wordprocessingml.document, text/markdown, text/plain, image/png, image/jpeg, image/webp
+              files:
+                contentType: application/pdf, application/vnd.openxmlformats-officedocument.wordprocessingml.document, text/markdown, text/plain, image/png, image/jpeg, image/webp
+              rubric_file:
+                contentType: application/pdf, application/vnd.openxmlformats-officedocument.wordprocessingml.document, text/markdown, text/plain, image/png, image/jpeg, image/webp
+              settings:
+                contentType: application/json
+      responses:
+        "202":
+          description: "Job accepted. Poll status via the returned URL."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobAcceptedResponse"
+        "402":
+          description: "Insufficient mana (parse-step for batch, full call for ai_draft)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InsufficientManaErrorResponse"
+        "413":
+          description: "File too large (>32MB)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "415":
+          description: "Unsupported media type."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /atoms/{atom_id}/question-jobs/{job_id}:
+    get:
+      tags: [questions-ai-batch]
+      operationId: getQuestionJob
+      summary: "Poll a question-generation job; retrieve candidates when ready"
+      parameters:
+        - name: atom_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: job_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuestionGenerationJob"
+        "404":
+          $ref: "#/components/responses/JobNotFound"
+
+  /atoms/{atom_id}/question-jobs/{job_id}/accept:
+    post:
+      tags: [questions-ai-batch]
+      operationId: acceptQuestionJob
+      summary: "Accept a subset of candidates; persists them; debits per-item mana"
+      description: |
+        For batch jobs, the per-item debit (`question_authoring_batch_per_item`,
+        5 mana × accepted_count) is applied here. For single-question jobs
+        (`ai_draft` / `ai_model_answer`), only the up-front debit applies.
+        Persisting creates Question + QuestionRevision rows and emits
+        `chora.creation.question.authored.v1`.
+      parameters:
+        - name: atom_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: job_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        description: |
+          User must be able to edit AI candidate output before persisting
+          (editability invariant — applies to ai_model_answer / ai_draft /
+          batch_source_material alike). Each accepted candidate can carry
+          optional overrides; absent overrides → persist the AI body as-is.
+          Empty `accepted_candidates` accepts NONE (job transitions to
+          `accepted` with 0 persisted).
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [accepted_candidates]
+              properties:
+                test_set:
+                  nullable: true
+                  description: |
+                    Lane 1c (CHO-1703 / ADR-180): author-curated test-set
+                    composition from the batch review step. ABSENT (or null)
+                    ⇒ today's accept path bit-identical (atoms only — the
+                    "Create test set" toggle was OFF). PRESENT ⇒ after atom
+                    persistence chora-creation outbox-publishes
+                    `chora.creation.question_batch.accepted.v1` (BINARY,
+                    exactly-once per job) and chora-delivery assembles ONE
+                    DRAFT test set (idempotent on `test_sets.source_job_id`).
+                    The FE then polls `GET /api/v1/test-sets?source_job_id=`.
+                    Only meaningful for `batch_source_material` jobs — the
+                    handler rejects it on single-question jobs (400).
+                  type: object
+                  required: [title]
+                  properties:
+                    title:
+                      type: string
+                      minLength: 1
+                      maxLength: 256
+                      description: "Curated test-set title (starts as the LLM proposal; author-amendable in review)."
+                    description:
+                      type: string
+                      maxLength: 2048
+                      description: "Optional curated test-set description."
+                    items:
+                      type: array
+                      maxItems: 200
+                      description: |
+                        Per-accepted-candidate test-set placement, keyed by
+                        draft_id (must each reference an entry in
+                        accepted_candidates). Candidates absent from this
+                        list fall back to composer-proposed points/order,
+                        then uniform default 10 / submission order.
+                      items:
+                        type: object
+                        required: [draft_id]
+                        properties:
+                          draft_id:
+                            type: string
+                            format: uuid
+                          points:
+                            type: integer
+                            minimum: 1
+                            maximum: 100
+                            description: "Test-set-scoped points (D5 — never on the atom)."
+                          display_order:
+                            type: integer
+                            minimum: 1
+                            description: "Final 1-based curated position."
+                accepted_candidates:
+                  type: array
+                  minItems: 0
+                  maxItems: 200
+                  items:
+                    type: object
+                    required: [draft_id]
+                    properties:
+                      draft_id:
+                        type: string
+                        format: uuid
+                        description: "The candidate's draft_id from the GET poll response."
+                      prompt_override:
+                        type: string
+                        nullable: true
+                        description: "If set, replaces the AI-drafted question prompt."
+                      mcq_payload_override:
+                        $ref: "#/components/schemas/MCQPayload"
+                        nullable: true
+                      oe_payload_override:
+                        $ref: "#/components/schemas/OEPayload"
+                        nullable: true
+                      atom_meta_override:
+                        type: object
+                        nullable: true
+                        description: |
+                          For batch jobs (1 atom per candidate per D2), per-atom
+                          metadata overrides. Ignored for ai_model_answer /
+                          ai_draft (single-question, parent atom already exists).
+                        properties:
+                          title: { type: string, nullable: true }
+                          tags:
+                            type: array
+                            items: { type: string }
+                            nullable: true
+                          difficulty: { type: integer, minimum: 0, maximum: 5, nullable: true }
+      responses:
+        "200":
+          description: "Accepted candidates persisted; new questions returned."
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [persisted, mana_debited]
+                properties:
+                  persisted:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Question"
+                  mana_debited:
+                    type: integer
+        "402":
+          description: "Insufficient mana for per-item debit."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InsufficientManaErrorResponse"
+        "404":
+          $ref: "#/components/responses/JobNotFound"
+        "409":
+          description: "Job not in a terminal-acceptable status (e.g. still running)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ---------------------------------------------------------------------------
+  # AI Assist — async question generation via the qgen 2-agent crew
+  # (generator + critic, ≤max_retries quality loop). MCQ + OE both flow
+  # through this surface (no separate endpoints per type).
+  #
+  # Wire shape: 202 + AiAssistJob{status: QUEUED} after the chora-creation
+  # handler publishes `chora.creation.ai_assist.started.v1` via outbox. The
+  # chora-ai-kernel-orchestrator (Python LangGraph) consumes + runs the
+  # qgen_crew StateGraph + publishes `chora.creation.ai_assist.completed.v1`
+  # (or `.refused.v1` on Cloud Model Armor block). chora-creation's
+  # subscriber updates the job row; FE polls GET to see progress.
+  # ---------------------------------------------------------------------------
+  /atoms/ai-assist:
+    post:
+      tags: [questions-ai-assist]
+      operationId: createAiAssistJob
+      summary: "Start an async AI Assist generation job (MCQ or OE)"
+      description: |
+        Pub/Sub orchestrator-managed per [[feedback-agentic-pubsub-only]]:
+        the chora-creation handler publishes `chora.creation.ai_assist.started.v1`
+        via outbox and returns `202 + AiAssistJob{status: QUEUED}` immediately.
+        The chora-ai-kernel-orchestrator consumes the event, runs the qgen
+        2-agent crew (generator + critic) with up to `max_retries` quality
+        loops, then publishes `chora.creation.ai_assist.completed.v1`
+        (or `.refused.v1` on Cloud Model Armor block). chora-creation's
+        Pub/Sub subscriber updates the job row.
+
+        Poll status via `GET /atoms/ai-assist/{job_id}` every ~2s. Typical
+        end-to-end latency: 20–60s for a 2-agent crew with up to 3 retries.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AiAssistGenerateRequest"
+            examples:
+              mcq_photosynthesis:
+                summary: "Generate one MCQ on photosynthesis"
+                value:
+                  question_type: mcq
+                  prompt: "What gas do plants release as a byproduct of photosynthesis?"
+                  metadata:
+                    subject: Biology
+                    cognitive_level: knowledge
+                    difficulty: 1
+                  max_retries: 3
+              oe_chlorophyll:
+                summary: "Generate one OE on chlorophyll"
+                value:
+                  question_type: oe
+                  prompt: "Explain in 2-3 sentences how chlorophyll converts light energy into chemical energy."
+                  metadata:
+                    subject: Biology
+                    cognitive_level: comprehension
+                    difficulty: 3
+                  max_retries: 3
+      responses:
+        "202":
+          description: "Job accepted; orchestrator dispatch via Pub/Sub. Poll the returned URL."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AiAssistJob"
+        "400":
+          description: "Invalid request shape (missing prompt or unsupported question_type)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "402":
+          description: "Insufficient mana for the up-front debit."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InsufficientManaErrorResponse"
+        "429":
+          description: "Tenant rate limit on AI Assist jobs."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /atoms/ai-assist/{job_id}:
+    get:
+      tags: [questions-ai-assist]
+      operationId: getAiAssistJob
+      summary: "Poll an AI Assist job; retrieve the candidate when ready"
+      description: |
+        Returns the current job state. Status transitions:
+          QUEUED → IN_PROGRESS → (COMPLETED | REFUSED | FAILED)
+
+        `result_payload.candidate` is populated when status is COMPLETED.
+        `quality_warning: true` indicates the critic exhausted `max_retries`
+        without an accept — the candidate is the last attempt + carries
+        `critic_notes` explaining the residual concerns.
+
+        On REFUSED, `refusal.reason` is one of:
+          - GUARDRAIL_PRE  — Cloud Model Armor blocked the input prompt
+          - GUARDRAIL_POST — Cloud Model Armor blocked the generated output
+          - VALIDATION    — input failed schema/policy validation pre-engine
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AiAssistJob"
+        "404":
+          description: "Job not found (or not visible in caller's tenant scope)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ---------------------------------------------------------------------------
+  # A16 reconciliation — GET /atoms/{atom_id} returns Atom with optional
+  # mcq_payload / essay_payload (learner-safe projection).
+  # ---------------------------------------------------------------------------
+  /atoms/{atom_id}:
+    get:
+      tags: [atoms-projection]
+      operationId: getAtomWithQuestionProjection
+      summary: "Get atom with embedded learner-safe question payload (A16)"
+      description: |
+        Extends the baseline `GET /api/atoms/{id}` response with optional
+        `mcq_payload` and `essay_payload` fields when the atom has at least
+        one non-deleted Question of the matching type.
+
+        LEARNER-SAFE projection — does NOT include:
+          - mcq option `is_correct` flag
+          - mcq option `explainer` text
+          - oe `model_answer`
+          - oe `rubric`
+        Those are sent only via the chora-consumption SubmitAnswer response
+        (post-grade) per design §5.
+      parameters:
+        - name: atom_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AtomWithQuestionProjection"
+        "404":
+          $ref: "#/components/responses/AtomNotFound"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    QuestionType:
+      type: string
+      description: |
+        Question payload-shape discriminator (chora_creation.question_type
+        ENUM). 2 in-scope values + 14 reserved_* sentinels for future-type
+        onboarding. Alphabetical order on reserved_* is part of the contract.
+      enum:
+        - mcq
+        - oe
+        - reserved_code_execution
+        - reserved_completion
+        - reserved_drag_drop
+        - reserved_fill_blank
+        - reserved_matching
+        - reserved_multi_select
+        - reserved_multimedia
+        - reserved_oral
+        - reserved_ordering
+        - reserved_peer_graded
+        - reserved_short_answer
+        - reserved_simulation
+        - reserved_table_completion
+        - reserved_true_false
+
+    QuestionTypeOption:
+      type: object
+      required: [code, label_en, enabled, scope]
+      properties:
+        code:
+          $ref: "#/components/schemas/QuestionType"
+        label_en: { type: string }
+        label_zh:
+          type: string
+          nullable: true
+        enabled: { type: boolean }
+        scope:
+          type: string
+          enum: [phyllis, reserved]
+
+    Question:
+      type: object
+      required: [question_id, atom_id, tenant_id, type, prompt, metadata, revision, created_at, updated_at]
+      properties:
+        question_id: { type: string, format: uuid }
+        atom_id:     { type: string, format: uuid }
+        tenant_id:   { type: string, format: uuid }
+        author_gcid: { type: string, format: uuid }
+        type:
+          $ref: "#/components/schemas/QuestionType"
+        prompt:      { type: string }
+        metadata:
+          $ref: "#/components/schemas/QuestionMetadata"
+        revision:    { type: integer }
+        deleted_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:  { type: string, format: date-time }
+        updated_at:  { type: string, format: date-time }
+        mcq:
+          allOf:
+            - $ref: "#/components/schemas/MCQPayload"
+          nullable: true
+        oe:
+          allOf:
+            - $ref: "#/components/schemas/OEPayload"
+          nullable: true
+
+    QuestionMetadata:
+      type: object
+      properties:
+        difficulty:
+          type: integer
+          minimum: 0
+          maximum: 5
+        cognitive_level:
+          type: string
+          enum: [remembering, understanding, applying, analyzing, evaluating, creating]
+        tags:
+          type: array
+          items: { type: string }
+        course_id:
+          type: string
+          format: uuid
+          nullable: true
+        estimated_seconds:
+          type: integer
+          minimum: 0
+        xp_on_correct:
+          type: integer
+          minimum: 0
+
+    MCQPayload:
+      type: object
+      required: [options, scoring]
+      properties:
+        options:
+          type: array
+          minItems: 2
+          maxItems: 8
+          items:
+            $ref: "#/components/schemas/MCQOption"
+        scoring:
+          $ref: "#/components/schemas/MCQScoring"
+        shuffle_options:
+          type: boolean
+        image_url:
+          type: string
+          format: uri
+          nullable: true
+          description: |
+            W8 image-gen persistence (v1.2.0) — optional QUESTION/STEM
+            illustration URL persisted in the mcq_payload JSONB. Surfaces into
+            the test-set snapshot + learner read. Wire name IDENTICAL across
+            the create/patch request, the BE payload, and this schema.
+        answer_image_url:
+          type: string
+          format: uri
+          nullable: true
+          description: |
+            W8 image-gen persistence (v1.2.0) — optional MODEL-ANSWER
+            illustration URL (2nd slot) persisted in the mcq_payload JSONB.
+
+    MCQOption:
+      type: object
+      required: [option_id, label, text, is_correct, explainer]
+      properties:
+        option_id: { type: string, description: "Opaque option identifier (positional letters A/B/C/D today; not a UUID)." }
+        label:
+          type: string
+          maxLength: 4
+          description: "Human-readable order label, e.g. 'A'."
+        text:      { type: string }
+        is_correct: { type: boolean }
+        explainer:
+          type: string
+          minLength: 1
+          description: "Required for ALL options (correct AND incorrect). Sent to learner only post-grade."
+
+    MCQScoring:
+      type: object
+      required: [mode]
+      properties:
+        mode:
+          type: string
+          enum: [single_correct, multi_correct, all_or_nothing]
+        partial_credit_policy:
+          type: string
+          enum: [none, proportional]
+
+    OEPayload:
+      type: object
+      required: [model_answer]
+      properties:
+        model_answer:
+          type: string
+          minLength: 1
+          maxLength: 8000
+        rubric:
+          type: array
+          items:
+            $ref: "#/components/schemas/RubricCriterion"
+        min_response_chars:
+          type: integer
+          minimum: 0
+        max_response_chars:
+          type: integer
+          minimum: 0
+        grader_tier:
+          type: string
+          enum: [T1, T2]
+          default: T1
+        image_url:
+          type: string
+          format: uri
+          nullable: true
+          description: |
+            W8 image-gen persistence (v1.2.0) — optional QUESTION/STEM
+            illustration URL persisted in the oe_payload JSONB. Surfaces into
+            the test-set snapshot + learner read. Wire name IDENTICAL across
+            the create/patch request, the BE payload, and this schema.
+        answer_image_url:
+          type: string
+          format: uri
+          nullable: true
+          description: |
+            W8 image-gen persistence (v1.2.0) — optional MODEL-ANSWER
+            illustration URL (2nd slot) persisted in the oe_payload JSONB.
+
+    RubricCriterion:
+      type: object
+      required: [criterion_id, title, weight]
+      properties:
+        criterion_id: { type: string }
+        title:        { type: string }
+        description:  { type: string }
+        weight:
+          type: number
+          minimum: 0
+          maximum: 1
+
+    CreateQuestionRequest:
+      type: object
+      required: [type, prompt, metadata]
+      description: |
+        Discriminated by `type`. When `type=mcq`, `mcq` is required and `oe`
+        MUST be absent. When `type=oe`, vice versa. Reserved_* values return
+        501 NOT_IMPLEMENTED.
+
+        v1.2.0 (W8 image-gen persistence): optional `image_url` (question/stem
+        illustration) + `answer_image_url` (model-answer illustration) are
+        accepted on SAVE and persisted verbatim into the question payload JSONB
+        (mcq_payload / oe_payload). They survive into the published atom, the
+        test-set snapshot (chora-delivery), and the learner GraphQL read. Both
+        are OPTIONAL; absent on the manual no-image path. Carried through from
+        the AI-assist candidate's `image_url` / `answer_image_url`.
+      properties:
+        type:
+          $ref: "#/components/schemas/QuestionType"
+        prompt:
+          type: string
+          minLength: 1
+        metadata:
+          $ref: "#/components/schemas/QuestionMetadata"
+        mcq:
+          $ref: "#/components/schemas/MCQPayload"
+        oe:
+          $ref: "#/components/schemas/OEPayload"
+        image_url:
+          type: string
+          format: uri
+          nullable: true
+          description: |
+            Optional generated QUESTION/STEM illustration URL (GCS/CDN),
+            threaded from the AI-assist candidate. Persisted into the payload
+            JSONB so it surfaces in the published atom + test-set snapshot +
+            learner read. Absent on manual no-image authoring.
+        answer_image_url:
+          type: string
+          format: uri
+          nullable: true
+          description: |
+            Optional generated MODEL-ANSWER illustration URL (GCS/CDN; 2nd
+            image slot). Persisted into the payload JSONB. Absent on manual
+            no-image authoring.
+
+    EditQuestionRequest:
+      type: object
+      description: |
+        Partial edit — only fields present are updated. Type is immutable.
+
+        v1.2.0 (W8 image-gen persistence): optional `image_url` +
+        `answer_image_url` accepted + persisted, identical wire names +
+        semantics to CreateQuestionRequest.
+      properties:
+        prompt:   { type: string }
+        metadata:
+          $ref: "#/components/schemas/QuestionMetadata"
+        mcq:
+          $ref: "#/components/schemas/MCQPayload"
+        oe:
+          $ref: "#/components/schemas/OEPayload"
+        image_url:
+          type: string
+          format: uri
+          nullable: true
+          description: "Optional QUESTION/STEM illustration URL — see CreateQuestionRequest.image_url."
+        answer_image_url:
+          type: string
+          format: uri
+          nullable: true
+          description: "Optional MODEL-ANSWER illustration URL — see CreateQuestionRequest.answer_image_url."
+
+    QuestionWithRevision:
+      type: object
+      required: [question, atom_revision]
+      properties:
+        question:
+          $ref: "#/components/schemas/Question"
+        atom_revision:
+          type: object
+          required: [revision_id, revision_number]
+          properties:
+            revision_id:     { type: string, format: uuid }
+            revision_number: { type: integer }
+
+    # -- ADR-155 D1 search projection ----------------------------------------
+
+    QuestionSearchResult:
+      type: object
+      description: |
+        Lightweight question projection for the test-set-editor picker grid.
+        Powers `GET /api/atoms/questions/search` (Lane C, chora-creation).
+
+        **DDD note**: per chora-contracts CLAUDE.md §3 + ddd-enforcement #1,
+        questions ARE atoms intra-domain in `chora_creation` — the
+        LearningAtom aggregate root carries the question payload. The `id`
+        field below IS both the atom-id AND the question-id; there is no
+        separate Question aggregate. The pg adapter queries `learning_atoms`
+        directly (per Lane C close: "questions ARE atoms intra-domain — the
+        pg adapter queries `learning_atoms` because the Phyllis seed has 15
+        atoms but ZERO rows in `questions`").
+
+        Avoids the full `mcq` / `oe` payloads to keep the page response small
+        (page_size up to 100 rows). FE click-through fetches the full
+        question/atom via `GET /api/atoms/{id}`.
+      required:
+        - id
+        - title
+        - stem
+        - question_type
+        - tenant_id
+        - author_gcid
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: |
+            UUIDv7 of the LearningAtom (= the question-id; atoms ARE questions
+            intra-domain per ddd-enforcement #1).
+        title:
+          type: string
+          maxLength: 256
+          description: "Atom title (≤256 chars)."
+        stem:
+          type: string
+          description: |
+            Question stem / prompt body (mcq.stem or oe.stem). May be empty
+            during early authoring (DRAFT atoms).
+        question_type:
+          $ref: "#/components/schemas/QuestionType"
+        tenant_id:
+          type: string
+          format: uuid
+          description: "Tenant scope (RLS-bound; caller-tenant only)."
+        author_gcid:
+          type: string
+          format: uuid
+          description: "GCID of the original atom author."
+        source:
+          type: string
+          enum: [mine, saved]
+          description: |
+            Picker hint (ux_unified_atom_picker.md). `mine` = atom authored by
+            the caller; `saved` = atom the caller bookmarked via C+ but did not
+            author. When both apply (author saved their own atom), `mine` wins.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    QuestionSearchResponse:
+      type: object
+      required: [items]
+      description: |
+        Cursor-paginated search response per ADR-155 D4. `next_page_token` is
+        null on the terminal page; `total` is OPTIONAL (only when
+        `include_total=true` was supplied).
+
+        `partial_result` is true when the chora-sharing gRPC fan-out failed
+        or timed out — the `mine` disjunct is returned but the `saved`
+        disjunct may be incomplete. `saved_truncated` is true when the
+        caller's saved-atom count exceeded the 500-row cap.
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/QuestionSearchResult"
+        next_page_token:
+          type: string
+          nullable: true
+          description: "Opaque base64 cursor for the next page. Null at end of result set."
+        total:
+          type: integer
+          nullable: true
+          minimum: 0
+          description: |
+            Total matching rows across all pages. Only returned when caller set
+            `include_total=true`. Expensive — caller should rely primarily on
+            `next_page_token` for pagination.
+        partial_result:
+          type: boolean
+          default: false
+          description: |
+            True when the chora-sharing gRPC fan-out failed or timed out. The
+            `mine` disjunct is returned; the `saved` disjunct may be incomplete.
+            FE SHOULD surface a warning banner when this is true.
+        saved_truncated:
+          type: boolean
+          default: false
+          description: |
+            True when the caller's saved-atom count exceeded the 500-row cap.
+            The picker shows the first 500 saved atoms; the rest are not
+            surfaced.
+
+    AIDraftJobRequest:
+      type: object
+      required: [job_type, type, prompt, metadata]
+      description: |
+        application/json request body for `POST /atoms/{atom_id}/question-jobs`
+        when job_type is `ai_draft`. For `batch_source_material` use the
+        multipart/form-data shape on the same endpoint.
+      properties:
+        job_type:
+          type: string
+          enum: [ai_draft]
+        type:
+          $ref: "#/components/schemas/QuestionType"
+        prompt:
+          type: string
+          minLength: 1
+        metadata:
+          $ref: "#/components/schemas/QuestionMetadata"
+        mcq_hint:
+          type: object
+          description: "Optional shape hint when type=mcq."
+          properties:
+            option_count:
+              type: integer
+              minimum: 2
+              maximum: 8
+              default: 4
+            scoring_mode:
+              type: string
+              enum: [single_correct, multi_correct]
+
+    # -- AI Assist (qgen 2-agent crew) -----------------------------------------
+
+    AiAssistGenerateRequest:
+      type: object
+      required: [question_type, prompt]
+      description: |
+        Request body for `POST /atoms/ai-assist`. Both MCQ + OE flow through
+        the same endpoint discriminated by `question_type`. The
+        ai_kernel_orchestrator runs the qgen 2-agent crew (generator + critic)
+        with up to `max_retries` quality loops.
+      properties:
+        question_type:
+          $ref: "#/components/schemas/QuestionType"
+        prompt:
+          type: string
+          minLength: 1
+          maxLength: 2048
+          description: "Author's free-text prompt describing the question to generate."
+        image_for_stem:
+          type: boolean
+          default: false
+          description: |
+            Author opt-in for a generated image attached to the QUESTION part
+            (the question stem). When true, the orchestrator routes an image
+            generation through the Model Gateway and the resulting candidate
+            carries `image_url` (the stem image). Default false (no stem image).
+        image_for_answer:
+          type: boolean
+          default: false
+          description: |
+            Author opt-in for a generated image attached to the MODEL-ANSWER
+            part. When true, the orchestrator generates a model-answer image
+            (routed through the Model Gateway) and the resulting candidate
+            carries `answer_image_url`. Default false (no answer image).
+        metadata:
+          type: object
+          description: "Optional hints biasing the generator + critic prompts."
+          properties:
+            category:
+              type: string
+              maxLength: 64
+              description: "Free-text category (e.g., 'biology', 'algebra')."
+            subject:
+              type: string
+              maxLength: 64
+              description: "Free-text subject — per ADR-156 D4 (vocabulary curation deferred to post-M14)."
+            cognitive_level:
+              type: string
+              enum: [knowledge, comprehension, application, analysis, synthesis, evaluation]
+              description: "Bloom's taxonomy level per ADR-156 D3."
+            difficulty:
+              type: integer
+              minimum: 1
+              maximum: 5
+              description: "Difficulty hint (1=easy, 5=expert)."
+        max_retries:
+          type: integer
+          minimum: 0
+          maximum: 5
+          default: 3
+          description: |
+            Quality-loop budget. The critic agent issues qualitative critique
+            (NOT scoring); if it rejects the candidate AND attempt_count <
+            max_retries, the orchestrator regenerates with the critic notes
+            as additional context. On exhaustion the job completes with
+            `quality_warning: true` carrying the last attempt + critic notes.
+        mcq_hint:
+          type: object
+          nullable: true
+          description: "Optional MCQ shape hint when question_type=mcq."
+          properties:
+            option_count:
+              type: integer
+              minimum: 2
+              maximum: 8
+              default: 4
+            scoring_mode:
+              type: string
+              enum: [single_correct, multi_correct]
+              default: single_correct
+
+    AiAssistCandidate:
+      type: object
+      required: [stem, question_type]
+      description: |
+        The generated question candidate. Discriminated by `question_type`:
+        `mcq_payload` populated for MCQ, `oe_payload` for OE. `stem` is the
+        promoted question prompt per ADR-156 (top-level rather than nested
+        inside mcq_payload.prompt / oe_payload.prompt).
+
+        Two optional image slots, each populated only when the author opted in
+        on the request (`image_for_stem` / `image_for_answer`): `image_url` is
+        the QUESTION/STEM image; `answer_image_url` is the MODEL-ANSWER image.
+      properties:
+        stem:
+          type: string
+          minLength: 1
+          maxLength: 4096
+        question_type:
+          $ref: "#/components/schemas/QuestionType"
+        mcq_payload:
+          allOf:
+            - $ref: "#/components/schemas/MCQPayload"
+          nullable: true
+        oe_payload:
+          allOf:
+            - $ref: "#/components/schemas/OEPayload"
+          nullable: true
+        critic_notes:
+          type: string
+          nullable: true
+          description: |
+            Qualitative critique from the qgen_critic agent. Populated when
+            `quality_warning: true` (retries exhausted) or as an explanation
+            of accepted-but-with-residual-concerns candidates.
+        image_url:
+          type: string
+          format: uri
+          nullable: true
+          description: |
+            Optional GCS/CDN URL of a generated image for the QUESTION/STEM
+            part of this candidate. Populated only when the author opted in
+            via `image_for_stem` on the request. Absent when no stem image was
+            generated. Images route through the Model Gateway so tier-routing +
+            Cloud Model Armor + budget apply; the bytes are stored in GCS and
+            only the URL rides on the candidate.
+        answer_image_url:
+          type: string
+          format: uri
+          nullable: true
+          description: |
+            Optional GCS/CDN URL of a generated image for the MODEL-ANSWER
+            part of this candidate. Populated only when the author opted in
+            via `image_for_answer` on the request. Absent when no answer image
+            was generated. Distinct from `image_url` (the stem image). Routed
+            through the Model Gateway (tier-routing + Cloud Model Armor +
+            budget); bytes in GCS, only the URL rides on the candidate.
+        citations:
+          type: array
+          nullable: true
+          items:
+            $ref: "#/components/schemas/QuestionCitation"
+          description: |
+            Lane 1c (CHO-1703 / ADR-180, D9): per-question source citations
+            for grounded batch jobs. The crew model-reports {source_file,
+            page, excerpt}; chora-creation's completed-event subscriber then
+            VERIFIES each excerpt against the persisted source_material_chunks
+            (normalised substring/fuzzy match) and stamps `verified` +
+            `chunk_id` BEFORE the FE poll surfaces candidates (D15 — the
+            verification runs creation-side; the orchestrator cannot read
+            chora_creation). Absent/empty for ungrounded jobs.
+
+    QuestionCitation:
+      type: object
+      required: [source_file, excerpt]
+      description: |
+        One source citation on a generated candidate (Lane 1c, D9). Sidebar
+        chip semantics: `verified: true` → "✓ verified"; `verified: false` →
+        "⚠ unverified" (model-reported excerpt did NOT match the chunk store
+        — surfaced, NEVER silently dropped); `verified: null` → "AI-reported"
+        (image sources have no text layer in v1, so no verification ran).
+      properties:
+        source_file:
+          type: string
+          description: |
+            The cited file — the gs:// blob_uri of the uploaded source (or
+            its display filename when the FE renders it). Matches one of the
+            job's source_files[] entries.
+        page:
+          type: integer
+          minimum: 1
+          nullable: true
+          description: "1-based page number in the cited file (null for unpaged formats like MD/TXT single-chunk or images)."
+        excerpt:
+          type: string
+          maxLength: 1024
+          description: "Short verbatim excerpt the crew cites as grounding for this question."
+        chunk_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            UUIDv7 of the matched chora_creation.source_material_chunks row —
+            stamped by the verification pass (D15). Null when unverified or
+            AI-reported. This is the reuse seam for KG / growth-edge /
+            daily-dose grounding (ContentRetrieval.SearchEmbeddings).
+        verified:
+          type: boolean
+          nullable: true
+          description: |
+            true  → excerpt matched the chunk text (creation-side pass).
+            false → no match (hallucination suspect — render "⚠ unverified").
+            null  → no verification possible (image source — "AI-reported").
+
+    ProposedTestSet:
+      type: object
+      required: [title, order]
+      description: |
+        Lane 1c (CHO-1703 / ADR-180, D4/D5): the composer step's LLM-proposed
+        test-set structure for a batch job — title + description mirrored from
+        the source material, question ORDER, and per-question POINTS extracted
+        from marks cues in the source / mark-scheme ("[5 marks]",
+        "Question 3 (10 points)"), uniform default 10 when absent. Rides the
+        `chora.creation.ai_assist.completed.v1` `candidate_payload_json`
+        string as a sibling of the candidates (see BatchCandidatePayload) and
+        surfaces to the FE on the job poll response. The author curates it in
+        the review composer; the CURATED result is what the accept request's
+        `test_set` block carries.
+      properties:
+        title:
+          type: string
+          maxLength: 256
+        description:
+          type: string
+          maxLength: 2048
+        order:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: "Proposed display order — candidate draft_ids, first = position 1."
+        points:
+          type: object
+          additionalProperties:
+            type: integer
+            minimum: 1
+            maximum: 100
+          description: "Map of draft_id → proposed points (marks-extracted; uniform 10 fallback)."
+
+    BatchCandidatePayload:
+      type: object
+      required: [candidates]
+      description: |
+        Lane 1c (CHO-1703): the JSON OBJECT shape of
+        `chora.creation.ai_assist.completed.v1`.`candidate_payload_json` for
+        batch jobs WITH the composer step (job_kind=batch). Back-compat rule
+        for parsers (chora-creation's completed subscriber handles BOTH):
+        first non-space char `[` → legacy bare ARRAY of AiAssistCandidate
+        (no proposal); `{` → this object. No proto change — the field is
+        already a string (≤ ~32 KiB budget still applies).
+      properties:
+        candidates:
+          type: array
+          items:
+            $ref: "#/components/schemas/AiAssistCandidate"
+        proposed_test_set:
+          allOf:
+            - $ref: "#/components/schemas/ProposedTestSet"
+          nullable: true
+
+    PipelineTraceStep:
+      type: object
+      required: [name, status]
+      description: "Single sub-agent or orchestrator-step trace entry — IMDA D2 transparency evidence."
+      properties:
+        name:
+          type: string
+          description: |
+            Step name. Examples for the qgen 2-agent crew:
+              validate_input | guardrail_pre | generate | guardrail_post |
+              critique | quality_gate | publish_completed | publish_refused
+        status:
+          type: string
+          enum: [PENDING, RUNNING, ACCEPTED, REJECTED, REFUSED, FAILED, COMPLETED]
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+        attempt:
+          type: integer
+          minimum: 0
+          nullable: true
+          description: "For looped steps (generate / critique): which attempt this trace row belongs to."
+        input_tokens:
+          type: integer
+          minimum: 0
+          nullable: true
+        output_tokens:
+          type: integer
+          minimum: 0
+          nullable: true
+        engine_resource:
+          type: string
+          nullable: true
+          description: "Vertex AI Agent Engine resource name (when this step invoked an LLM)."
+        notes:
+          type: string
+          nullable: true
+        candidate_json:
+          type: string
+          nullable: true
+          description: |
+            The serialized AiAssistCandidate produced on a `generate` row
+            (JSON-encoded). Null on non-generate rows.
+        accepted:
+          type: boolean
+          nullable: true
+          description: |
+            The critic verdict on a `critique` row — true when the critic
+            accepted the candidate. Null on non-critique rows.
+        suggested_revisions:
+          type: array
+          items:
+            type: string
+          nullable: true
+          description: |
+            Critic suggestions on a `critique` row — ordered list of
+            qualitative revision notes the orchestrator feeds back into the
+            next generate attempt. Null on non-critique rows.
+
+    AiAssistRefusal:
+      type: object
+      required: [reason]
+      description: "Refusal envelope on REFUSED jobs — guardrail or validation block."
+      properties:
+        reason:
+          type: string
+          enum: [GUARDRAIL_PRE, GUARDRAIL_POST, VALIDATION]
+        model_armor_verdict:
+          type: string
+          nullable: true
+          description: |
+            Cloud Model Armor verdict tag (e.g., 'armor:pii_high_risk_block').
+            Never carries raw detected PII or full guardrail trace.
+        user_facing_message:
+          type: string
+          nullable: true
+          description: "Short, non-leaky message safe to render in UI."
+        last_candidate:
+          $ref: "#/components/schemas/AiAssistCandidate"
+          nullable: true
+          description: "Best-effort last attempt before refusal (may be empty on pre-screen blocks)."
+
+    AiAssistJob:
+      type: object
+      required:
+        - job_id
+        - status
+        - question_type
+        - attempt_count
+        - created_at
+        - updated_at
+      description: |
+        Async AI Assist job envelope. Returned from `POST /atoms/ai-assist`
+        (status: QUEUED) and `GET /atoms/ai-assist/{job_id}` (current state).
+      properties:
+        job_id:
+          type: string
+          format: uuid
+          description: "UUIDv7 — also serves as the orchestrator's correlation_id."
+        tenant_id:
+          type: string
+          format: uuid
+        author_gcid:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [QUEUED, IN_PROGRESS, COMPLETED, REFUSED, FAILED]
+          description: |
+            FSM:
+              QUEUED       → after POST, before orchestrator picks up
+              IN_PROGRESS  → orchestrator running the qgen_crew graph
+              COMPLETED    → critic accepted (or retries exhausted with
+                             quality_warning); candidate populated
+              REFUSED      → Cloud Model Armor blocked input or output
+              FAILED       → orchestrator graph hit a non-recoverable error
+        question_type:
+          $ref: "#/components/schemas/QuestionType"
+        request_payload:
+          $ref: "#/components/schemas/AiAssistGenerateRequest"
+        candidate:
+          $ref: "#/components/schemas/AiAssistCandidate"
+          nullable: true
+          description: "Populated when status is COMPLETED."
+        pipeline_trace:
+          type: array
+          items:
+            $ref: "#/components/schemas/PipelineTraceStep"
+          description: "IMDA D2 transparency evidence — sub-agent + orchestrator step trace."
+        attempt_count:
+          type: integer
+          minimum: 0
+          description: "Total generate attempts (≥1 once orchestrator starts running)."
+        quality_warning:
+          type: boolean
+          default: false
+          description: |
+            True when the critic rejected on all max_retries attempts and the
+            final candidate is the best-effort last attempt + critic_notes.
+        refusal:
+          $ref: "#/components/schemas/AiAssistRefusal"
+          nullable: true
+        mana_charged:
+          type: integer
+          minimum: 0
+          description: "Mana finalized at COMPLETED or REFUSED (may differ from up-front quote)."
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    QuestionJobSettings:
+      type: object
+      required: [job_type]
+      description: |
+        JSON-encoded body of the multipart `settings` field for
+        `batch_source_material`. The batch job dispatches the qgen 2-agent
+        crew (generator + critic) once per requested candidate (1..50) via
+        `chora.creation.ai_assist.started.v1` (job_kind=batch). When the
+        uploaded source material is present the crew grounds generation on
+        it per `grounding_mode` (the model gateway carries the file bytes as
+        Gemini multimodal `inlineData` parts — no separate doc-parser).
+      properties:
+        job_type:
+          type: string
+          enum: [batch_source_material]
+        question_type:
+          type: string
+          enum: [mcq, oe]
+          description: "Question type to generate (Phyllis scope). Required by the multipart handler."
+        count:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 1
+          description: "Number of candidate questions to generate (1..200, ADR-251). Canonical field read by the handler."
+        grounding_mode:
+          type: string
+          enum: [strict, starting_point]
+          default: starting_point
+          description: |
+            How the uploaded source material constrains generation:
+              - `strict`         — generate questions ONLY from facts present
+                                   in the uploaded material (closed-book).
+              - `starting_point` — use the material as a seed / springboard;
+                                   the crew may generalise beyond it (default).
+            Ignored when no source material was uploaded.
+        target_growth_edges:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+          description: |
+            Optional learner Growth-Edge `concept_key` values (from the
+            consumption Growth-Edges API, `openapi/consumption-growth-edges.yaml`)
+            to bias generation toward. Cross-track seam with EPIC-1b — the FE/BFF
+            resolves these from chora-consumption and passes the keys through;
+            chora-creation never queries chora_consumption directly (cross-DB
+            forbidden).
+        requested_count:
+          type: integer
+          minimum: 1
+          maximum: 200
+          deprecated: true
+          description: "Deprecated alias for `count`; retained for back-compat. Prefer `count`."
+        type_mix:
+          type: object
+          description: "Map of QuestionType → count. Sum must equal requested_count."
+          properties:
+            mcq:
+              type: integer
+              minimum: 0
+            oe:
+              type: integer
+              minimum: 0
+        difficulty:
+          type: integer
+          minimum: 0
+          maximum: 5
+        rubric:
+          type: string
+          description: "Free-text grading rubric guidance passed to qgen_fitness."
+        bloom_levels:
+          type: array
+          items:
+            type: string
+            enum: [remembering, understanding, applying, analyzing, evaluating, creating]
+
+    JobAcceptedResponse:
+      type: object
+      required: [job_id, status, poll_url]
+      properties:
+        job_id:   { type: string, format: uuid }
+        status:
+          type: string
+          enum: [requested, running]
+        poll_url:
+          type: string
+          description: "Relative URL to GET job status."
+        mana_debited:
+          type: integer
+          description: "Up-front debit (parse-step for batch; full call for single-question jobs)."
+
+    QuestionGenerationJob:
+      type: object
+      required: [job_id, atom_id, status, job_type, mana_charged, created_at, updated_at]
+      properties:
+        job_id:  { type: string, format: uuid }
+        atom_id: { type: string, format: uuid }
+        job_type:
+          type: string
+          enum: [ai_model_answer, ai_draft, batch_source_material]
+        status:
+          type: string
+          enum: [requested, running, succeeded, failed, accepted, partially_accepted, cancelled]
+        source_mime_type:
+          type: string
+          nullable: true
+        requested_count:
+          type: integer
+          nullable: true
+        grounding_mode:
+          type: string
+          enum: [strict, starting_point]
+          nullable: true
+          description: "Grounding mode for a batch_source_material job (null for non-batch jobs)."
+        difficulty:
+          type: integer
+          minimum: 0
+          maximum: 5
+          nullable: true
+        mana_charged: { type: integer }
+        error:
+          type: string
+          nullable: true
+        candidate_drafts:
+          type: array
+          items:
+            type: object
+            required: [draft_id, type, payload, qgen_score]
+            properties:
+              draft_id: { type: string, format: uuid }
+              type:
+                $ref: "#/components/schemas/QuestionType"
+              payload:
+                type: object
+                description: "Either MCQPayload or OEPayload shape, plus `prompt` + `metadata`."
+              qgen_score:
+                type: number
+                minimum: 0
+                maximum: 1
+              citations:
+                type: array
+                nullable: true
+                items:
+                  $ref: "#/components/schemas/QuestionCitation"
+                description: |
+                  Lane 1c (D9/D15): verification-stamped source citations —
+                  present on grounded batch candidates AFTER chora-creation's
+                  completed-event subscriber has matched excerpts against
+                  source_material_chunks. See QuestionCitation chip semantics.
+        proposed_test_set:
+          allOf:
+            - $ref: "#/components/schemas/ProposedTestSet"
+          nullable: true
+          description: |
+            Lane 1c (D4): the composer's LLM-proposed test-set structure for
+            batch jobs (null for single-question jobs, ungrounded batches
+            predating 1c, or when the composer step was skipped). Seeds the
+            review composer's title/description/order/points; the author's
+            CURATED result goes back on the accept request `test_set` block.
+        created_at:   { type: string, format: date-time }
+        updated_at:   { type: string, format: date-time }
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    # -- A16 read-side projection on GET /atoms/{atom_id} ---------------------
+
+    AtomWithQuestionProjection:
+      type: object
+      required: [atom_id, question_type, stem]
+      description: |
+        Extension of the baseline LearningAtom payload. Adds optional
+        `mcq_payload` / `essay_payload` learner-safe projection fields per
+        design §5. When the atom has multiple questions, the primary
+        (lowest revision_number, oldest non-deleted) is surfaced.
+
+        ADR-156 Phase 1: `question_type` (renamed from `atom_type`) +
+        `stem` (NEW, REQUIRED, ≤4096) replaces the old required `title`.
+        `title` is now optional; new fields (`subject`, `cognitive_level`,
+        `imda_dimension_tags`, `author_note`, `media_assets`) are surfaced
+        for author-side audit.
+      properties:
+        atom_id:        { type: string, format: uuid }
+        question_type:  { type: string }
+        atom_type:
+          type: string
+          deprecated: true
+          description: |
+            DEPRECATED — alias of `question_type` for one release cycle
+            per ADR-156 backwards-compat shim. Removed in next minor.
+        stem:
+          type: string
+          maxLength: 4096
+          description: "Canonical question prompt per ADR-156 Decision #1."
+        title:
+          type: string
+          maxLength: 256
+          description: "Optional display title (relaxed per ADR-156 Decision #1)."
+        subject:
+          type: string
+          maxLength: 64
+        cognitive_level:
+          type: string
+          enum: [knowledge, comprehension, application, analysis, synthesis, evaluation]
+        imda_dimension_tags:
+          type: array
+          items:
+            type: string
+            enum: [accountability, transparency, safety_robustness, fairness_human_oversight]
+        author_note:
+          type: string
+        media_assets:
+          type: array
+          maxItems: 1
+          items:
+            type: object
+            required: [type, url, mime, size_bytes]
+            properties:
+              type:
+                type: string
+                enum: [image]
+              url:
+                type: string
+                format: uri
+              alt_text:
+                type: string
+                maxLength: 280
+              mime:
+                type: string
+                enum: [image/jpeg, image/png, image/webp]
+              size_bytes:
+                type: integer
+                format: int64
+                minimum: 1
+        mcq_payload:
+          allOf:
+            - $ref: "#/components/schemas/LearnerSafeMCQPayload"
+          nullable: true
+        essay_payload:
+          allOf:
+            - $ref: "#/components/schemas/LearnerSafeEssayPayload"
+          nullable: true
+
+    LearnerSafeMCQPayload:
+      type: object
+      description: "Learner-visible MCQ projection. NO `is_correct`. NO `explainer`."
+      required: [question_id, prompt, options]
+      properties:
+        question_id: { type: string, format: uuid }
+        prompt:      { type: string }
+        options:
+          type: array
+          items:
+            type: object
+            required: [option_id, label, text]
+            properties:
+              option_id: { type: string }
+              label:     { type: string }
+              text:      { type: string }
+        shuffle_options: { type: boolean }
+        xp_on_correct:
+          type: integer
+          minimum: 0
+        timer_seconds:
+          type: integer
+          nullable: true
+
+    LearnerSafeEssayPayload:
+      type: object
+      description: "Learner-visible OE projection. NO `model_answer`. NO `rubric`."
+      required: [question_id, prompt]
+      properties:
+        question_id: { type: string, format: uuid }
+        prompt:      { type: string }
+        min_response_chars:
+          type: integer
+          minimum: 0
+        max_response_chars:
+          type: integer
+          minimum: 0
+        xp_on_grade:
+          type: integer
+          nullable: true
+
+    # -- Mana 402 envelope ---------------------------------------------------
+
+    InsufficientManaUpsell:
+      type: object
+      required: [required_units, current_balance_units]
+      description: |
+        Canonical 402 upsell envelope. Extended over the baseline
+        `learner-economy.yaml:1032` shape with an optional
+        `stripe_checkout_url` field (design §3.3 — BE may eagerly create the
+        Stripe Checkout session and embed the URL here; otherwise the FE
+        creates it on CTA click via `POST /me/mana/topup`).
+      properties:
+        required_units:
+          type: integer
+          format: int64
+          minimum: 0
+        current_balance_units:
+          type: integer
+          format: int64
+          minimum: 0
+        recommended_plan_code:
+          type: string
+          nullable: true
+        recommended_topup_units:
+          type: integer
+          format: int64
+          nullable: true
+        stripe_checkout_url:
+          type: string
+          format: uri
+          nullable: true
+          description: "Stripe Checkout session URL the FE redirects to."
+
+    InsufficientManaErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum: [INSUFFICIENT_MANA]
+            message: { type: string }
+            correlation_id:
+              type: string
+              format: uuid
+            upsell:
+              $ref: "#/components/schemas/InsufficientManaUpsell"
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:    { type: string }
+            message: { type: string }
+            correlation_id:
+              type: string
+              format: uuid
+            details:
+              type: object
+
+  responses:
+    BadRequest:
+      description: "Malformed request."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unauthorized:
+      description: "Missing or invalid bearer token."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    AtomNotFound:
+      description: "Atom not found in caller's tenant."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    QuestionNotFound:
+      description: "Question not found on this atom (or already soft-deleted)."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    JobNotFound:
+      description: "Question generation job not found."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"

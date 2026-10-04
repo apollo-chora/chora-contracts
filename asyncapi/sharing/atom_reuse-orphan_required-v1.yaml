@@ -1,0 +1,78 @@
+asyncapi: "3.0.0"
+info:
+  title: "Chora Content Sharing — atom_reuse.orphan_required.v1"
+  version: "1.0.0"
+  description: |
+    Published when a reuse-visibility withdrawal (narrowing via
+    reuse_visibility_changed.v1, or atom.archived.v1) strands at least one
+    active AtomUsageGrant (ADR-229 Amendment A1, CHO-2132). chora-sharing
+    owns the grant table — the audit record of every reuse written at
+    snapshot/arm time (ADR-229 D2) — making it the authoritative registry of
+    granted consumers. chora-creation consumes this event and mints the
+    SINGLETON orphan edition (idempotent per atom + last-published-revision),
+    answering with chora.creation.atom.orphan_created.v1, on which sharing
+    repoints the stranded grants.
+
+    A withdrawal that strands ZERO grants emits nothing here.
+
+    Owning team    : Team 1 (Content)
+    Owning domain  : Content Sharing (chora_sharing database)
+
+    Source-of-truth: docs/architecture/adrs/adr-229-atom-reuse-visibility-
+    consent-gate.md §Amendment A1
+  contact:
+    name: "Chora Platform Team — Content Track"
+  license:
+    name: "Proprietary"
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  production:
+    host: "pubsub.googleapis.com"
+    protocol: googlepubsub
+    description: "Google Cloud Pub/Sub (production)"
+  emulator:
+    host: "localhost:8085"
+    protocol: googlepubsub
+    description: "Cloud Pub/Sub Emulator (local dev)"
+
+channels:
+  atomReuseOrphanRequired:
+    address: "chora.sharing.atom_reuse.orphan_required.v1"
+    description: |
+      Pub/Sub topic for AtomReuseOrphanRequired events. Low-volume — fires
+      only when a withdrawal strands active grants.
+    messages:
+      atomReuseOrphanRequired:
+        $ref: "#/components/messages/AtomReuseOrphanRequired"
+
+operations:
+  publishAtomReuseOrphanRequired:
+    action: send
+    channel:
+      $ref: "#/channels/atomReuseOrphanRequired"
+    summary: "Request the singleton orphan edition for a stranding withdrawal"
+    description: |
+      Producer: chora-sharing service (stranding detector on the
+      reuse_visibility_changed / atom.archived subscribers), via the outbox.
+      Consumers:
+        - chora-creation -> mint the singleton orphan edition + publish
+                            atom.orphan_created.v1
+        - audit log
+    messages:
+      - $ref: "#/channels/atomReuseOrphanRequired/messages/atomReuseOrphanRequired"
+
+components:
+  messages:
+    AtomReuseOrphanRequired:
+      name: "AtomReuseOrphanRequired"
+      title: "Atom Reuse Orphan Required"
+      summary: "A reuse-visibility withdrawal stranded active grants; creation must mint the orphan edition"
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf;version=3
+      payload:
+        schemaFormat: "application/vnd.google.protobuf;version=3"
+        schema:
+          protoFile: "proto/events/sharing/atom_reuse.proto"
+          messageName: "chora.sharing.v1.AtomReuseOrphanRequired"

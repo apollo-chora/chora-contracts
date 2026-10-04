@@ -1,0 +1,82 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Sharing - social profile tags (request + result)
+  version: 1.0.0
+  description: |
+    ADR-254 D1/D4 (R1): a learner's social profile tags are conjured by the
+    profile_conjurer agent through the kennel (profile_conjure lane). POST
+    /v1/me/profile/generate persists "tags pending" with the request in the same
+    transaction and returns 202; the result updates the profile and pushes
+    profile_ready / profile_error on the profile WebSocket. JSON-wire;
+    envelope.idempotency_key = profile_request_id. Source proto:
+    `proto/events/sharing/profile_tags.proto`.
+  contact:
+    name: Chora Content Team (Team 1)
+  license:
+    name: Proprietary
+
+defaultContentType: application/json
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  profileTagsRequested:
+    address: chora.sharing.profile_tags.requested.v1
+    messages:
+      profileTagsRequested:
+        $ref: '#/components/messages/ProfileTagsRequested'
+  profileTagsCompleted:
+    address: chora.sharing.profile_tags.completed.v1
+    messages:
+      profileTagsCompleted:
+        $ref: '#/components/messages/ProfileTagsCompleted'
+
+operations:
+  publishProfileTagsRequested:
+    action: send
+    channel:
+      $ref: '#/channels/profileTagsRequested'
+    description: chora-sharing outbox, same transaction as the pending profile.
+    messages:
+      - $ref: '#/channels/profileTagsRequested/messages/profileTagsRequested'
+  consumeProfileTagsRequested:
+    action: receive
+    channel:
+      $ref: '#/channels/profileTagsRequested'
+    description: the kennel generic workflow (subscription chora-ai-kernel-orchestrator.sharing-profile-tags-requested).
+    messages:
+      - $ref: '#/channels/profileTagsRequested/messages/profileTagsRequested'
+  publishProfileTagsCompleted:
+    action: send
+    channel:
+      $ref: '#/channels/profileTagsCompleted'
+    description: the kennel; status OK | FAILED | REJECTED.
+    messages:
+      - $ref: '#/channels/profileTagsCompleted/messages/profileTagsCompleted'
+  consumeProfileTagsCompleted:
+    action: receive
+    channel:
+      $ref: '#/channels/profileTagsCompleted'
+    description: chora-sharing (subscription chora-sharing.profile-tags-completed) updates the profile and pushes the WebSocket frame.
+    messages:
+      - $ref: '#/channels/profileTagsCompleted/messages/profileTagsCompleted'
+
+components:
+  messages:
+    ProfileTagsRequested:
+      name: ProfileTagsRequested
+      contentType: application/json
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/sharing/profile_tags.proto#/chora.sharing.v1.ProfileTagsRequested'
+    ProfileTagsCompleted:
+      name: ProfileTagsCompleted
+      contentType: application/json
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/sharing/profile_tags.proto#/chora.sharing.v1.ProfileTagsCompleted'

@@ -1,0 +1,84 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Content Consumption — CampaignNodeRevealed
+  version: 1.0.0
+  description: |
+    Published after the free-on-win fog-of-war reveal actually fired: the
+    fog orchestrator emitted child-concept suggestions for a won node
+    (ADR-227 D2, via the `concept_suggestions` pipeline — Verification
+    addendum #1; NOT the retiring kg_hexagon cache). The reveal is
+    mana-exempt, bounded (≤6 proposals per node won) and PERMANENT — losing
+    nothing ever re-hides territory.
+
+    - Domain: Content Consumption (`chora_consumption` DB)
+    - Aggregate root: `campaign_node_progress` (ADR-227 D16)
+    - Topic: `chora.consumption.campaign.node_revealed.v1`
+    - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
+    - Source proto: `proto/events/consumption/campaign.proto`
+       message `chora.consumption.v1.CampaignNodeRevealed`
+
+    Carries the triggering CampaignNodeWon envelope.event_id
+    (`won_event_id`) as the idempotency anchor + audit chain, and `goal_id`
+    (BINDING, addendum #6). Reveal-path emissions MUST NOT double-fire the
+    legacy kg.hexagon_expanded.v1 `hex_expand` XP source (addendum #6
+    guard, WS-C5). Idempotent via envelope idempotency_key = won_event_id.
+    Embeds the mandatory `chora.common.v1.EventEnvelope` as field 1.
+  contact:
+    name: Team 1 (Content) + Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+    description: Google Cloud Pub/Sub (chora-489812 platform host)
+
+channels:
+  campaignNodeRevealed:
+    address: chora.consumption.campaign.node_revealed.v1
+    description: Single-event topic for CampaignNodeRevealed.
+    messages:
+      campaignNodeRevealed:
+        $ref: '#/components/messages/CampaignNodeRevealed'
+
+operations:
+  publishCampaignNodeRevealed:
+    action: send
+    channel:
+      $ref: '#/channels/campaignNodeRevealed'
+    summary: Publish a CampaignNodeRevealed event
+    description: |
+      Emitted by chora-consumption (WS-C4 reveal trigger) after the
+      suggestion pipeline emitted the child proposals for the won node —
+      via the transactional outbox, idempotent on the triggering win.
+    messages:
+      - $ref: '#/channels/campaignNodeRevealed/messages/campaignNodeRevealed'
+
+  consumeCampaignNodeRevealed:
+    action: receive
+    channel:
+      $ref: '#/channels/campaignNodeRevealed'
+    summary: Subscribe to CampaignNodeRevealed events
+    description: |
+      Primary consumers (loosely-coupled, attach later):
+      - Observability — IMDA D2 reveal disclosure + bounded-LLM-cost evidence
+      (The A+ map refresh rides the existing suggestion surfaces, not this
+      topic.)
+    messages:
+      - $ref: '#/channels/campaignNodeRevealed/messages/campaignNodeRevealed'
+
+components:
+  messages:
+    CampaignNodeRevealed:
+      name: CampaignNodeRevealed
+      title: Campaign node revealed (fog lifted, earned)
+      summary: A won node's children were revealed for free — the reward is the map
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/consumption/campaign.proto#/chora.consumption.v1.CampaignNodeRevealed'

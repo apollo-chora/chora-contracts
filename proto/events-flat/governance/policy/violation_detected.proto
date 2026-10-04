@@ -1,0 +1,75 @@
+// =============================================================================
+// GENERATED — DO NOT EDIT.
+// Source : events/governance/policy.proto message PolicyViolationDetected
+// Tool   : chora-contracts/internal/protoflatten
+// Why    : GCP Pub/Sub Schema Registry rejects (a) schemas with `import`
+//          statements and (b) schemas with more than one top-level message.
+//          This flat copy contains exactly ONE top-level message;
+//          EventEnvelope + Timestamp + transitive deps are nested inside.
+// Path C : see chora-contracts/CHANGELOG.md and m10-data-plane main.tf.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.governance.v1;
+
+message PolicyViolationDetected {
+  // Inlined chora.common.v1.EventEnvelope (nested for self-contained schema).
+  message Envelope {
+    string event_id = 1;
+    string idempotency_key = 2;
+    string tenant_id = 3;
+    string gcid = 4;
+    Timestamp occurred_at = 5;
+    Timestamp published_at = 6;
+    string traceparent = 7;
+    string tracestate = 8;
+    string source_project = 9;
+    string source_service = 10;
+    int32 schema_version = 11;
+    string correlation_id = 12;
+    string causation_id = 13;
+    string chora_imda_dimension = 14;
+    string imda_lifecycle_stage = 15;
+  }
+
+  // Inlined google.protobuf.Timestamp (nested; wire-compatible).
+  message Timestamp {
+    int64 seconds = 1;
+    int32 nanos = 2;
+  }
+
+  // Inlined enum dep: PolicyKind
+  enum PolicyKind {
+    POLICY_KIND_UNSPECIFIED = 0;
+    POLICY_KIND_CONTENT_MODERATION = 1;
+    POLICY_KIND_AI_USAGE = 2;
+    POLICY_KIND_DATA_RETENTION = 3;
+    POLICY_KIND_ACCESS_CONTROL = 4;
+    POLICY_KIND_COMPLIANCE_IMDA = 5;
+    POLICY_KIND_COMPLIANCE_GDPR = 6;
+    POLICY_KIND_COMPLIANCE_PDPA = 7;
+    POLICY_KIND_COMPLIANCE_CCPA = 8;
+  }
+
+  // Inlined enum dep: ViolationSeverity
+  enum ViolationSeverity {
+    VIOLATION_SEVERITY_UNSPECIFIED = 0;
+    VIOLATION_SEVERITY_INFO = 1;
+    VIOLATION_SEVERITY_LOW = 2;
+    VIOLATION_SEVERITY_MEDIUM = 3;
+    VIOLATION_SEVERITY_HIGH = 4;
+    VIOLATION_SEVERITY_CRITICAL = 5;
+  }
+
+  Envelope envelope = 1;
+  string violation_id = 2;
+  string policy_id = 3;
+  PolicyKind policy_kind = 4;
+  ViolationSeverity violation_severity = 5;
+  string subject_gcid = 6;
+  string resource_uri = 7;
+  string description = 8;
+  string detector = 9;
+  Timestamp detected_at = 10;
+}

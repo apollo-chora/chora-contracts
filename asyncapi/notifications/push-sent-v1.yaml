@@ -1,0 +1,59 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Notifications — PushSent
+  version: 1.0.0
+  description: |
+    Published when FCM accepts the push for dispatch.
+
+    - Domain: Notifications (`chora_notifications` DB)
+    - Topic: `chora.notifications.push.sent.v1`
+    - Source proto: `proto/events/notifications/push.proto`
+       message `chora.notifications.v1.PushSent`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  pushSent:
+    address: chora.notifications.push.sent.v1
+    messages:
+      pushSent:
+        $ref: '#/components/messages/PushSent'
+
+operations:
+  publishPushSent:
+    action: send
+    channel:
+      $ref: '#/channels/pushSent'
+    messages:
+      - $ref: '#/channels/pushSent/messages/pushSent'
+
+  consumePushSent:
+    action: receive
+    channel:
+      $ref: '#/channels/pushSent'
+    description: |
+      Consumers: Observability (delivery KPI), Audit log.
+    messages:
+      - $ref: '#/channels/pushSent/messages/pushSent'
+
+components:
+  messages:
+    PushSent:
+      name: PushSent
+      title: Push Sent
+      summary: A push notification has been accepted by FCM
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/notifications/push.proto#/chora.notifications.v1.PushSent'

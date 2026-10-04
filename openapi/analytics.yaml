@@ -1,0 +1,349 @@
+openapi: "3.2.0"
+info:
+  title: "Chora Analytics & Reporting API"
+  version: "0.1.0"
+  description: |
+    Cross-domain analytics & reporting service per CHO-25.
+
+    READ-ONLY for ingestion (subscribes to ALL `chora.*.v1` Pub/Sub events
+    from the 11 domains for aggregation). Republishes NOTHING — analytics
+    is a leaf consumer in the event graph.
+
+    Capabilities:
+      - Pre-computed dashboard views (learner / instructor / admin / tenant).
+      - Cohort definition + cohort-based retention curves
+        (Ebbinghaus + cohort-relative).
+      - Period aggregation (hour / day / week / month).
+
+    Multi-tenant isolation: every read is scoped by `X-Tenant-Id` header.
+    Cross-tenant queries forbidden (returned 403).
+
+    Owning domain : Analytics (cross-cutting, reads from all 11 domains)
+    Owning team   : Team 3 (Platform)
+    Surface       : O+ Observability+ (admin/auditor) + role-conditional
+                    learner / instructor sub-views in A+ / R+
+  contact:
+    name: "Chora Platform Team (Team 3)"
+  license:
+    name: "Proprietary"
+
+servers:
+  - url: "https://api.chora.app"
+    description: "Production"
+  - url: "http://localhost:8080"
+    description: "Local development"
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Dashboards
+    description: "Pre-computed dashboard reads"
+  - name: Cohorts
+    description: "Cohort definitions + retention curves"
+  - name: Health
+    description: "Health check"
+
+paths:
+  /healthz:
+    get:
+      operationId: getHealth
+      summary: "Liveness check"
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: "Service is live"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /readyz:
+    get:
+      operationId: getReady
+      summary: "Readiness check"
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: "Service is ready"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /dashboards/learner:
+    get:
+      operationId: getLearnerDashboard
+      summary: "Get learner dashboard analytics"
+      tags: [Dashboards]
+      parameters:
+        - $ref: "#/components/parameters/TenantHeader"
+        - name: gcid
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: "Learner dashboard payload"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LearnerDashboard"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /dashboards/instructor:
+    get:
+      operationId: getInstructorDashboard
+      summary: "Get instructor dashboard analytics"
+      tags: [Dashboards]
+      parameters:
+        - $ref: "#/components/parameters/TenantHeader"
+        - name: gcid
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: "Instructor dashboard payload"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstructorDashboard"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /dashboards/admin:
+    get:
+      operationId: getAdminDashboard
+      summary: "Get tenant-wide admin dashboard"
+      tags: [Dashboards]
+      parameters:
+        - $ref: "#/components/parameters/TenantHeader"
+        - name: tenant_id
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "Admin tenant-wide dashboard payload"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminDashboard"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /cohorts:
+    post:
+      operationId: createCohort
+      summary: "Create a cohort definition"
+      tags: [Cohorts]
+      parameters:
+        - $ref: "#/components/parameters/TenantHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CohortCreate"
+      responses:
+        "201":
+          description: "Cohort created"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Cohort"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /cohorts/{id}/retention:
+    get:
+      operationId: getCohortRetention
+      summary: "Compute retention curve for a cohort"
+      tags: [Cohorts]
+      parameters:
+        - $ref: "#/components/parameters/TenantHeader"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: "Retention curve points (Ebbinghaus + cohort-relative)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RetentionCurve"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+
+  parameters:
+    TenantHeader:
+      name: X-Tenant-Id
+      in: header
+      required: true
+      schema:
+        type: string
+
+  responses:
+    BadRequest:
+      description: "Invalid request"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: "Cross-tenant access forbidden"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: "Not found"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+
+    LearnerDashboard:
+      type: object
+      required: [gcid, tenant_id, atoms_completed, sessions_count, current_streak_days, computed_at]
+      properties:
+        gcid:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+        atoms_completed:
+          type: integer
+        sessions_count:
+          type: integer
+        current_streak_days:
+          type: integer
+        computed_at:
+          type: string
+          format: date-time
+
+    InstructorDashboard:
+      type: object
+      required: [gcid, tenant_id, courses_owned, students_total, completion_rate_pct, computed_at]
+      properties:
+        gcid:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+        courses_owned:
+          type: integer
+        students_total:
+          type: integer
+        completion_rate_pct:
+          type: number
+        computed_at:
+          type: string
+          format: date-time
+
+    AdminDashboard:
+      type: object
+      required: [tenant_id, learners_active, atoms_published, sessions_completed, computed_at]
+      properties:
+        tenant_id:
+          type: string
+        learners_active:
+          type: integer
+        atoms_published:
+          type: integer
+        sessions_completed:
+          type: integer
+        computed_at:
+          type: string
+          format: date-time
+
+    CohortCreate:
+      type: object
+      required: [name, criteria]
+      properties:
+        name:
+          type: string
+        criteria:
+          type: object
+          additionalProperties:
+            type: string
+
+    Cohort:
+      type: object
+      required: [id, tenant_id, name, criteria, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+        name:
+          type: string
+        criteria:
+          type: object
+          additionalProperties:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+
+    RetentionPoint:
+      type: object
+      required: [day_offset, retained_count, retention_pct]
+      properties:
+        day_offset:
+          type: integer
+        retained_count:
+          type: integer
+        retention_pct:
+          type: number
+
+    RetentionCurve:
+      type: object
+      required: [cohort_id, total_size, points]
+      properties:
+        cohort_id:
+          type: string
+          format: uuid
+        total_size:
+          type: integer
+        points:
+          type: array
+          items:
+            $ref: "#/components/schemas/RetentionPoint"

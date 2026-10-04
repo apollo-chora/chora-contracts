@@ -1,0 +1,106 @@
+asyncapi: "3.0.0"
+info:
+  title: "chora.delivery.course.updated.v1"
+  version: "1.0.0"
+  description: |
+    Published when a Course's metadata is updated (PATCH /v1/courses/{id}).
+    Distinct from course.created.v1 (one-shot scaffolding) and
+    course.published.v1 (visibility flip into public).
+
+    Owning domain : Content Delivery (chora_delivery DB)
+    Owning team   : Team 2 (Delivery)
+    Surface       : A+ (instructor-edits), C+ (social feed updates)
+
+    Idempotency_key includes the occurred_at unix-ms so distinct edits do
+    NOT collapse at the bus. Subscribers MUST tolerate replays; canonical
+    state lives in chora_delivery.
+  contact:
+    name: "Chora Platform Team"
+  license:
+    name: "Proprietary"
+
+defaultContentType: application/x-protobuf
+
+servers:
+  local:
+    host: "localhost:8085"
+    protocol: googlepubsub
+    description: "Cloud Pub/Sub Emulator"
+  production:
+    host: "pubsub.googleapis.com"
+    protocol: googlepubsub
+    description: "Google Cloud Pub/Sub"
+
+channels:
+  courseUpdated:
+    address: chora.delivery.course.updated.v1
+    description: |
+      Carries CourseUpdated Protobuf payload.
+
+      Downstream consumers:
+        - chora-search        : index re-sync
+        - chora-sharing       : discovery feed update (if visibility changed)
+        - chora-observability : audit trail
+    messages:
+      courseUpdated:
+        $ref: "#/components/messages/CourseUpdated"
+
+operations:
+  publishCourseUpdated:
+    action: send
+    channel: { $ref: "#/channels/courseUpdated" }
+    summary: "Publish CourseUpdated"
+    messages: [ { $ref: "#/channels/courseUpdated/messages/courseUpdated" } ]
+  consumeCourseUpdated:
+    action: receive
+    channel: { $ref: "#/channels/courseUpdated" }
+    summary: "Consume CourseUpdated"
+    messages: [ { $ref: "#/channels/courseUpdated/messages/courseUpdated" } ]
+
+components:
+  messages:
+    CourseUpdated:
+      name: CourseUpdated
+      title: "Course Updated"
+      summary: "A Course's metadata has been updated."
+      contentType: application/x-protobuf
+      payload:
+        type: object
+        description: "Mirrors chora.delivery.v1.CourseUpdated."
+        properties:
+          envelope:
+            $ref: "#/components/schemas/EventEnvelope"
+          course_id:
+            type: string
+            format: uuid
+          title:
+            type: string
+            minLength: 1
+            maxLength: 256
+          visibility:
+            type: string
+            enum: [private, tenant_only, public]
+          updated_at:
+            type: string
+            format: date-time
+
+  schemas:
+    EventEnvelope:
+      type: object
+      description: "Mirrors chora.common.v1.EventEnvelope."
+      required: [event_id, idempotency_key, tenant_id, occurred_at, published_at,
+                 traceparent, source_project, source_service, schema_version]
+      properties:
+        event_id: { type: string, format: uuid }
+        idempotency_key: { type: string }
+        tenant_id: { type: string }
+        gcid: { type: string }
+        occurred_at: { type: string, format: date-time }
+        published_at: { type: string, format: date-time }
+        traceparent: { type: string }
+        tracestate: { type: string }
+        source_project: { type: string }
+        source_service: { type: string }
+        schema_version: { type: integer }
+        correlation_id: { type: string }
+        causation_id: { type: string }

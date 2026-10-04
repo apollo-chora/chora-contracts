@@ -1,0 +1,209 @@
+// =============================================================================
+// FROZEN WIRE. DO NOT EDIT, DO NOT RENAME, DO NOT ADD FIELDS.
+// =============================================================================
+//
+// This tree holds the SOURCE protos for event generations whose topics are
+// still declared in Terraform and still LIVE in Pub/Sub, but whose current-
+// generation source has been renamed or deleted. It exists so those flat protos
+// stay GENERATED rather than hand-preserved.
+//
+// WHY (ruling 44, 2026-09-04). protoflatten derives its output from the source
+// tree; Terraform derives its file() inputs from the declared topic list. When
+// the ADR-254 Companion rename moved these messages to companion_egg_purchase.proto, the flattener stopped emitting these flat protos while Terraform
+// went on resolving them. Because the wrapper wipes the flat tree before
+// regenerating, running the generator DELETED live wire and the dev root module
+// could not plan at all (39 file() errors, hand-restored by 27d187ffb). Freezing
+// the source here makes the old generation reproducible instead of fragile.
+//
+// ⚠ These messages are FLATTEN-INPUT ONLY. `buf generate` excludes this tree, so
+// no Go or Python bindings are produced from it: gen/ describes the CURRENT
+// generation only, and nothing in the repo consumes these types (verified).
+//
+// ⚠ A field name here is frozen wire, not vocabulary. The registry treats a
+// field NAME at a fixed tag as part of the frozen wire and REFUSES a same-tag
+// rename (ADR-254 line 139, ADR-246 D2). Domain vocabulary is Companion; these
+// names are what the live schemas carry.
+//
+// Retirement is a deliberate act, not a side effect: when a topic is retired
+// from Terraform AND its live schema is gone, delete the entry here too.
+//
+// Source: chora-contracts/proto/events/payments/familiar_egg_purchase.proto at 4658bd2a0^
+// =============================================================================
+
+// =============================================================================
+// Chora Payments — Familiar Egg Purchase events (Stripe-driven, ADR-149)
+// =============================================================================
+//
+// Aggregate root: FamiliarEggPurchase (1:1 with a Stripe Checkout session
+//                 for a Familiar-egg purchase per ADR-149).
+// Owning domain : Payments (chora_payments DB, per ADR-164).
+// Topic prefix  : chora.payments.familiar_egg_purchase.*
+//
+// Replaces (post Wave 1 Stage D cutover):
+//   chora.tenancy.familiar_egg.checkout_started.v1
+//   chora.tenancy.familiar_egg.payment_succeeded.v1
+//   chora.tenancy.familiar_egg.payment_failed.v1
+//   chora.tenancy.familiar_egg.refunded.v1
+//   (no expired counterpart in the legacy family — added here for parity)
+//
+// Originating-service notification path: chora-tenancy subscribes to
+// `chora.payments.familiar_egg_purchase.payment_captured.v1` and continues
+// to publish the existing `chora.consumption.familiar.egg_purchased.v1`
+// (chora-consumption then provisions the Stage-0 `familiar_instances` row).
+//
+// Free-egg paths (trial + subscription_inclusion + tenant_grant) DO NOT
+// flow through these events — they go straight to
+// `chora.consumption.familiar.egg_purchased.v1` with `source != "purchase"`.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.payments.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/payments/v1;paymentsv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// FamiliarEggPurchaseCheckoutStarted — emitted when chora-payments creates
+// a Stripe Checkout Session for an egg purchase.
+//
+// Topic: chora.payments.familiar_egg_purchase.checkout_started.v1
+// Consumers: chora-observability (funnel telemetry), chora-governance.
+message FamiliarEggPurchaseCheckoutStarted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string purchase_id = 2;
+
+  // Learner who initiated the purchase.
+  string learner_gcid = 3;
+
+  // Target tenant context for the egg (may differ from the learner's home
+  // tenant if cross-tenant browsing).
+  string target_tenant_id = 4;
+
+  // Egg SKU from the tenant catalog.
+  string egg_sku = 5;
+
+  string stripe_session_id = 6;
+  string stripe_checkout_url = 7;
+
+  int64  amount_cents = 8;
+  string currency = 9;
+
+  // Pre-bound focal-atom suggestion from the egg SKU (may be empty for
+  // "open-ended" SKUs where the learner picks at hatching).
+  string suggested_focal_atom_id = 10;
+
+  google.protobuf.Timestamp checkout_started_at = 11;
+}
+
+// FamiliarEggPurchasePaymentCaptured — emitted on Stripe's
+// `checkout.session.completed`. chora-tenancy subscribes and provisions
+// the FamiliarEggPurchase aggregate state (existing logic) + emits
+// `chora.consumption.familiar.egg_purchased.v1` for chora-consumption
+// to provision the Stage-0 familiar_instances row.
+//
+// Topic: chora.payments.familiar_egg_purchase.payment_captured.v1
+// Consumers: chora-tenancy (PRIMARY — FamiliarEgg FSM advance + downstream
+//            emit), chora-observability, chora-notifications, chora-governance.
+message FamiliarEggPurchasePaymentCaptured {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string purchase_id = 2;
+  string learner_gcid = 3;
+  string target_tenant_id = 4;
+  string egg_sku = 5;
+
+  string stripe_session_id = 6;
+  string stripe_payment_intent_id = 7;
+  string stripe_charge_id = 8;
+
+  int64  amount_cents_paid = 9;
+  int64  amount_cents_refunded = 10;
+  string currency = 11;
+
+  string suggested_focal_atom_id = 12;
+
+  google.protobuf.Timestamp paid_at = 13;
+}
+
+// FamiliarEggPurchasePaymentFailed — emitted on Stripe payment failure.
+//
+// Topic: chora.payments.familiar_egg_purchase.payment_failed.v1
+// Consumers: chora-tenancy (closes the in-progress purchase),
+//            chora-notifications (failure email), chora-governance.
+message FamiliarEggPurchasePaymentFailed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string purchase_id = 2;
+  string learner_gcid = 3;
+  string egg_sku = 4;
+
+  string stripe_session_id = 5;
+  string stripe_failure_code = 6;
+  string stripe_failure_message = 7;
+
+  google.protobuf.Timestamp failed_at = 8;
+}
+
+// FamiliarEggPurchaseRefunded — emitted on Stripe refund. Triggered by:
+//   - hard-expiry of unhatched egg (ADR-149 §60d auto-refund-credit;
+//     `reason=expired_unhatched`, `credit_only=true`)
+//   - support-initiated refund
+//   - customer-requested refund
+//   - duplicate-charge correction
+//   - fraud chargeback
+//
+// Topic: chora.payments.familiar_egg_purchase.refunded.v1
+// Consumers: chora-tenancy (marks egg purchase voided), chora-consumption
+//            (frees up the Familiar slot in FamiliarRoster if provisioned),
+//            chora-notifications (refund email), chora-observability.
+message FamiliarEggPurchaseRefunded {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string purchase_id = 2;
+  string learner_gcid = 3;
+  string egg_sku = 4;
+
+  string stripe_charge_id = 5;
+  string stripe_refund_id = 6;
+
+  int64  amount_cents_refunded = 7;
+  string currency = 8;
+
+  // Refund reason. One of:
+  //   expired_unhatched | support_initiated | customer_request |
+  //   duplicate_charge | fraud
+  string reason = 9;
+
+  // True if the refund yields a mana_credit instead of a real-money
+  // refund (per ADR-149 §"Unhatched egg expiry" — 50% credit on hard-
+  // expiry path).
+  bool   credit_only = 10;
+
+  google.protobuf.Timestamp refunded_at = 11;
+}
+
+// FamiliarEggPurchaseExpired — emitted when Stripe reports
+// `checkout.session.expired` (Checkout abandoned past Stripe's 24h
+// window without payment) OR when the chora-payments expiry sweeper
+// marks a stuck `checkout_started` row as expired.
+//
+// Distinct from the ADR-149 60-day post-purchase hard-expiry sweep
+// (that one fires `refunded` with `reason=expired_unhatched`,
+// `credit_only=true`).
+//
+// Topic: chora.payments.familiar_egg_purchase.expired.v1
+// Consumers: chora-observability (funnel abandonment), chora-governance.
+message FamiliarEggPurchaseExpired {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string purchase_id = 2;
+  string learner_gcid = 3;
+  string egg_sku = 4;
+
+  string stripe_session_id = 5;
+
+  google.protobuf.Timestamp expired_at = 6;
+}

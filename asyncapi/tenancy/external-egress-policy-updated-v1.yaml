@@ -1,0 +1,88 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Tenancy — ExternalEgressPolicyUpdated
+  version: 1.0.0
+  description: |
+    Published when a Tenant Admin changes their tenant's external web-egress
+    entitlement (opt in, opt out, or retune the daily grounded-call ceiling)
+    from H+.
+
+    **This event is the ONLY bridge between two databases.** chora-tenancy owns
+    the entitlement (deterministic tenant administration). The model-gateway
+    must consult it fail-closed on every grounded-search call, but it reads from
+    `chora_observability.external_egress_policy` — a different database, and
+    cross-DB writes are FORBIDDEN. So chora-tenancy publishes this event and a
+    chora-observability subscriber PROJECTS it into that read-copy.
+
+    Published ONLY on a real change — an identical write is a no-op in the
+    aggregate and emits nothing. This topic carries decisions, not noise.
+
+    **Ordering matters.** Pub/Sub is at-least-once and not order-preserving, so
+    the payload carries a monotonic `version`. The projection MUST discard any
+    event that is not strictly newer than what it has already applied —
+    otherwise a redelivered "egress ON" could silently resurrect an entitlement
+    the tenant has since turned OFF.
+
+    **Default-deny.** A tenant with no row is OFF, so franchise tenants (schools,
+    minors) need no seeding — absence IS the denial (ADR-220 D4).
+
+    - Domain: Tenancy + Billing (`chora_tenancy` DB)
+    - Topic: `chora.tenancy.external_egress_policy.updated.v1`
+    - Source proto: `proto/events/tenancy/external_egress_policy.proto`
+       message `chora.tenancy.v1.ExternalEgressPolicyUpdated`
+    - Canon: PLAN.md §4.2.4 · ADR-220 D4 · ADR-231 D6 · CHO-2148
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  externalEgressPolicyUpdated:
+    address: chora.tenancy.external_egress_policy.updated.v1
+    messages:
+      externalEgressPolicyUpdated:
+        $ref: '#/components/messages/ExternalEgressPolicyUpdated'
+
+operations:
+  publishExternalEgressPolicyUpdated:
+    action: send
+    channel:
+      $ref: '#/channels/externalEgressPolicyUpdated'
+    description: |
+      Publisher: chora-tenancy, from the transactional outbox — the policy row
+      and this event are written in ONE transaction, so the entitlement and the
+      projection can never diverge on a crash.
+    messages:
+      - $ref: '#/channels/externalEgressPolicyUpdated/messages/externalEgressPolicyUpdated'
+
+  consumeExternalEgressPolicyUpdated:
+    action: receive
+    channel:
+      $ref: '#/channels/externalEgressPolicyUpdated'
+    description: |
+      Consumer: chora-observability — projects the policy into
+      `external_egress_policy` (the model-gateway's fail-closed read-copy) and
+      records the audit trail from `updated_by_gcid` + the before/after fields.
+      Idempotent on `envelope.event_id`; monotonic on `version`.
+    messages:
+      - $ref: '#/channels/externalEgressPolicyUpdated/messages/externalEgressPolicyUpdated'
+
+components:
+  messages:
+    ExternalEgressPolicyUpdated:
+      name: ExternalEgressPolicyUpdated
+      title: External Egress Policy Updated
+      summary: A tenant's external web-egress entitlement changed
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/tenancy/external_egress_policy.proto#/chora.tenancy.v1.ExternalEgressPolicyUpdated'

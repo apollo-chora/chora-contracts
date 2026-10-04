@@ -1,0 +1,517 @@
+// =============================================================================
+// Chora Content Consumption Service (gRPC)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 1 D1
+//   + .claude/rules/ddd-enforcement.md
+//   + chora-contracts/openapi/consumption-admin.yaml
+//   + chora-contracts/proto/events/consumption/*.proto
+//   + memory project_chora_data_plane.md
+//
+// Inter-service gRPC contract for the Content Consumption core domain
+// (chora_consumption database, Team 1 / Content). Surface: A+ Reader mode.
+//
+// Aggregates exposed:
+//   - LearningPath        — ordered/queried sequence of atoms (Straight-Up
+//                           linear cert mode + Discovery curiosity mode)
+//   - AtomicSession       — learner's session over a single atom
+//   - Companion            — RPG learning companion DOMAIN ENTITY (NOT the
+//                           AI agent that powers it — the agent is in
+//                           AI Kernel; this is the domain-side entity)
+//   - DailyDose           — Ebbinghaus-curve spaced repetition pull-list
+//
+// Companion discipline (per CLAUDE.md domain vocabulary): Companion is the
+// in-game RPG companion (a domain entity in Content Consumption); the AI
+// agent powering it is a separate adapter concern (in AI Kernel). Don't
+// conflate.
+//
+// Cross-DB queries FORBIDDEN — atom content is OWNED by Creation; this
+// service consumes Pub/Sub-fed projections (see chora.creation.atom.* events).
+//
+// Learner-facing reads use GraphQL (chora-contracts/graphql/consumption.graphql).
+// gRPC is for internal service-to-service sync calls only.
+//
+// Deployed in chora-content (Team 1 pool). mTLS via Cloud Service Mesh;
+// SPIFFE identity in mesh; W3C trace context in gRPC metadata.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.services.consumption.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/consumption/v1;consumptionv1";
+
+import "google/protobuf/timestamp.proto";
+
+// -----------------------------------------------------------------------------
+// Service
+// -----------------------------------------------------------------------------
+
+service Consumption {
+  // Begin a new AtomicSession over a single atom. Idempotent on
+  // (learner_gcid, atom_id) for an open session window.
+  rpc StartSession(StartSessionRequest) returns (StartSessionResponse);
+
+  // Submit an answer for the current atom in an active session. Returns
+  // the verdict (correct / incorrect / partial) + reinforcement payload
+  // for spaced-repetition placement. Idempotent on (session_id, attempt_seq).
+  rpc SubmitAnswer(SubmitAnswerRequest) returns (SubmitAnswerResponse);
+
+  // Abandon an in-flight session before completion. Records reason for
+  // engagement-loop analytics. Idempotent on (session_id).
+  rpc AbandonSession(AbandonSessionRequest) returns (AbandonSessionResponse);
+
+  // Resolve the active Companion (RPG companion entity) for a learner.
+  // Returns NOT_FOUND when the learner has no bonded Companion yet.
+  rpc GetCompanion(GetCompanionRequest) returns (GetCompanionResponse);
+
+  // Summon (bond) a new Companion for a learner. One Companion per active
+  // class context — see the SocialProfile rules for binding semantics.
+  // Idempotent on (learner_gcid, class_context_id).
+  rpc SummonCompanion(SummonCompanionRequest) returns (SummonCompanionResponse);
+
+  // Compute today's Daily Dose pull-list for a learner (Ebbinghaus
+  // Forgetting Curve placement). Returns 0..N atom projections to review.
+  rpc GetDailyDose(GetDailyDoseRequest) returns (GetDailyDoseResponse);
+
+  // Enroll a learner in a LearningPath. Idempotent on
+  // (learner_gcid, path_id). Side-effect: emits
+  // chora.consumption.learning_path.enrolled.v1.
+  rpc EnrollLearningPath(EnrollLearningPathRequest) returns (EnrollLearningPathResponse);
+
+  // Retrieve ranked candidate atoms for a learner's daily-dose / discovery
+  // recommendation, reading the LOCAL `atom_index` projection (hydrated from
+  // chora.creation.atom.created.v1 — see internal/domain/atom_index). This is
+  // the sanctioned RAG-retrieval surface for the AI Kernel Content Recommender
+  // crew's `recommend_atoms_for_learner` tool: the crew runs in the ai-kernel
+  // namespace and CANNOT read chora_consumption directly (cross-DB FORBIDDEN),
+  // so it dials chora-consumption:9090 for real published atoms instead of
+  // returning stub data.
+  //
+  // Read-only, side-effect free, deterministic given the projection. Tenant-
+  // scoped (RLS): the caller MUST pass tenant_id; the server applies the
+  // per-request RLS session. When topic_hint is set, the result is biased
+  // toward atoms whose topic_tags match (substring / tag overlap); empty
+  // topic_hint returns the most-recently-published candidates for the tenant.
+  // Returns 0..N projections (NEVER fabricated — empty when the tenant has no
+  // published atoms).
+  rpc RecommendAtomsForLearner(RecommendAtomsForLearnerRequest) returns (RecommendAtomsForLearnerResponse);
+}
+
+// -----------------------------------------------------------------------------
+// Shared enums
+// -----------------------------------------------------------------------------
+
+// SessionState — AtomicSession lifecycle.
+enum SessionState {
+  SESSION_STATE_UNSPECIFIED = 0;
+  SESSION_STATE_IN_PROGRESS = 1;
+  SESSION_STATE_COMPLETED = 2;
+  SESSION_STATE_ABANDONED = 3;
+}
+
+// AnswerVerdict — outcome of a single SubmitAnswer call.
+enum AnswerVerdict {
+  ANSWER_VERDICT_UNSPECIFIED = 0;
+  ANSWER_VERDICT_CORRECT = 1;
+  ANSWER_VERDICT_INCORRECT = 2;
+  ANSWER_VERDICT_PARTIAL = 3;        // partial-credit (e.g., matching atoms)
+  ANSWER_VERDICT_PENDING_REVIEW = 4; // requires human grading (essay / code)
+}
+
+// PathMode — Straight-Up linear cert vs Discovery curiosity-driven.
+enum PathMode {
+  PATH_MODE_UNSPECIFIED = 0;
+  PATH_MODE_STRAIGHT_UP = 1;  // linear cert mode (Tier 1 D1)
+  PATH_MODE_DISCOVERY = 2;    // graph-based curiosity mode (Tier 1 D1)
+}
+
+// CompanionSpecies — Companion species (catalog values; expand in additive way).
+enum CompanionSpecies {
+  COMPANION_SPECIES_UNSPECIFIED = 0;
+  COMPANION_SPECIES_FOX = 1;
+  COMPANION_SPECIES_OWL = 2;
+  COMPANION_SPECIES_DRAGON = 3;
+  COMPANION_SPECIES_TURTLE = 4;
+  COMPANION_SPECIES_RABBIT = 5;
+}
+
+// CompanionMood — Companion's affect state (drives RPG companion UX).
+enum CompanionMood {
+  COMPANION_MOOD_UNSPECIFIED = 0;
+  COMPANION_MOOD_HAPPY = 1;
+  COMPANION_MOOD_NEUTRAL = 2;
+  COMPANION_MOOD_TIRED = 3;
+  COMPANION_MOOD_EXCITED = 4;
+}
+
+// AbandonReason — why the learner dropped the session.
+enum AbandonReason {
+  ABANDON_REASON_UNSPECIFIED = 0;
+  ABANDON_REASON_USER_REQUESTED = 1;
+  ABANDON_REASON_TIMEOUT = 2;
+  ABANDON_REASON_NETWORK = 3;
+  ABANDON_REASON_SYSTEM = 4;
+}
+
+// -----------------------------------------------------------------------------
+// Common message types
+// -----------------------------------------------------------------------------
+
+// AtomicSession — learner's session over a single atom.
+message AtomicSession {
+  // UUIDv7.
+  string session_id = 1;
+
+  // GCID of the learner.
+  string learner_gcid = 2;
+
+  // Atom being attempted (cross-domain UUID — owned by Creation).
+  string atom_id = 3;
+
+  // Optional LearningPath context (when the session was opened from a path).
+  string path_id = 4;
+
+  // Tenant scope.
+  string tenant_id = 5;
+
+  // Lifecycle state.
+  SessionState state = 6;
+
+  // Number of attempts submitted so far.
+  int32 attempt_count = 7;
+
+  // Aggregated score in [0.0, 1.0]. Zero when state=IN_PROGRESS.
+  float score = 8;
+
+  // When the session was started.
+  google.protobuf.Timestamp started_at = 9;
+
+  // When the session terminated. Zero when state=IN_PROGRESS.
+  google.protobuf.Timestamp ended_at = 10;
+}
+
+// Companion — RPG learning companion DOMAIN ENTITY. Distinct from the AI
+// agent that powers it (the agent lives in AI Kernel).
+message Companion {
+  // UUIDv7.
+  string companion_id = 1;
+
+  // GCID of the learner this Companion is bonded to.
+  string learner_gcid = 2;
+
+  // Tenant scope.
+  string tenant_id = 3;
+
+  // Class-context UUID this Companion is scoped to (per-class reusable
+  // SocialProfile model — Companion binds to a class context, not a course).
+  string class_context_id = 4;
+
+  // Species.
+  CompanionSpecies species = 5;
+
+  // Display name chosen by the learner (1..64 chars).
+  string nickname = 6;
+
+  // RPG level (starts at 1; capped per game-balance config).
+  int32 level = 7;
+
+  // XP toward next level.
+  int32 xp = 8;
+
+  // Current mood (drives companion UX affect).
+  CompanionMood mood = 9;
+
+  // When the Companion was bonded (SummonCompanion timestamp).
+  google.protobuf.Timestamp bonded_at = 10;
+
+  // When the Companion was last interacted with (drives mood decay).
+  google.protobuf.Timestamp last_interacted_at = 11;
+}
+
+// DailyDoseAtom — a single recommended-review atom in the Daily Dose
+// pull-list. Atom content is fetched from Creation by the caller; this
+// message carries placement metadata only.
+message DailyDoseAtom {
+  // Atom UUIDv7 (cross-domain reference).
+  string atom_id = 1;
+
+  // Why this atom surfaced today. Aligned with Ebbinghaus placement
+  // semantics: "first_review", "scheduled_review", "low_confidence",
+  // "spaced_decay".
+  string reason = 2;
+
+  // Recommended sequence position in today's session (1..N).
+  int32 position = 3;
+
+  // Last time the learner attempted this atom. Zero on first review.
+  google.protobuf.Timestamp last_attempted_at = 4;
+
+  // Predicted retention probability in [0.0, 1.0] at session-open time.
+  float retention_estimate = 5;
+}
+
+// LearningPathProgress — projection of a learner's progress on a path.
+message LearningPathProgress {
+  // GCID of the learner.
+  string learner_gcid = 1;
+
+  // Path UUIDv7.
+  string path_id = 2;
+
+  // Tenant scope.
+  string tenant_id = 3;
+
+  // Mode the path was authored under.
+  PathMode mode = 4;
+
+  // Total atoms required to complete the path.
+  int32 total_atoms = 5;
+
+  // Atoms the learner has completed (verdict=CORRECT or PARTIAL).
+  int32 completed_atoms = 6;
+
+  // Aggregated score across completed atoms in [0.0, 1.0].
+  float aggregate_score = 7;
+
+  // When the learner enrolled in the path.
+  google.protobuf.Timestamp enrolled_at = 8;
+
+  // When the learner last interacted with the path.
+  google.protobuf.Timestamp last_active_at = 9;
+
+  // When the learner completed the path (zero when in progress).
+  google.protobuf.Timestamp completed_at = 10;
+}
+
+// -----------------------------------------------------------------------------
+// StartSession RPC
+// -----------------------------------------------------------------------------
+
+message StartSessionRequest {
+  // Learner GCID. Required.
+  string learner_gcid = 1;
+
+  // Atom to attempt. Required.
+  string atom_id = 2;
+
+  // Tenant scope. Required.
+  string tenant_id = 3;
+
+  // Optional LearningPath context.
+  string path_id = 4;
+
+  // Idempotency key (UUIDv7). Same key within an open session window
+  // returns the existing session.
+  string idempotency_key = 5;
+}
+
+message StartSessionResponse {
+  // The newly-started (or pre-existing, on idempotent re-call) session.
+  AtomicSession session = 1;
+}
+
+// -----------------------------------------------------------------------------
+// SubmitAnswer RPC
+// -----------------------------------------------------------------------------
+
+message SubmitAnswerRequest {
+  // Session UUIDv7. Required.
+  string session_id = 1;
+
+  // Tenant scope. Required.
+  string tenant_id = 2;
+
+  // Monotonic attempt sequence within the session (1, 2, 3, ...). Used
+  // for idempotency on retry.
+  int32 attempt_seq = 3;
+
+  // JSON-stringified answer payload (schema varies by atom_type — opaque
+  // to gRPC).
+  string answer_json = 4;
+
+  // When the learner submitted the answer (client clock; for latency
+  // analytics).
+  google.protobuf.Timestamp submitted_at = 5;
+}
+
+message SubmitAnswerResponse {
+  // Verdict for this attempt.
+  AnswerVerdict verdict = 1;
+
+  // Score awarded for this attempt in [0.0, 1.0].
+  float score = 2;
+
+  // Aggregated session score after this attempt.
+  float session_score = 3;
+
+  // Free-text feedback / hint. Populated by the AI Kernel hint-author
+  // agent when configured for this atom; empty otherwise.
+  string feedback = 4;
+
+  // Updated session snapshot.
+  AtomicSession session = 5;
+}
+
+// -----------------------------------------------------------------------------
+// AbandonSession RPC
+// -----------------------------------------------------------------------------
+
+message AbandonSessionRequest {
+  // Session UUIDv7. Required.
+  string session_id = 1;
+
+  // Tenant scope. Required.
+  string tenant_id = 2;
+
+  // Reason. Required.
+  AbandonReason reason = 3;
+
+  // Optional free-text detail (max 256 chars).
+  string detail = 4;
+}
+
+message AbandonSessionResponse {
+  // Session snapshot post-abandon (state=ABANDONED).
+  AtomicSession session = 1;
+}
+
+// -----------------------------------------------------------------------------
+// GetCompanion RPC
+// -----------------------------------------------------------------------------
+
+message GetCompanionRequest {
+  // Learner GCID. Required.
+  string learner_gcid = 1;
+
+  // Class context. Required (Companion is scoped per-class, not per-course).
+  string class_context_id = 2;
+
+  // Tenant scope. Required.
+  string tenant_id = 3;
+}
+
+message GetCompanionResponse {
+  // The bonded Companion. NOT_FOUND when none exists.
+  Companion companion = 1;
+}
+
+// -----------------------------------------------------------------------------
+// SummonCompanion RPC
+// -----------------------------------------------------------------------------
+
+message SummonCompanionRequest {
+  // Learner GCID. Required.
+  string learner_gcid = 1;
+
+  // Class context. Required.
+  string class_context_id = 2;
+
+  // Tenant scope. Required.
+  string tenant_id = 3;
+
+  // Species choice. Required.
+  CompanionSpecies species = 4;
+
+  // Display name chosen by the learner (1..64 chars).
+  string nickname = 5;
+}
+
+message SummonCompanionResponse {
+  // The newly-bonded (or pre-existing, on idempotent re-call) Companion.
+  Companion companion = 1;
+}
+
+// -----------------------------------------------------------------------------
+// GetDailyDose RPC
+// -----------------------------------------------------------------------------
+
+message GetDailyDoseRequest {
+  // Learner GCID. Required.
+  string learner_gcid = 1;
+
+  // Tenant scope. Required.
+  string tenant_id = 2;
+
+  // Maximum atoms in today's pull-list (1..50, default 10).
+  int32 limit = 3;
+}
+
+message GetDailyDoseResponse {
+  // Today's pull-list, ordered by recommended position (1..N).
+  repeated DailyDoseAtom atoms = 1;
+
+  // When the pull-list was computed (server clock).
+  google.protobuf.Timestamp computed_at = 2;
+}
+
+// -----------------------------------------------------------------------------
+// EnrollLearningPath RPC
+// -----------------------------------------------------------------------------
+
+message EnrollLearningPathRequest {
+  // Learner GCID. Required.
+  string learner_gcid = 1;
+
+  // Path UUIDv7. Required.
+  string path_id = 2;
+
+  // Tenant scope. Required.
+  string tenant_id = 3;
+
+  // Idempotency key (UUIDv7). Same key returns existing enrollment.
+  string idempotency_key = 4;
+}
+
+message EnrollLearningPathResponse {
+  // Initial progress snapshot (completed_atoms = 0).
+  LearningPathProgress progress = 1;
+}
+
+// -----------------------------------------------------------------------------
+// RecommendAtomsForLearner RPC
+// -----------------------------------------------------------------------------
+
+// AtomRecommendation — a single ranked candidate atom from the local
+// atom_index projection. Carries ONLY skinny projection metadata (no body
+// content — the full atom lives in chora_creation; the player fetches the
+// body via HTTP at render time). The AI Kernel recommender ranks + cites
+// these; it NEVER fabricates atom_ids.
+message AtomRecommendation {
+  // Atom UUIDv7 (cross-domain reference — owned by Creation).
+  string atom_id = 1;
+
+  // Display title (from the projection).
+  string title = 2;
+
+  // Primary topic tag (first of topic_tags), or "" when untagged.
+  string topic = 3;
+
+  // Difficulty (0 = unspecified; otherwise an authoring-time scalar).
+  int32 difficulty = 4;
+
+  // When the atom was published (recency signal for ranking).
+  google.protobuf.Timestamp published_at = 5;
+}
+
+message RecommendAtomsForLearnerRequest {
+  // Tenant scope. Required (RLS). The AI Kernel crew propagates this from
+  // session state via the tenant-propagation plugin.
+  string tenant_id = 1;
+
+  // Learner GCID. Required (audit + future per-learner personalisation).
+  string learner_gcid = 2;
+
+  // Optional topic bias. When set, candidates whose topic_tags overlap the
+  // hint are preferred. Empty ⇒ most-recently-published candidates.
+  string topic_hint = 3;
+
+  // Maximum candidates to return (1..10, default 5; clamped server-side).
+  int32 limit = 4;
+}
+
+message RecommendAtomsForLearnerResponse {
+  // Ranked candidate atoms (0..limit). Empty when the tenant has no
+  // published atoms — the caller surfaces an empty-list reason, never a stub.
+  repeated AtomRecommendation recommendations = 1;
+}

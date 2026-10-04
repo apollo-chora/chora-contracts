@@ -1,0 +1,71 @@
+// =============================================================================
+// Chora Content Sharing: post moderation on the bus
+// =============================================================================
+//
+// ADR-254 D1/D4 (R1): post bodies are moderated by the content_moderation
+// agent through the kennel, never by an HTTP call from chora-sharing
+// (MODERATION_ENGINE_GKE_ENDPOINT is deleted). A new post is persisted as
+// pending_moderation and hidden from everyone but its author; this request is
+// written to the outbox in the same transaction; the result publishes or
+// rejects it.
+//
+// Wire (ADR-254 D4): JSON on the bus, schema-less; envelope in attributes and
+// field 1; envelope.idempotency_key = post_id.
+//
+//   Request : chora.sharing.post_moderation.requested.v1
+//   Result  : chora.sharing.post_moderation.completed.v1
+//             (sharing pulls chora-sharing.post-moderation-completed)
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.sharing.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/sharing/v1;sharingv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// Topic: chora.sharing.post_moderation.requested.v1
+message PostModerationRequested {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 of the post (the idempotency key).
+  string post_id = 2;
+
+  // The post body to moderate.
+  string text = 3;
+
+  // Media object references attached to the post (GCS URIs), if any.
+  repeated string media_refs = 4;
+
+  // The author's GCID (also envelope.gcid).
+  string author_gcid = 5;
+
+  // "public" | "tenant" | "private" (the post's requested visibility).
+  string visibility = 6;
+
+  google.protobuf.Timestamp requested_at = 7;
+}
+
+// Topic: chora.sharing.post_moderation.completed.v1
+message PostModerationCompleted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string post_id = 2;
+
+  // "OK" | "FAILED" | "REJECTED" (the workflow outcome, not the verdict).
+  string status = 3;
+  string error_code = 4;
+  string workflow_id = 5;
+  string generated_by_model_id = 6;
+
+  // The moderation verdict when status == OK: "approved" | "rejected".
+  string verdict = 7;
+
+  // Machine reasons for a rejected verdict (learner-facing copy is rendered
+  // by sharing from these tokens).
+  repeated string reasons = 8;
+
+  google.protobuf.Timestamp completed_at = 9;
+}

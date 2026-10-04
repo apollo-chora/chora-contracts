@@ -1,0 +1,61 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Payments — TenantAddonPurchaseRefunded
+  version: 1.0.0
+  description: |
+    chora-payments observed Stripe `charge.refunded` for a H+ Marketplace
+    tenant-add-on subscription (full or partial). chora-tenancy
+    deactivates the entitlement via the CHO-1731 deactivation flow.
+
+    - Domain: Payments (`chora_payments` DB)
+    - Topic: `chora.payments.tenant_addon_purchase.refunded.v1`
+    - Source proto: `proto/events/payments/tenant_addon_purchase.proto`
+       message `chora.payments.v1.TenantAddonPurchaseRefunded`
+    - Aggregate: TenantAddonPurchase (CHO-1736 H+ Marketplace Subscribe)
+    - Per ADR-164 (chora-payments service + 13th DB).
+    - IMDA: envelope.chora_imda_dimension = "accountability"
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  tenantAddonPurchaseRefunded:
+    address: chora.payments.tenant_addon_purchase.refunded.v1
+    messages:
+      tenantAddonPurchaseRefunded:
+        $ref: '#/components/messages/TenantAddonPurchaseRefunded'
+
+operations:
+  publishTenantAddonPurchaseRefunded:
+    action: send
+    channel:
+      $ref: '#/channels/tenantAddonPurchaseRefunded'
+    messages:
+      - $ref: '#/channels/tenantAddonPurchaseRefunded/messages/tenantAddonPurchaseRefunded'
+
+  consumeTenantAddonPurchaseRefunded:
+    action: receive
+    channel:
+      $ref: '#/channels/tenantAddonPurchaseRefunded'
+    messages:
+      - $ref: '#/channels/tenantAddonPurchaseRefunded/messages/tenantAddonPurchaseRefunded'
+
+components:
+  messages:
+    TenantAddonPurchaseRefunded:
+      name: TenantAddonPurchaseRefunded
+      title: Stripe refund issued for a H+ Marketplace tenant-add-on subscription (CHO-1736)
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/payments/tenant_addon_purchase.proto#/chora.payments.v1.TenantAddonPurchaseRefunded'

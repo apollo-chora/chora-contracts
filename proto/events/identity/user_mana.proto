@@ -1,0 +1,202 @@
+// =============================================================================
+// chora.identity.v1 — User Mana wallet events
+// =============================================================================
+//
+// Source-of-truth: docs/architecture/adrs/adr-142-per-user-economy-mana.md
+//   + chora-contracts/openapi/learner-economy.yaml
+//
+// Owning domain : Identity (chora_identity database)
+// Owning team   : Team 3 (Platform)
+// Topic prefix  : chora.identity.user_mana.*
+//
+// Mana is the 4th currency — real-money-backed prepaid credit, GCID-scoped,
+// non-tenant-transferable, persists across subscription cancellations.
+// DISTINCT from in-platform Three-Currency (XP/Coins/StarCredits/Reputation
+// = community engagement loops). No exchange between mana and the
+// engagement currencies.
+//
+// All mana mutations append a row to the `mana_ledger` (append-only,
+// month-partitioned). These events mirror those ledger entries one-for-one;
+// idempotency_key in the envelope MUST equal the ledger entry_id for
+// deterministic replay.
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.identity.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/identity/v1;identityv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// ManaDirection — direction of a ledger movement.
+// -----------------------------------------------------------------------------
+enum ManaDirection {
+  MANA_DIRECTION_UNSPECIFIED = 0;
+  MANA_DIRECTION_CREDIT = 1;     // balance increases
+  MANA_DIRECTION_DEBIT = 2;      // balance decreases
+  MANA_DIRECTION_MINT = 3;       // system-issued (admin / promo / migration)
+  MANA_DIRECTION_REFUND = 4;     // reverses a prior debit
+  MANA_DIRECTION_ROLLOVER = 5;   // period boundary carry
+}
+
+// -----------------------------------------------------------------------------
+// ManaReason — audit-grade reason on each ledger movement.
+// -----------------------------------------------------------------------------
+enum ManaReason {
+  MANA_REASON_UNSPECIFIED = 0;
+  MANA_REASON_SUBSCRIPTION_GRANT = 1;
+  MANA_REASON_COMPANION_ACTION = 2;
+  MANA_REASON_REFUND = 3;
+  MANA_REASON_ACCOUNT_CLOSURE = 4;
+  MANA_REASON_PROMO = 5;
+  MANA_REASON_TENANT_SUBSIDY = 6;
+  MANA_REASON_TOPUP = 7;
+  MANA_REASON_ROLLOVER = 8;
+}
+
+// -----------------------------------------------------------------------------
+// UserManaCredited — chora.identity.user_mana.credited.v1
+// -----------------------------------------------------------------------------
+//
+// Published when mana is credited to a user's wallet. Sources include
+// subscription grants (onboarding bonus + monthly drip), top-ups,
+// promotional credits, and tenant subsidy allocations claimed.
+message UserManaCredited {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 of the mana_ledger row created by this credit.
+  string entry_id = 2;
+
+  string gcid = 3;
+
+  // Always MANA_DIRECTION_CREDIT (or MINT for system grants).
+  ManaDirection direction = 4;
+
+  // Quantity credited (>= 1).
+  int64 units = 5;
+
+  ManaReason reason = 6;
+
+  // Source pointers (mutually exclusive depending on reason). All UUIDv7.
+  string source_subscription_id = 7;   // when reason=subscription_grant
+  string source_topup_id = 8;          // when reason=topup
+  string source_allocation_id = 9;     // when reason=tenant_subsidy
+
+  // Balance snapshot AFTER applying this credit (for fast UI rendering).
+  int64 balance_after_units = 10;
+
+  google.protobuf.Timestamp recorded_at = 11;
+}
+
+// -----------------------------------------------------------------------------
+// UserManaDebited — chora.identity.user_mana.debited.v1
+// -----------------------------------------------------------------------------
+//
+// Published when mana is debited for a Companion action (e.g., chat,
+// question generation, coach session). May produce MULTIPLE debit events
+// for a single action when subsidy + personal balance are both touched
+// (deterministic FIFO spend order per ADR-142: subsidies first, oldest
+// allocation_id first).
+message UserManaDebited {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 of the mana_ledger row created by this debit.
+  string entry_id = 2;
+
+  string gcid = 3;
+
+  // Always MANA_DIRECTION_DEBIT.
+  ManaDirection direction = 4;
+
+  // Quantity debited (>= 1).
+  int64 units = 5;
+
+  ManaReason reason = 6;   // Typically MANA_REASON_COMPANION_ACTION
+
+  // Stable action code (e.g., "companion_chat", "question_generation",
+  // "coach_session_full", "atom_authoring_assist"). Looked up against
+  // mana_action_pricing config table.
+  string action_code = 7;
+
+  // When the debit drained a TenantManaAllocation, this carries the
+  // allocation UUID; empty when debiting personal balance.
+  string source_allocation_id = 8;
+
+  // Optional request correlation across the LLM call (matches
+  // model-broker-gateway request_id for refund linkage).
+  string request_id = 9;
+
+  // Balance snapshot AFTER applying this debit.
+  int64 balance_after_units = 10;
+
+  google.protobuf.Timestamp recorded_at = 11;
+}
+
+// -----------------------------------------------------------------------------
+// UserManaRefunded — chora.identity.user_mana.refunded.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a prior debit is reversed (LLM call failed after mana
+// already debited; admin-issued goodwill credit). Idempotency key MUST be
+// derived from the original request_id (e.g., `{request_id}-refund`) per
+// ADR-142.
+message UserManaRefunded {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string entry_id = 2;
+  string gcid = 3;
+
+  // Always MANA_DIRECTION_REFUND.
+  ManaDirection direction = 4;
+
+  int64 units = 5;
+
+  ManaReason reason = 6;   // Typically MANA_REASON_REFUND
+
+  // The entry_id that this refund reverses. Required.
+  string reverses_entry_id = 7;
+
+  // Original request_id for cross-system correlation.
+  string request_id = 8;
+
+  // Optional human-readable explanation (admin notes / failure cause).
+  string reason_text = 9;
+
+  // Balance snapshot AFTER applying this refund.
+  int64 balance_after_units = 10;
+
+  google.protobuf.Timestamp recorded_at = 11;
+}
+
+// -----------------------------------------------------------------------------
+// UserManaSnapshotTaken — chora.identity.user_mana.snapshot_taken.v1
+// -----------------------------------------------------------------------------
+//
+// Published periodically (or at lifecycle boundaries) to capture a
+// point-in-time wallet snapshot. Used for analytics / billing
+// reconciliation / federated closure saga audit. Does NOT mutate the
+// ledger.
+//
+// Consumers: BigQuery streaming (mana_balance_history fact table),
+// Observability (per-tier balance distributions), Closure Orchestrator
+// (saga step evidence).
+message UserManaSnapshotTaken {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string gcid = 2;
+
+  int64 balance_units = 3;
+  int64 lifetime_earned = 4;
+  int64 lifetime_spent = 5;
+
+  // Reason for the snapshot (e.g., "scheduled_daily", "subscription_cancelled",
+  // "account_lifecycle_changed", "tenant_offboard", "manual").
+  string snapshot_reason = 6;
+
+  google.protobuf.Timestamp snapshot_at = 7;
+}

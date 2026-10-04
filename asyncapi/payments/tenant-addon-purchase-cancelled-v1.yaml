@@ -1,0 +1,63 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Payments — TenantAddonPurchaseSubscriptionCancelled
+  version: 1.0.0
+  description: |
+    chora-payments observed Stripe `customer.subscription.deleted` for a
+    H+ Marketplace tenant-add-on subscription. Stripe Dashboard cancel,
+    end-of-cycle expiry, or final smart-retry exhaustion all flow here.
+    chora-tenancy deactivates the entitlement via the CHO-1731
+    deactivation flow.
+
+    - Domain: Payments (`chora_payments` DB)
+    - Topic: `chora.payments.tenant_addon_purchase.cancelled.v1`
+    - Source proto: `proto/events/payments/tenant_addon_purchase.proto`
+       message `chora.payments.v1.TenantAddonPurchaseSubscriptionCancelled`
+    - Aggregate: TenantAddonPurchase (CHO-1736 H+ Marketplace Subscribe)
+    - CHO-1771 + CHO-1775 — Stripe Subscription lifecycle Phase 2.
+    - IMDA: envelope.chora_imda_dimension = "accountability"
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  tenantAddonPurchaseSubscriptionCancelled:
+    address: chora.payments.tenant_addon_purchase.cancelled.v1
+    messages:
+      tenantAddonPurchaseSubscriptionCancelled:
+        $ref: '#/components/messages/TenantAddonPurchaseSubscriptionCancelled'
+
+operations:
+  publishTenantAddonPurchaseSubscriptionCancelled:
+    action: send
+    channel:
+      $ref: '#/channels/tenantAddonPurchaseSubscriptionCancelled'
+    messages:
+      - $ref: '#/channels/tenantAddonPurchaseSubscriptionCancelled/messages/tenantAddonPurchaseSubscriptionCancelled'
+
+  consumeTenantAddonPurchaseSubscriptionCancelled:
+    action: receive
+    channel:
+      $ref: '#/channels/tenantAddonPurchaseSubscriptionCancelled'
+    messages:
+      - $ref: '#/channels/tenantAddonPurchaseSubscriptionCancelled/messages/tenantAddonPurchaseSubscriptionCancelled'
+
+components:
+  messages:
+    TenantAddonPurchaseSubscriptionCancelled:
+      name: TenantAddonPurchaseSubscriptionCancelled
+      title: Stripe Subscription cancelled for a H+ Marketplace tenant add-on (CHO-1775)
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/payments/tenant_addon_purchase.proto#/chora.payments.v1.TenantAddonPurchaseSubscriptionCancelled'

@@ -1,0 +1,151 @@
+// =============================================================================
+// chora.identity.v1 — KYC verification events
+// =============================================================================
+//
+// Source-of-truth: docs/architecture/adrs/adr-142-per-user-economy-mana.md
+//   + chora-contracts/openapi/learner-economy.yaml
+//   + memory project_chora_governance_ai.md (Singpass / SkillsFuture)
+//
+// Owning domain : Identity (chora_identity database)
+// Owning team   : Team 3 (Platform)
+// Topic prefix  : chora.identity.kyc.*
+//
+// KYC pricing per ADR-142:
+//   - singpass        — $0  (SG residents)
+//   - skillsfuture    — $0  (SG residents; auto-grants funding scope)
+//   - manual_doc      — $9.99 default (configurable; manual review SLA ~24h)
+//
+// Role-specific defaults:
+//   - Learner       — KYC optional (required only for paid plans on free tier)
+//   - Instructor    — KYC mandatory
+//   - Tenant Admin  — KYC mandatory above tenant size threshold
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.identity.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/identity/v1;identityv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// KycMethod — verification method.
+// -----------------------------------------------------------------------------
+enum KycMethod {
+  KYC_METHOD_UNSPECIFIED = 0;
+  KYC_METHOD_SINGPASS = 1;
+  KYC_METHOD_SKILLSFUTURE = 2;
+  KYC_METHOD_MANUAL_DOC = 3;
+}
+
+// -----------------------------------------------------------------------------
+// KycStatus — verification lifecycle.
+// -----------------------------------------------------------------------------
+enum KycStatus {
+  KYC_STATUS_UNSPECIFIED = 0;
+  KYC_STATUS_PENDING = 1;
+  KYC_STATUS_SUBMITTED = 2;
+  KYC_STATUS_VERIFIED = 3;
+  KYC_STATUS_REJECTED = 4;
+  KYC_STATUS_EXPIRED = 5;
+}
+
+// -----------------------------------------------------------------------------
+// KycSubmitted — chora.identity.kyc.submitted.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a user submits KYC documents (manual_doc) or initiates a
+// Singpass / SkillsFuture flow. For singpass / skillsfuture, the SUBMITTED
+// state typically transitions immediately to VERIFIED on provider callback;
+// manual_doc holds in SUBMITTED until reviewer action.
+message KycSubmitted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — KYCVerification aggregate root.
+  string verification_id = 2;
+
+  string gcid = 3;
+
+  KycMethod method = 4;
+
+  // Backend provider code (e.g., "ndi", "skillsfuture_api", "internal_review").
+  string provider = 5;
+
+  // Cloud Storage URI of the submitted document. Empty for non-manual_doc
+  // methods. NEVER includes raw PII in the URI itself — opaque path.
+  string document_uri = 6;
+
+  // Fee charged for this submission in cents (0 for singpass / skillsfuture;
+  // typically 999 for manual_doc per ADR-142 default).
+  int64 fee_charged_cents = 7;
+
+  string currency = 8;
+
+  google.protobuf.Timestamp submitted_at = 9;
+}
+
+// -----------------------------------------------------------------------------
+// KycVerified — chora.identity.kyc.verified.v1
+// -----------------------------------------------------------------------------
+//
+// Published when verification succeeds. Triggers downstream side-effects:
+//   - Identity: User aggregate updated with kyc_method + kyc_verified_at
+//   - Tenancy: instructor onboarding fast-track unlocks (chora.tenancy.*)
+//   - SkillsFuture: cohort funding entitlements link if requested scope
+//   - Notifications: confirmation email/in-app
+message KycVerified {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string verification_id = 2;
+  string gcid = 3;
+
+  KycMethod method = 4;
+  string provider = 5;
+
+  // Reviewer GCID for manual_doc; empty for provider-callback flows.
+  string verified_by_gcid = 6;
+
+  // Optional flags carried from provider response (e.g., SkillsFuture
+  // entitlement granted, NDI MyInfo fields available).
+  bool skillsfuture_scope_granted = 7;
+
+  google.protobuf.Timestamp verified_at = 8;
+}
+
+// -----------------------------------------------------------------------------
+// KycRejected — chora.identity.kyc.rejected.v1
+// -----------------------------------------------------------------------------
+//
+// Published when verification fails (provider negative result, manual
+// reviewer rejection, document quality issue). User may retry (subject to
+// fee re-charge for manual_doc).
+message KycRejected {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string verification_id = 2;
+  string gcid = 3;
+
+  KycMethod method = 4;
+  string provider = 5;
+
+  // Reviewer GCID for manual_doc; empty for provider-callback flows.
+  string rejected_by_gcid = 6;
+
+  // Structured rejection reason code (e.g., "document_unreadable",
+  // "name_mismatch", "expired_document", "provider_negative",
+  // "liveness_failed").
+  string rejection_code = 7;
+
+  // Free-form notes (max 1024 chars).
+  string rejection_notes = 8;
+
+  // Whether the user is permitted to retry. False for terminal rejections
+  // (e.g., compliance hold).
+  bool retry_allowed = 9;
+
+  google.protobuf.Timestamp rejected_at = 10;
+}

@@ -1,0 +1,62 @@
+asyncapi: 3.0.0
+info:
+  title: Chora AI Kernel — ModelInvocationCompleted
+  version: 1.0.0
+  description: |
+    Published when a model invocation completes successfully. Carries
+    token counts + latency for the canonical cost ledger.
+
+    - Domain: AI Kernel (`chora_ai_kernel` DB)
+    - Topic: `chora.ai_kernel.invocation.completed.v1`
+    - Source proto: `proto/events/ai_kernel/invocation.proto`
+       message `chora.ai_kernel.v1.ModelInvocationCompleted`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  modelInvocationCompleted:
+    address: chora.ai_kernel.invocation.completed.v1
+    messages:
+      modelInvocationCompleted:
+        $ref: '#/components/messages/ModelInvocationCompleted'
+
+operations:
+  publishModelInvocationCompleted:
+    action: send
+    channel:
+      $ref: '#/channels/modelInvocationCompleted'
+    messages:
+      - $ref: '#/channels/modelInvocationCompleted/messages/modelInvocationCompleted'
+
+  consumeModelInvocationCompleted:
+    action: receive
+    channel:
+      $ref: '#/channels/modelInvocationCompleted'
+    description: |
+      Consumers: Observability (TokenUsageRecorded outbox emit),
+      AI Kernel Guardrail Service (output-tier eval),
+      AgentDecisionLog writer.
+    messages:
+      - $ref: '#/channels/modelInvocationCompleted/messages/modelInvocationCompleted'
+
+components:
+  messages:
+    ModelInvocationCompleted:
+      name: ModelInvocationCompleted
+      title: Model Invocation Completed
+      summary: A model invocation has completed successfully
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/ai_kernel/invocation.proto#/chora.ai_kernel.v1.ModelInvocationCompleted'

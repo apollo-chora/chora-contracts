@@ -1,0 +1,7 @@
+# Built binary from `go build .` — protoflatten is run via `go run` per
+# scripts/flatten-pubsub-schemas.sh; the binary itself is not committed.
+protoflatten
+
+# go.sum is COMMITTED for this module (ruling 44): it is a build tool and an
+# ignored lockfile made `make flatten` fail on a clean checkout. The repo-root
+# .gitignore carries the scoped negation.

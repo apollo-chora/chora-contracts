@@ -1,0 +1,61 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Identity — AccountReactivated
+  version: 1.0.0
+  description: |
+    Published when a SUSPENDED account is restored to ACTIVE. Only valid
+    pre-PSEUDONYMIZED.
+
+    - Domain: Identity (`chora_identity` DB)
+    - Topic: `chora.identity.account.reactivated.v1`
+    - Source proto: `proto/events/identity/account.proto`
+       message `chora.identity.v1.AccountReactivated`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  accountReactivated:
+    address: chora.identity.account.reactivated.v1
+    messages:
+      accountReactivated:
+        $ref: '#/components/messages/AccountReactivated'
+
+operations:
+  publishAccountReactivated:
+    action: send
+    channel:
+      $ref: '#/channels/accountReactivated'
+    messages:
+      - $ref: '#/channels/accountReactivated/messages/accountReactivated'
+
+  consumeAccountReactivated:
+    action: receive
+    channel:
+      $ref: '#/channels/accountReactivated'
+    description: |
+      Consumers: ALL surfaces (restore session capability),
+      Notifications (welcome-back), Audit log.
+    messages:
+      - $ref: '#/channels/accountReactivated/messages/accountReactivated'
+
+components:
+  messages:
+    AccountReactivated:
+      name: AccountReactivated
+      title: Account Reactivated
+      summary: A previously suspended Account has been reactivated
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/identity/account.proto#/chora.identity.v1.AccountReactivated'

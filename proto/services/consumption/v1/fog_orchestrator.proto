@@ -1,0 +1,134 @@
+// =============================================================================
+// Chora Fog Orchestrator Service (gRPC)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture/adrs/adr-143-per-user-knowledge-graph-hexagonal-fog.md
+//   + chora-contracts/proto/services/langgraph_orchestrator.proto (reference pattern)
+//   + chora-contracts/proto/events/consumption/knowledge_graph.proto
+//
+// Inter-service gRPC contract for the per-user hexagonal exploration fog
+// generation orchestrator. Implements the Python LangGraph orchestrator
+// pattern per Tier 2 D5 hybrid kernel + Tier 5 D20 hybrid crew composition.
+//
+// Owning service: chora-fog-orchestrator (Python LangGraph + FastAPI)
+//   - Path: services/chora-fog-orchestrator/
+//   - StateGraph nodes: validate → assemble_context → guardrail_pre →
+//                       broker_call → guardrail_post → detect_junctions →
+//                       publish_events
+//   - PostgresSaver checkpointer to chora_ai_kernel DB (NOT chora_consumption)
+//   - Calls chora-fog-generator-executor (Go) via gRPC for stateless model
+//     invocation
+//
+// Why a separate orchestrator (not reusing kernel RunCrew): per Tier 5 D20,
+// fog gen is a domain-specialist crew (Consumption-scoped), distinct from
+// the platform kernel orchestrator. Typed proto contract gives compile-time
+// validation, clear SLOs (P50 < 2.5s, P99 < 6s, < $0.005 per fog), and
+// team-level ownership (Team 1 + Team 3 jointly).
+//
+// Primary caller: chora-consumption (internal aggregate orchestration on
+// HexagonRepo cache miss / stale).
+//
+// Idempotency: GenerateFog is idempotent on request_id (UUIDv7). Repeat
+// calls within checkpoint TTL return the same result without re-invoking
+// the LLM.
+//
+// Deployed in chora-489812 team-platform pool. mTLS via Cloud Service Mesh;
+// SPIFFE identity in mesh; W3C trace context in gRPC metadata.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.services.consumption.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/consumption/v1;consumptionv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/consumption/v1/knowledge_graph.proto";
+
+// -----------------------------------------------------------------------------
+// Service
+// -----------------------------------------------------------------------------
+
+service FogOrchestrator {
+  // Generate a hexagonal fog (6 neighbors) around a focal atom for a specific
+  // exploration. Stateful orchestrator workflow:
+  //   1. validate            — schema + tenant config (cap, fog grace)
+  //   2. assemble_context    — read atom_semantic_edges (chora-consumption
+  //                            via gRPC; orchestrator never touches the DB)
+  //                            + recent retention scores
+  //   3. guardrail_pre       — REGEX + DLP + MODEL_ARMOR on prompt template
+  //   4. broker_call         — invoke chora-fog-generator-executor via gRPC;
+  //                            executor calls Model Broker Gateway
+  //   5. guardrail_post      — OUTPUT_VALIDATOR on JSON shape + content
+  //   6. detect_junctions    — pure function over candidate atom_ids ∩
+  //                            existing_user_atom_ids
+  //   7. publish_events      — emit HexagonFogGenerated + (optional)
+  //                            JunctionDetected via Pub/Sub
+  //
+  // Idempotent on request_id. PostgresSaver checkpoint allows replay /
+  // resume on transient failures.
+  //
+  // SLOs: P50 < 2.5s, P99 < 6s, < $0.005 per fog.
+  rpc GenerateFog(GenerateFogRequest) returns (GenerateFogResponse);
+}
+
+// -----------------------------------------------------------------------------
+// GenerateFog RPC
+// -----------------------------------------------------------------------------
+
+message GenerateFogRequest {
+  // UUIDv7 of this fog-gen run. Used as orchestrator thread_id and as
+  // generated_by_run_id on the resulting kg_hexagon_nodes row.
+  // Recommended derivation: UUIDv7 of
+  // (exploration_id, focal_atom_id, generation_epoch).
+  string request_id = 1;
+
+  string tenant_id = 2;
+  string user_gcid = 3;
+  string cluster_id = 4;
+  string exploration_id = 5;
+  string focal_atom_id = 6;
+
+  // Delivery mode hint. Values: "graph_discovery" (default for fog) or
+  // future modes (e.g., "exam_prep"). Affects prompt template selection.
+  string delivery_mode = 7;
+
+  // For junction detection: atom_ids that are focal in OTHER active
+  // clusters of the same user. Caller (chora-consumption) populates this
+  // from idx_hex_user_focals query before invoking the orchestrator.
+  // Empty = no junction detection (e.g., user has only one cluster).
+  repeated string existing_user_atom_ids = 8;
+
+  // Optional LoRA adapter URI for tenant-specific Gemma fine-tune (per
+  // gemma-lora-tenant skill). Empty = base model.
+  string adapter_uri = 9;
+
+  // Tenant config dial: invalidation grace seconds. Used to set the
+  // checkpoint TTL on PostgresSaver thread.
+  int32 fog_invalidation_grace_seconds = 10;
+}
+
+message GenerateFogResponse {
+  // The 6 generated neighbors (always exactly 6; orchestrator pads with
+  // CURIOSITY_JUMP relations from atom_semantic_edges if LLM returns < 6).
+  repeated chora.consumption.v1.HexagonNeighbor neighbors = 1;
+
+  // Subset of `neighbors` whose atom_id is in the request's
+  // existing_user_atom_ids (junction candidates).
+  repeated string junction_atom_ids = 2;
+
+  // Echo of Model Broker decision.
+  string model_id = 3;
+
+  // LLM cost breakdown (per ai-cost-tracking ledger format).
+  int64 total_cost_micros = 4;
+  int64 input_tokens = 5;
+  int64 output_tokens = 6;
+
+  // Final orchestrator state — useful for debugging.
+  // Values: "SUCCESS" / "FAILED" / "ESCALATED".
+  string final_state = 7;
+  string error_message = 8;       // empty when final_state=SUCCESS
+
+  google.protobuf.Timestamp generated_at = 9;
+}

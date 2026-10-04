@@ -1,0 +1,152 @@
+// =============================================================================
+// Chora Payments — User Mana Top-Up events (Stripe-driven)
+// =============================================================================
+//
+// Aggregate root: UserManaTopUp (1:1 with a Stripe Checkout session for a
+//                 per-learner FE-initiated mana purchase, distinct from the
+//                 admin-initiated TenantManaTopUp).
+// Owning domain : Payments (chora_payments DB, per ADR-164).
+// Topic prefix  : chora.payments.user_mana_topup.*
+//
+// Closes Stage E debt: `/api/v1/me/mana/topup` (per-user FE-initiated mana
+// purchase) was retired from chora-identity but did not previously map onto
+// the 5 aggregates (tenant_mana_topup is ADMIN-initiated). Stage A.5
+// introduces this 6th aggregate as a per-user mirror.
+//
+// Originating-service notification path: chora-identity subscribes to
+// `chora.payments.user_mana_topup.payment_captured.v1` and credits the
+// learner's per-user mana balance.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.payments.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/payments/v1;paymentsv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// UserManaTopUpCheckoutStarted — emitted when chora-payments creates a
+// Stripe Checkout Session for a per-learner mana top-up.
+//
+// Topic: chora.payments.user_mana_topup.checkout_started.v1
+// Consumers: chora-observability, chora-governance.
+message UserManaTopUpCheckoutStarted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string purchase_id = 2;
+
+  // The learner who initiated the top-up. The tenant scope is on the
+  // envelope (envelope.tenant_id == the learner's home tenant).
+  string learner_gcid = 3;
+
+  // Mana SKU from the platform catalog (e.g.,
+  // `mana.user_topup.standard_v1`). Determines the units credited on
+  // payment capture.
+  string sku = 4;
+
+  string stripe_session_id = 5;
+  string stripe_checkout_url = 6;
+
+  int64  amount_cents = 7;
+  string currency = 8;
+
+  // Mana units to credit on payment capture (snapshot from SKU at session
+  // creation time, in case the SKU's units-per-cent ratio changes).
+  int64  mana_units = 9;
+
+  google.protobuf.Timestamp checkout_started_at = 10;
+}
+
+// UserManaTopUpPaymentCaptured — emitted on Stripe's
+// `checkout.session.completed`. chora-identity subscribes + credits the
+// learner's per-user mana balance.
+//
+// Topic: chora.payments.user_mana_topup.payment_captured.v1
+// Consumers: chora-identity (PRIMARY — per-user mana credit),
+//            chora-observability (revenue ledger), chora-notifications
+//            (receipt email to learner), chora-governance.
+message UserManaTopUpPaymentCaptured {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string purchase_id = 2;
+  string learner_gcid = 3;
+  string sku = 4;
+
+  string stripe_session_id = 5;
+  string stripe_payment_intent_id = 6;
+  string stripe_charge_id = 7;
+
+  int64  amount_cents_paid = 8;
+  int64  amount_cents_refunded = 9;
+  string currency = 10;
+
+  int64  mana_units = 11;
+
+  google.protobuf.Timestamp paid_at = 12;
+}
+
+// UserManaTopUpPaymentFailed — emitted on Stripe payment failure.
+//
+// Topic: chora.payments.user_mana_topup.payment_failed.v1
+// Consumers: chora-identity (closes the in-progress top-up),
+//            chora-notifications (learner failure email), chora-governance.
+message UserManaTopUpPaymentFailed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string purchase_id = 2;
+  string learner_gcid = 3;
+  string sku = 4;
+
+  string stripe_session_id = 5;
+  string stripe_failure_code = 6;
+  string stripe_failure_message = 7;
+
+  google.protobuf.Timestamp failed_at = 8;
+}
+
+// UserManaTopUpRefunded — emitted on Stripe refund.
+//
+// chora-identity debits the learner's per-user mana balance
+// (proportional to refund amount) on receipt.
+//
+// Topic: chora.payments.user_mana_topup.refunded.v1
+// Consumers: chora-identity (mana debit), chora-notifications, chora-observability.
+message UserManaTopUpRefunded {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string purchase_id = 2;
+  string learner_gcid = 3;
+  string sku = 4;
+
+  string stripe_charge_id = 5;
+  string stripe_refund_id = 6;
+
+  int64  amount_cents_refunded = 7;
+  string currency = 8;
+
+  // Mana units to debit (proportional to refund amount).
+  int64  mana_units_to_debit = 9;
+
+  string reason = 10;
+
+  google.protobuf.Timestamp refunded_at = 11;
+}
+
+// UserManaTopUpExpired — emitted on Stripe `checkout.session.expired`
+// (learner abandoned the Checkout flow past Stripe's 24h window).
+//
+// Topic: chora.payments.user_mana_topup.expired.v1
+// Consumers: chora-observability, chora-governance.
+message UserManaTopUpExpired {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string purchase_id = 2;
+  string learner_gcid = 3;
+  string sku = 4;
+
+  string stripe_session_id = 5;
+
+  google.protobuf.Timestamp expired_at = 6;
+}

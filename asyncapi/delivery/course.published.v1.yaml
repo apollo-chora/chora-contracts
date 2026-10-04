@@ -1,0 +1,124 @@
+asyncapi: "3.0.0"
+info:
+  title: "chora.delivery.course.published.v1"
+  version: "1.0.0"
+  description: |
+    Published when a Course's visibility flips INTO `public` (cross-tenant
+    catalogue). Distinct from course.created.v1 (which fires once on
+    initial scaffolding regardless of visibility).
+
+    Owning domain : Content Delivery (chora_delivery DB)
+    Owning team   : Team 2 (Delivery)
+    Surface       : A+ (Phyllis MVP discovery), C+ (Connect+ social feed)
+
+    Per ADR-141 canonical IMDA dimensions: this event carries D1
+    (accountability) + D2 (transparency) tags so chora-observability can
+    materialise IMDA evidence rows for the O+ governance dashboard.
+
+    Companion to `proto/events/delivery/course.proto` message
+    `CoursePublished` (deferred — added to the proto registry alongside
+    enrollment.cancelled in the next breaking-change window).
+
+    AP-01: This contract exists alongside the implementation in S4.3 because
+    proto registry edits are S0-locked; the contract documents the wire
+    shape so subscribers (chora-sharing discovery feed, chora-observability)
+    can plan onboarding.
+
+    Idempotency_key MUST equal `course:{course_id}:published` so re-emission
+    on the same course dedupes at the bus.
+  contact:
+    name: "Chora Platform Team"
+  license:
+    name: "Proprietary"
+
+defaultContentType: application/x-protobuf
+
+servers:
+  local:
+    host: "localhost:8085"
+    protocol: googlepubsub
+    description: "Cloud Pub/Sub Emulator"
+  production:
+    host: "pubsub.googleapis.com"
+    protocol: googlepubsub
+    description: "Google Cloud Pub/Sub"
+
+channels:
+  coursePublished:
+    address: chora.delivery.course.published.v1
+    description: |
+      Carries CoursePublished Protobuf payload.
+
+      Downstream consumers:
+        - chora-sharing       : discovery feed (Surface-3 C+)
+        - chora-observability : IMDA D1 + D2 evidence row
+        - chora-search        : public catalogue index update
+    messages:
+      coursePublished:
+        $ref: "#/components/messages/CoursePublished"
+
+operations:
+  publishCoursePublished:
+    action: send
+    channel: { $ref: "#/channels/coursePublished" }
+    summary: "Publish CoursePublished"
+    messages: [ { $ref: "#/channels/coursePublished/messages/coursePublished" } ]
+  consumeCoursePublished:
+    action: receive
+    channel: { $ref: "#/channels/coursePublished" }
+    summary: "Consume CoursePublished"
+    messages: [ { $ref: "#/channels/coursePublished/messages/coursePublished" } ]
+
+components:
+  messages:
+    CoursePublished:
+      name: CoursePublished
+      title: "Course Published"
+      summary: "A Course has been promoted to public visibility."
+      contentType: application/x-protobuf
+      payload:
+        type: object
+        description: "Mirrors chora.delivery.v1.CoursePublished."
+        properties:
+          envelope:
+            $ref: "#/components/schemas/EventEnvelope"
+          course_id:
+            type: string
+            format: uuid
+          title:
+            type: string
+            minLength: 1
+            maxLength: 256
+          instructor_gcid:
+            type: string
+            format: uuid
+          published_at:
+            type: string
+            format: date-time
+          chora_imda_dimensions:
+            type: array
+            items:
+              type: string
+              enum: [accountability, transparency, safety_and_robustness, fairness_and_human_oversight]
+            description: "IMDA evidence tags per ADR-141. course.published carries D1 + D2."
+
+  schemas:
+    EventEnvelope:
+      type: object
+      description: "Mirrors chora.common.v1.EventEnvelope."
+      required: [event_id, idempotency_key, tenant_id, occurred_at, published_at,
+                 traceparent, source_project, source_service, schema_version]
+      properties:
+        event_id: { type: string, format: uuid }
+        idempotency_key: { type: string }
+        tenant_id: { type: string }
+        gcid: { type: string }
+        occurred_at: { type: string, format: date-time }
+        published_at: { type: string, format: date-time }
+        traceparent: { type: string }
+        tracestate: { type: string }
+        source_project: { type: string }
+        source_service: { type: string }
+        schema_version: { type: integer }
+        correlation_id: { type: string }
+        causation_id: { type: string }

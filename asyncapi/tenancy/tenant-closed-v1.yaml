@@ -1,0 +1,63 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Tenancy — TenantClosed
+  version: 1.0.0
+  description: |
+    Published when a tenant is permanently closed. Triggers federated
+    closure saga (data export, pseudonymisation across all 11 domains,
+    eventual crypto-shred). Distinct from TenantSuspended (reversible).
+
+    - Domain: Tenancy + Billing (`chora_tenancy` DB)
+    - Topic: `chora.tenancy.tenant.closed.v1`
+    - Source proto: `proto/events/tenancy/tenant.proto`
+       message `chora.tenancy.v1.TenantClosed`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  tenantClosed:
+    address: chora.tenancy.tenant.closed.v1
+    messages:
+      tenantClosed:
+        $ref: '#/components/messages/TenantClosed'
+
+operations:
+  publishTenantClosed:
+    action: send
+    channel:
+      $ref: '#/channels/tenantClosed'
+    messages:
+      - $ref: '#/channels/tenantClosed/messages/tenantClosed'
+
+  consumeTenantClosed:
+    action: receive
+    channel:
+      $ref: '#/channels/tenantClosed'
+    description: |
+      Consumers: AI Kernel Closure Orchestrator (initiates federated saga),
+      Identity (per-member AccountLifecycleChanged fan-out),
+      Governance (audit + compliance evidence).
+    messages:
+      - $ref: '#/channels/tenantClosed/messages/tenantClosed'
+
+components:
+  messages:
+    TenantClosed:
+      name: TenantClosed
+      title: Tenant Closed
+      summary: A Tenant has been permanently closed
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/tenancy/tenant.proto#/chora.tenancy.v1.TenantClosed'

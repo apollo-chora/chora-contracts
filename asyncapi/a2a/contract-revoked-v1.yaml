@@ -1,0 +1,64 @@
+asyncapi: "3.0.0"
+info:
+  title: "Chora Agent-to-Agent — contract.revoked.v1"
+  version: "1.0.0"
+  description: |
+    Published when an A2A contract is revoked (kill switch). The A2A
+    Gateway MUST reject all incoming invocations targeting the contract
+    after this event. Revocation propagation SLO: 60 seconds (ADR-132).
+
+    Owning team   : Team 3 (Platform)
+    Owning domain : Agent-to-Agent (chora_a2a database)
+    Reference     : ADR-132 §2
+  contact:
+    name: "Chora Platform Team — Platform Track"
+  license:
+    name: "Proprietary"
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  production:
+    host: "pubsub.googleapis.com"
+    protocol: googlepubsub
+    description: "Google Cloud Pub/Sub (production)"
+  emulator:
+    host: "localhost:8085"
+    protocol: googlepubsub
+    description: "Cloud Pub/Sub Emulator (local dev)"
+
+channels:
+  contractRevoked:
+    address: "chora.a2a.contract.revoked.v1"
+    messages:
+      contractRevoked:
+        $ref: "#/components/messages/ContractRevoked"
+
+operations:
+  publishContractRevoked:
+    action: send
+    channel:
+      $ref: "#/channels/contractRevoked"
+    summary: "Publish an A2A contract revocation event"
+    description: |
+      Producer: chora-a2a-gateway (platform_ops or automated rule).
+      Consumers: A2A Gateway routing tables (tear down),
+                 O+ governance dashboard,
+                 Audit log,
+                 Notifications (notify counterparty + capability owner).
+    messages:
+      - $ref: "#/channels/contractRevoked/messages/contractRevoked"
+
+components:
+  messages:
+    ContractRevoked:
+      name: "ContractRevoked"
+      title: "A2A Contract Revoked"
+      summary: "An A2A contract has been revoked"
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf;version=3
+      payload:
+        schemaFormat: "application/vnd.google.protobuf;version=3"
+        schema:
+          protoFile: "proto/events/a2a/contract.proto"
+          messageName: "chora.a2a.v1.ContractRevoked"

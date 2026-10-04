@@ -1,0 +1,154 @@
+// =============================================================================
+// Chora Payments — Application Payment events (Stripe-driven, course
+// application Singpass+SkillsFuture flow)
+// =============================================================================
+//
+// Aggregate root: ApplicationPayment (1:1 with the Stripe PaymentIntent for
+//                 a course-application flow per CR-Question-Authoring).
+// Owning domain : Payments (chora_payments DB, per ADR-164).
+// Topic prefix  : chora.payments.application_payment.*
+//
+// Replaces (post Wave 1 Stage C cutover):
+//   chora.tenancy.payment.captured.v1 — chora-tenancy/cmd/billing-webhook
+//   forwarder. chora-delivery's existing `subscribers.go::HandlePaymentCaptured`
+//   handler is rewired (same logic, new topic) to consume from this family
+//   instead of the legacy chora.tenancy.* family.
+//
+// chora-payments owns the Stripe SDK; chora-delivery becomes a downstream
+// subscriber that advances the Application aggregate FSM (Accepted → Paid →
+// Enrolled) per ADR-164 §D3 originating-service notification path.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.payments.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/payments/v1;paymentsv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// ApplicationPaymentCheckoutStarted — emitted when chora-payments creates
+// a Stripe Checkout Session (or PaymentIntent — applications historically
+// used PaymentIntents; ADR-164 migrates them to Checkout Sessions for
+// parity).
+//
+// Topic: chora.payments.application_payment.checkout_started.v1
+// Consumers: chora-observability (funnel telemetry), chora-governance.
+message ApplicationPaymentCheckoutStarted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // ApplicationPayment aggregate id (UUIDv7) — same id flows through every
+  // subsequent event.
+  string purchase_id = 2;
+
+  // Applicant who initiated the application.
+  string learner_gcid = 3;
+
+  // The course application this payment is for. Soft FK to
+  // chora_delivery.applications; chora-delivery resolves on subscribe.
+  string application_id = 4;
+
+  // The course the application is for. Soft FK to chora_delivery.courses.
+  string course_id = 5;
+
+  string stripe_session_id = 6;
+  string stripe_checkout_url = 7;
+
+  int64  amount_cents = 8;
+  string currency = 9;
+
+  google.protobuf.Timestamp checkout_started_at = 10;
+}
+
+// ApplicationPaymentPaymentCaptured — emitted on Stripe's
+// `checkout.session.completed` (or `payment_intent.succeeded` for the
+// legacy PaymentIntent path). chora-delivery's existing
+// `subscribers.go::HandlePaymentCaptured` consumes (rewired from
+// chora.tenancy.payment.captured.v1) + advances Application Accepted →
+// Paid → Enrolled.
+//
+// Topic: chora.payments.application_payment.payment_captured.v1
+// Consumers: chora-delivery (PRIMARY — advances Application FSM),
+//            chora-observability (revenue ledger), chora-notifications,
+//            chora-governance.
+message ApplicationPaymentPaymentCaptured {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string purchase_id = 2;
+  string learner_gcid = 3;
+  string application_id = 4;
+  string course_id = 5;
+
+  string stripe_session_id = 6;
+  string stripe_payment_intent_id = 7;
+  string stripe_charge_id = 8;
+
+  int64  amount_cents_paid = 9;
+  int64  amount_cents_refunded = 10;
+  string currency = 11;
+
+  google.protobuf.Timestamp paid_at = 12;
+}
+
+// ApplicationPaymentPaymentFailed — emitted on Stripe payment failure.
+// chora-delivery transitions the Application back to Accepted (or
+// PaymentFailed if introduced) and emits a downstream notification event.
+//
+// Topic: chora.payments.application_payment.payment_failed.v1
+// Consumers: chora-delivery (revokes the in-progress payment),
+//            chora-notifications, chora-governance.
+message ApplicationPaymentPaymentFailed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string purchase_id = 2;
+  string learner_gcid = 3;
+  string application_id = 4;
+
+  string stripe_session_id = 5;
+  string stripe_failure_code = 6;
+  string stripe_failure_message = 7;
+
+  google.protobuf.Timestamp failed_at = 8;
+}
+
+// ApplicationPaymentRefunded — emitted on Stripe refund.
+//
+// Topic: chora.payments.application_payment.refunded.v1
+// Consumers: chora-delivery (revokes the application / enrolment),
+//            chora-notifications, chora-observability, chora-governance.
+message ApplicationPaymentRefunded {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string purchase_id = 2;
+  string learner_gcid = 3;
+  string application_id = 4;
+
+  string stripe_charge_id = 5;
+  string stripe_refund_id = 6;
+
+  int64  amount_cents_refunded = 7;
+  string currency = 8;
+
+  string reason = 9;
+
+  google.protobuf.Timestamp refunded_at = 10;
+}
+
+// ApplicationPaymentExpired — emitted on Stripe
+// `checkout.session.expired` or expiry-sweeper.
+//
+// Topic: chora.payments.application_payment.expired.v1
+// Consumers: chora-delivery (closes the application payment intent),
+//            chora-observability.
+message ApplicationPaymentExpired {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string purchase_id = 2;
+  string learner_gcid = 3;
+  string application_id = 4;
+
+  string stripe_session_id = 5;
+
+  google.protobuf.Timestamp expired_at = 6;
+}

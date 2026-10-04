@@ -1,0 +1,267 @@
+// =============================================================================
+// Chora Guardrail Service (gRPC)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 3 D11
+//   + .claude/skills/ai-runtime-guardrails/SKILL.md
+//   + .claude/rules/ddd-enforcement.md ("Risk-tiered guardrails per agent")
+//
+// Runtime guardrail evaluation for every LLM call (input AND output).
+// Per-agent risk-tiered YAML config declares which tiers apply:
+//   - REGEX: cheap baseline pattern match
+//   - DLP: Cloud DLP scan (PII / financial / health detectors)
+//   - MODEL_ARMOR: Cloud Model Armor toxicity + jailbreak + prompt-injection
+//   - OUTPUT_VALIDATOR: structured output validators (JSON schema, citation
+//     grounding, etc.)
+//
+// Evaluation flow:
+//   Model Gateway → EvaluateInput  (pre-model)  → if PASS, call model
+//                  → EvaluateOutput (post-model) → if PASS, return to caller
+//
+// Violations are logged to ContentPolicyViolationLog (chora_governance) by
+// the Guardrail Service itself; this RPC contract does not require the caller
+// to do the logging.
+//
+// Deployed in chora-489812 team-platform pool (separate from Model Broker).
+// mTLS via Cloud Service Mesh; SPIFFE identity in mesh.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.services.guardrail_service.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/guardrail_service/v1;guardrail_servicev1";
+
+import "google/protobuf/timestamp.proto";
+
+// -----------------------------------------------------------------------------
+// Service
+// -----------------------------------------------------------------------------
+
+service GuardrailService {
+  // Pre-model evaluation. Called by the Model Gateway before dispatching the
+  // request to the underlying model. Idempotent.
+  rpc EvaluateInput(EvaluateInputRequest) returns (EvaluateResponse);
+
+  // Post-model evaluation. Called by the Model Gateway after the model emits
+  // its completion (or after a stream concludes). Idempotent.
+  rpc EvaluateOutput(EvaluateOutputRequest) returns (EvaluateResponse);
+
+  // Refresh per-agent guardrail YAML config. Called by the platform's config
+  // management service when a YAML file changes. Returns the new config_version
+  // (typically a content hash).
+  rpc LoadConfig(LoadConfigRequest) returns (LoadConfigResponse);
+
+  // ScreenContent — high-level screening with Phyllis 3-state verdict
+  // (approved | remediated | blocked). Composed of EvaluateInput +
+  // EvaluateOutput internally; convenience RPC for callers that don't want
+  // to manage the input/output split (e.g., chora-creation AI Assist).
+  // Returns ContentPolicyViolationLog event payload alongside the verdict
+  // for atomic outbox publishing on the caller's side.
+  // Per audit-aikernel §5 + audit-content §3.1.
+  rpc ScreenContent(ScreenContentRequest) returns (ScreenContentResponse);
+}
+
+// -----------------------------------------------------------------------------
+// Shared enums
+// -----------------------------------------------------------------------------
+
+// Mirrors GuardrailTier in the Model Broker contracts. Duplicated locally
+// to avoid cross-service proto imports.
+enum GuardrailTier {
+  GUARDRAIL_TIER_UNSPECIFIED = 0;
+  GUARDRAIL_TIER_REGEX = 1;
+  GUARDRAIL_TIER_DLP = 2;
+  GUARDRAIL_TIER_MODEL_ARMOR = 3;
+  GUARDRAIL_TIER_OUTPUT_VALIDATOR = 4;
+}
+
+// Result of a guardrail evaluation pass over the content.
+enum EvaluationResult {
+  EVALUATION_RESULT_UNSPECIFIED = 0;
+  EVALUATION_RESULT_PASS = 1;     // safe — caller may proceed
+  EVALUATION_RESULT_BLOCK = 2;    // unsafe — caller MUST refuse
+  EVALUATION_RESULT_REDACT = 3;   // safe after redaction — use redacted_content
+  EVALUATION_RESULT_FLAG = 4;     // proceed but log + alert (high-risk pass)
+}
+
+// -----------------------------------------------------------------------------
+// EvaluateInput RPC
+// -----------------------------------------------------------------------------
+
+message EvaluateInputRequest {
+  // Echo of the Gateway's invocation_id (UUIDv7) for cross-service correlation.
+  string invocation_id = 1;
+
+  // Tenant scope. Required.
+  string tenant_id = 2;
+
+  // Calling agent identity (AGID).
+  string agid = 3;
+
+  // Calling agent's role — used to look up per-agent YAML config.
+  string agent_role = 4;
+
+  // The prompt content to scan (typically the concatenated user+system messages
+  // or the user-supplied portion only — caller's discretion per agent policy).
+  string content_to_check = 5;
+
+  // Tiers to evaluate. Driven by per-agent YAML. Allows runtime overrides
+  // (e.g., a sensitive context can request stricter tiers than the default).
+  repeated GuardrailTier tier_list = 6;
+}
+
+// -----------------------------------------------------------------------------
+// EvaluateOutput RPC
+// -----------------------------------------------------------------------------
+
+message EvaluateOutputRequest {
+  // Echo of the Gateway's invocation_id.
+  string invocation_id = 1;
+
+  // Tenant scope. Required.
+  string tenant_id = 2;
+
+  // Calling agent identity (AGID).
+  string agid = 3;
+
+  // Calling agent's role.
+  string agent_role = 4;
+
+  // The model's completion to scan.
+  string model_output = 5;
+
+  // Tiers to evaluate (typically OUTPUT_VALIDATOR + MODEL_ARMOR; per-agent).
+  repeated GuardrailTier tier_list = 6;
+}
+
+// -----------------------------------------------------------------------------
+// Shared evaluation response
+// -----------------------------------------------------------------------------
+
+message EvaluateResponse {
+  // Aggregated result across all evaluated tiers.
+  // BLOCK if any tier blocks; REDACT if any tier redacts (and none block);
+  // FLAG if any tier flags (and none block/redact); else PASS.
+  EvaluationResult result = 1;
+
+  // Set when result = REDACT — the redacted content the caller should use
+  // instead of the original. Empty otherwise.
+  string redacted_content = 2;
+
+  // Human-readable violation type when result != PASS
+  // (e.g., "pii.email", "prompt_injection", "toxicity", "schema.invalid_json").
+  string violation_type = 3;
+
+  // The first tier that triggered the result (for traceability — e.g. if
+  // BLOCK, which tier issued the block).
+  GuardrailTier tier_triggered = 4;
+
+  // Per-tier observability counters (for the Gateway to surface in OTLP spans).
+  int32 dlp_match_count = 5;
+  float model_armor_score = 6;
+
+  // Evaluation timestamp (Guardrail Service clock).
+  google.protobuf.Timestamp evaluated_at = 7;
+}
+
+// -----------------------------------------------------------------------------
+// LoadConfig RPC
+// -----------------------------------------------------------------------------
+
+message LoadConfigRequest {
+  // Agent identity whose config is being refreshed.
+  string agid = 1;
+
+  // Full YAML config text. Service parses + validates + atomically swaps
+  // the in-memory config for this AGID.
+  string config_yaml = 2;
+}
+
+message LoadConfigResponse {
+  // True if the config was parsed + validated + applied successfully.
+  bool success = 1;
+
+  // Content hash / version identifier of the applied config (for reconciliation).
+  string config_version = 2;
+
+  // When success=false, human-readable error.
+  string error_message = 3;
+}
+
+// -----------------------------------------------------------------------------
+// ScreenContent RPC (high-level, Phyllis 3-state verdict)
+// -----------------------------------------------------------------------------
+//
+// Maps the lower-level EvaluationResult enum to a 3-state verdict the
+// caller can act on directly:
+//
+//   EvaluationResult.PASS              -> SCREEN_VERDICT_APPROVED
+//   EvaluationResult.REDACT            -> SCREEN_VERDICT_REMEDIATED (use rewritten_content)
+//   EvaluationResult.BLOCK             -> SCREEN_VERDICT_BLOCKED
+//   EvaluationResult.FLAG              -> SCREEN_VERDICT_APPROVED (with flagged=true)
+//
+// Per audit-aikernel §3 step 9 the spec'd 3-state shape is
+// `governance_status='approved'|'remediated'|'blocked'`.
+
+enum ScreenVerdict {
+  SCREEN_VERDICT_UNSPECIFIED = 0;
+  SCREEN_VERDICT_APPROVED = 1;
+  SCREEN_VERDICT_REMEDIATED = 2;
+  SCREEN_VERDICT_BLOCKED = 3;
+}
+
+message ScreenContentRequest {
+  // UUIDv7 — caller-supplied idempotency anchor (e.g. atom_revision_id).
+  string screen_id = 1;
+
+  // Tenant scope.
+  string tenant_id = 2;
+
+  // Calling agent identity.
+  string agid = 3;
+
+  // Calling agent's role (drives YAML config lookup).
+  string agent_role = 4;
+
+  // The content to screen (e.g., an AI-generated atom body).
+  string content_to_check = 5;
+
+  // Tiers to evaluate (typically [REGEX, DLP, MODEL_ARMOR, OUTPUT_VALIDATOR]
+  // for Tier 4 risk-class agents like AI Assist; subset for lower-risk).
+  repeated GuardrailTier tier_list = 6;
+
+  // Optional risk class override (default per agent_role YAML).
+  // String form for forward compat (e.g., "tier_1", "tier_2", "tier_3", "tier_4").
+  string risk_class_override = 7;
+}
+
+message ScreenContentResponse {
+  // Echo of ScreenContentRequest.screen_id.
+  string screen_id = 1;
+
+  ScreenVerdict verdict = 2;
+
+  // Set when verdict = REMEDIATED — the safe rewrite to use instead of the
+  // original input. Empty for APPROVED / BLOCKED.
+  string rewritten_content = 3;
+
+  // Lower-level EvaluateResponse for consumers that need per-tier detail.
+  // Wraps the legacy fields so callers get both the 3-state verdict AND the
+  // detailed evidence on a single round-trip.
+  EvaluateResponse detailed = 4;
+
+  // Pre-built event payload for chora.governance.policy_violation.detected.v1
+  // — caller may publish this via outbox in the same TX as the screening
+  // record save. Empty when verdict = APPROVED.
+  // JSON-stringified ContentPolicyViolationLog row (avoids cross-domain
+  // proto import; producer's chora-governance event publisher unmarshals).
+  string violation_event_json = 5;
+
+  // ADR-141 canonical IMDA dimension for this screening evidence (typically
+  // "transparency" for D2). Caller stamps onto envelope.chora_imda_dimension
+  // when publishing related events.
+  string imda_dimension = 6;
+
+  google.protobuf.Timestamp screened_at = 7;
+}

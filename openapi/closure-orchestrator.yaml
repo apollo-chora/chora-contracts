@@ -1,0 +1,394 @@
+openapi: "3.2.0"
+info:
+  title: "Chora Closure Orchestrator API"
+  version: "2.0.0"
+  description: |
+    REST API for the federated account closure saga.
+
+    The Closure Orchestrator owns the cross-domain saga that walks an account
+    through `ACTIVE -> CLOSING (grace) -> SUSPENDED -> PSEUDONYMIZED ->
+    COLD_ARCHIVED -> CRYPTO_SHREDDED`. Per-domain pseudonymisation duties are
+    dispatched via Pub/Sub (`chora.{domain}.pii.pseudonymise.requested.v1`);
+    each domain consults its own `PII_Closure_Map.yaml` and acks back on
+    `chora.{domain}.account.pseudonymised.v1`. COLD_ARCHIVED is only
+    reachable once every required domain has acknowledged.
+
+    Pseudonymise + crypto-shred — NEVER hard-delete. Cancellation is allowed
+    only while the saga is in `CLOSING`.
+
+    v2.0.0 (2026-06-11, CHO-1719): paths reconciled to the DEPLOYED service
+    shape `/v1/closure/*` (the prior `/sagas` + `:advance` surface was never
+    implemented — saga advancement is event/driver-paced, not REST-driven).
+    Adds `fast_close` (PLATFORM_OPERATOR-only grace collapse, ADR-181
+    ruling 12) gated via the gateway-stamped `X-Chora-Role` header.
+
+    Owning domain : AI Kernel (`chora_ai_kernel` database)
+    Owning team   : Team 3 (Platform)
+    Surface       : O+ Observability+ (auditor read-only) +
+                    H+ Hub+ (admin write); learner self-close arrives via
+                    chora-gateway (`openapi/auth-gateway.yaml` closure routes)
+
+    Authorization: internal mesh service (chora-gateway BFF fronts it).
+    The gateway forwards the session identity; `fast_close` additionally
+    requires `PLATFORM_OPERATOR` in the comma-joined `X-Chora-Role` header
+    the gateway stamps from the session JWT.
+  contact:
+    name: "Chora Platform Team (Team 3)"
+  license:
+    name: "Proprietary"
+
+servers:
+  - url: "https://closure-orchestrator.internal.chora.site"
+    description: "Production (internal ingress — Cloud Run, mesh-only)"
+  - url: "http://localhost:8080"
+    description: "Local development"
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Closure
+    description: "Federated closure saga lifecycle"
+  - name: Health
+    description: "Health + readiness checks"
+
+paths:
+  /healthz:
+    get:
+      operationId: healthz
+      summary: "Liveness probe"
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: "Service is alive"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [ok]
+
+  /readyz:
+    get:
+      operationId: readyz
+      summary: "Readiness probe"
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: "Service is ready (`mode` reports fake|real adapter wiring)"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [ready]
+                  mode:
+                    type: string
+                    enum: [fake, real]
+        "503":
+          description: "Adapters unconfigured"
+
+  /v1/closure/request:
+    post:
+      operationId: requestClosure
+      summary: "Start a federated closure saga"
+      description: |
+        Creates a saga in `CLOSING` state with the requested grace period
+        (1-365 days) and emits `chora.closure.requested.v1`. Idempotency:
+        callers (the gateway) should pre-check the caller's existing saga
+        via the status endpoint before requesting.
+
+        `fast_close: true` collapses `grace_ends_at` to the request instant
+        (test accounts; ADR-181 ruling 12). It requires `PLATFORM_OPERATOR`
+        in the `X-Chora-Role` header — otherwise 403
+        `CLOSURE_FAST_CLOSE_OPERATOR_REQUIRED`. No effect on the grace
+        period of any other saga.
+
+        AGIDs are rejected with 403 `CLOSURE_AGID_REJECTED` (agents have no
+        lifecycle).
+      tags: [Closure]
+      parameters:
+        - $ref: "#/components/parameters/ChoraRoleHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CloseRequest"
+      responses:
+        "201":
+          description: "Saga created (CLOSING)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CloseResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          description: "AGID rejected, or fast_close without PLATFORM_OPERATOR"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/closure/{closure_id}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/ClosureIDPath"
+    post:
+      operationId: cancelClosure
+      summary: "Cancel a saga during the grace period"
+      description: |
+        Allowed only while the saga is in `CLOSING`. Returns 409
+        `CLOSURE_CANCEL_TOO_LATE` once the saga has progressed to
+        `SUSPENDED` or beyond (point of no return). Emits
+        `chora.closure.cancelled.v1`.
+      tags: [Closure]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CancelRequest"
+      responses:
+        "200":
+          description: "Saga cancelled — account returns to ACTIVE"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CancelResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/closure/{closure_id}/status:
+    parameters:
+      - $ref: "#/components/parameters/ClosureIDPath"
+    get:
+      operationId: getClosureStatus
+      summary: "Get a saga's state + append-only history + per-domain acks"
+      tags: [Closure]
+      responses:
+        "200":
+          description: "Saga status"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    ClosureIDPath:
+      name: closure_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: "UUIDv7 saga identifier (returned by requestClosure)"
+
+    ChoraRoleHeader:
+      name: X-Chora-Role
+      in: header
+      required: false
+      schema:
+        type: string
+      description: |
+        Comma-joined canonical roles stamped by chora-gateway from the
+        session JWT (same convention chora-payments admin routes trust).
+        `fast_close` requires the `PLATFORM_OPERATOR` token.
+
+  schemas:
+    State:
+      type: string
+      enum:
+        - active
+        - closing
+        - suspended
+        - pseudonymized
+        - cold_archived
+        - crypto_shredded
+      description: |
+        Closure saga lifecycle state. Values match
+        `chora.identity.v1.AccountState` (modulo prefix).
+
+    CloseRequest:
+      type: object
+      required: [gcid, tenant_id, grace_period_days, requested_by_gcid]
+      properties:
+        gcid:
+          type: string
+          format: uuid
+          description: "GCID whose account is being closed (UUIDv7; AGIDs rejected)"
+        tenant_id:
+          type: string
+          format: uuid
+        grace_period_days:
+          type: integer
+          minimum: 1
+          maximum: 365
+        reason:
+          type: string
+          maxLength: 1024
+        requested_by_gcid:
+          type: string
+          format: uuid
+          description: "GCID of the actor requesting closure (learner self-service or operator)"
+        fast_close:
+          type: boolean
+          default: false
+          description: |
+            Collapse the grace window to zero (test accounts).
+            PLATFORM_OPERATOR-only — enforced via X-Chora-Role.
+
+    CloseResponse:
+      type: object
+      required: [saga_id, state, grace_ends_at, requested_at]
+      properties:
+        saga_id:
+          type: string
+          format: uuid
+        state:
+          $ref: "#/components/schemas/State"
+        grace_ends_at:
+          type: string
+          format: date-time
+        requested_at:
+          type: string
+          format: date-time
+
+    CancelRequest:
+      type: object
+      required: [actor_gcid]
+      properties:
+        actor_gcid:
+          type: string
+          format: uuid
+        reason:
+          type: string
+          maxLength: 1024
+
+    CancelResponse:
+      type: object
+      required: [saga_id, state]
+      properties:
+        saga_id:
+          type: string
+          format: uuid
+        state:
+          $ref: "#/components/schemas/State"
+        cancelled_at:
+          type: string
+          format: date-time
+
+    HistoryEntry:
+      type: object
+      properties:
+        prior_state:
+          $ref: "#/components/schemas/State"
+        new_state:
+          $ref: "#/components/schemas/State"
+        reason:
+          type: string
+        actor_gcid:
+          type: string
+          format: uuid
+        transitioned_at:
+          type: string
+          format: date-time
+
+    DomainAck:
+      type: object
+      properties:
+        domain:
+          type: string
+          enum:
+            [creation, consumption, delivery, sharing, a2a, identity, tenancy, governance, observability, notifications]
+        acked_at:
+          type: string
+          format: date-time
+
+    StatusResponse:
+      type: object
+      required: [saga_id, gcid, tenant_id, state, grace_ends_at, requested_at]
+      properties:
+        saga_id:
+          type: string
+          format: uuid
+        gcid:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        state:
+          $ref: "#/components/schemas/State"
+        grace_ends_at:
+          type: string
+          format: date-time
+        requested_at:
+          type: string
+          format: date-time
+        history:
+          type: array
+          items:
+            $ref: "#/components/schemas/HistoryEntry"
+        domain_acks:
+          type: array
+          items:
+            $ref: "#/components/schemas/DomainAck"
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: |
+            Machine codes: CLOSURE_AGID_REJECTED,
+            CLOSURE_FAST_CLOSE_OPERATOR_REQUIRED, CLOSURE_INVALID_PARAMS,
+            CLOSURE_CANCEL_TOO_LATE
+        message:
+          type: string
+
+  responses:
+    BadRequest:
+      description: "Invalid request"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: "Resource not found"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Conflict:
+      description: "State transition forbidden by saga state machine"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InternalError:
+      description: "Internal server error"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"

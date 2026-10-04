@@ -1,0 +1,63 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Identity — RoleRevoked
+  version: 1.0.0
+  description: |
+    Per-course CourseRole projection revoked (un-enrolment, admin removal,
+    course closure cascade). Soft-delete only — record preserved with
+    revoked_at timestamp.
+
+    - Domain: Identity (`chora_identity` DB)
+    - Topic: `chora.identity.role.revoked.v1`
+    - Source proto: `proto/events/identity/role.proto`
+       message `chora.identity.v1.RoleRevoked`
+    - IMDA: tag envelope.chora_imda_dimension = "accountability" (D1 — append-only audit)
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  roleRevoked:
+    address: chora.identity.role.revoked.v1
+    messages:
+      roleRevoked:
+        $ref: '#/components/messages/RoleRevoked'
+
+operations:
+  publishRoleRevoked:
+    action: send
+    channel:
+      $ref: '#/channels/roleRevoked'
+    messages:
+      - $ref: '#/channels/roleRevoked/messages/roleRevoked'
+
+  consumeRoleRevoked:
+    action: receive
+    channel:
+      $ref: '#/channels/roleRevoked'
+    description: |
+      Consumers:
+        - chora-bff-gateway (invalidate /me/roles cache)
+        - chora-observability (audit ledger)
+    messages:
+      - $ref: '#/channels/roleRevoked/messages/roleRevoked'
+
+components:
+  messages:
+    RoleRevoked:
+      name: RoleRevoked
+      title: Per-course role revoked for a GCID
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/identity/role.proto#/chora.identity.v1.RoleRevoked'

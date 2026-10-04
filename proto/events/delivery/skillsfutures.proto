@@ -1,0 +1,155 @@
+// =============================================================================
+// chora.delivery.v1 — SkillsFutures (SG SSG) claim lifecycle events
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 2 D7+D8
+// + .claude/rules/ddd-enforcement.md
+// + .claude/skills/domain-content-delivery/SKILL.md (SFA submission state
+//   machine + immutable audit log).
+//
+// Owning domain  : Content Delivery (chora_delivery database)
+// Owning team    : Team 2 (Delivery)
+// Topic prefix   : chora.delivery.skillsfutures.*
+//
+// SkillsFutures is the SG government SkillsFuture Singapore (SSG)
+// claim/funding integration. SkillsFuturesSubmission aggregate owns its
+// state machine: DRAFT -> SUBMITTED -> UNDER_REVIEW -> APPROVED|REJECTED ->
+// DISBURSED.
+//
+// Note (per task scope): the disbursement event lives in Delivery (it is
+// SFA's own workflow event); separate platform-level billing/payment events
+// (Stripe ledger, refunds) live in the supporting Tenancy + Billing domain.
+//
+// Cross-domain references (no FK):
+//   - learner_gcid : Identity (UUID, no FK)
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.delivery.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/delivery/v1;deliveryv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// ClaimStatus — lifecycle of a SkillsFutures claim.
+// Transitions: SUBMITTED -> UNDER_REVIEW -> APPROVED|REJECTED -> DISBURSED
+enum ClaimStatus {
+  CLAIM_STATUS_UNSPECIFIED = 0;
+  CLAIM_STATUS_SUBMITTED = 1;
+  CLAIM_STATUS_UNDER_REVIEW = 2;
+  CLAIM_STATUS_APPROVED = 3;
+  CLAIM_STATUS_REJECTED = 4;
+  CLAIM_STATUS_DISBURSED = 5;
+}
+
+// -----------------------------------------------------------------------------
+// SkillsFutureClaimed — chora.delivery.skillsfutures.claimed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a learner submits a SkillsFutures funding claim against a
+// Course. Triggers SSG external API call (via adapters/sfa/) + audit log.
+message SkillsFutureClaimed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 identifier of the SkillsFuturesSubmission claim.
+  string claim_id = 2;
+
+  // GCID of the learner submitting the claim.
+  string learner_gcid = 3;
+
+  // UUID of the Course funding is claimed against (same DB).
+  string course_id = 4;
+
+  // Claim amount in cents (whole-cent precision; e.g., 50000 = SGD 500.00).
+  int32 claim_amount = 5;
+
+  // Always CLAIM_STATUS_SUBMITTED for *.claimed events.
+  ClaimStatus claim_status = 6;
+
+  // SSG external reference ID (assigned at submission time).
+  string ssg_reference_id = 7;
+
+  google.protobuf.Timestamp claimed_at = 8;
+}
+
+// -----------------------------------------------------------------------------
+// SkillsFutureClaimApproved — chora.delivery.skillsfutures.approved.v1
+// -----------------------------------------------------------------------------
+//
+// Published when SSG approves the claim (callback / poll result). Triggers
+// learner notification + downstream disbursement scheduling.
+message SkillsFutureClaimApproved {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string claim_id = 2;
+
+  string learner_gcid = 3;
+
+  string course_id = 4;
+
+  int32 claim_amount = 5;
+
+  // Always CLAIM_STATUS_APPROVED for this event.
+  ClaimStatus claim_status = 6;
+
+  string ssg_reference_id = 7;
+
+  google.protobuf.Timestamp approved_at = 8;
+}
+
+// -----------------------------------------------------------------------------
+// SkillsFutureClaimRejected — chora.delivery.skillsfutures.rejected.v1
+// -----------------------------------------------------------------------------
+//
+// Published when SSG rejects the claim. Drives learner notification +
+// remediation flow (resubmit / appeal).
+message SkillsFutureClaimRejected {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string claim_id = 2;
+
+  string learner_gcid = 3;
+
+  string course_id = 4;
+
+  int32 claim_amount = 5;
+
+  // Always CLAIM_STATUS_REJECTED for this event.
+  ClaimStatus claim_status = 6;
+
+  string ssg_reference_id = 7;
+
+  // Required SSG-supplied rejection reason (max 512 chars; may be a code
+  // mapped from SSG response).
+  string rejection_reason = 8;
+
+  google.protobuf.Timestamp rejected_at = 9;
+}
+
+// -----------------------------------------------------------------------------
+// SkillsFutureClaimDisbursed — chora.delivery.skillsfutures.disbursed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when funds are disbursed (SSG pays the tenant / training
+// provider). This is Delivery's own SFA workflow event — separate
+// chora.tenancy.* billing/payment events handle the Stripe-side ledger.
+message SkillsFutureClaimDisbursed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string claim_id = 2;
+
+  string learner_gcid = 3;
+
+  string course_id = 4;
+
+  int32 claim_amount = 5;
+
+  // Always CLAIM_STATUS_DISBURSED for this event.
+  ClaimStatus claim_status = 6;
+
+  string ssg_reference_id = 7;
+
+  google.protobuf.Timestamp disbursed_at = 8;
+}

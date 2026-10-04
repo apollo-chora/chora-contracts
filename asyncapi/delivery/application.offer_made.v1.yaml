@@ -1,0 +1,62 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Delivery — ApplicationOfferMade
+  version: 1.0.0
+  description: |
+    Reviewer made an offer (UnderReview -> OfferMade). Triggers offer-letter
+    email + applicant offer-acceptance UX.
+
+    - Domain: Content Delivery (`chora_delivery` DB)
+    - Topic: `chora.delivery.application.offer_made.v1`
+    - Source proto: `proto/events/delivery/application.proto`
+       message `chora.delivery.v1.ApplicationOfferMade`
+  contact:
+    name: Chora Delivery Team (Team 2)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  applicationOfferMade:
+    address: chora.delivery.application.offer_made.v1
+    messages:
+      applicationOfferMade:
+        $ref: '#/components/messages/ApplicationOfferMade'
+
+operations:
+  publishApplicationOfferMade:
+    action: send
+    channel:
+      $ref: '#/channels/applicationOfferMade'
+    messages:
+      - $ref: '#/channels/applicationOfferMade/messages/applicationOfferMade'
+
+  consumeApplicationOfferMade:
+    action: receive
+    channel:
+      $ref: '#/channels/applicationOfferMade'
+    description: |
+      Consumers:
+        - chora-notifications (offer-letter email)
+        - chora-bff-gateway (applicant dashboard offer UX)
+        - chora-observability (offer-funnel conversion rate)
+    messages:
+      - $ref: '#/channels/applicationOfferMade/messages/applicationOfferMade'
+
+components:
+  messages:
+    ApplicationOfferMade:
+      name: ApplicationOfferMade
+      title: Course Application offer made
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/delivery/application.proto#/chora.delivery.v1.ApplicationOfferMade'

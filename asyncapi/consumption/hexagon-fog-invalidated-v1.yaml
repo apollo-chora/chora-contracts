@@ -1,0 +1,72 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Content Consumption — HexagonFogInvalidated
+  version: 1.0.0
+  description: |
+    Published when a hex_node row is invalidated (per ADR-143).
+
+    Triggers:
+    - Subscriber to `chora.creation.atom.published.v1` (focal/neighbor atom updated)
+    - Subscriber to `chora.creation.atom.revision_updated.v1`
+    - Subscriber to `chora.consumption.user_retention.shifted.v1` (precondition;
+      may be added if not yet defined — see ADR-143 Open Items)
+    - Manual admin reset via STITCH-A-KG-6 lifecycle controls
+
+    - Domain: Content Consumption (`chora_consumption` DB)
+    - Aggregate root: `HexagonNode` (kg_hexagon_nodes table)
+    - Topic: `chora.consumption.kg_hexagon_fog.invalidated.v1`
+    - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
+    - Source proto: `proto/events/consumption/knowledge_graph.proto`
+       message `chora.consumption.v1.HexagonFogInvalidated`
+
+    Embeds the mandatory `chora.common.v1.EventEnvelope` as field 1.
+  contact:
+    name: Chora Content Team (Team 1)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+    description: Google Cloud Pub/Sub (chora-489812 platform host)
+
+channels:
+  hexagonFogInvalidated:
+    address: chora.consumption.kg_hexagon_fog.invalidated.v1
+    description: Single-event topic for HexagonFogInvalidated.
+    messages:
+      hexagonFogInvalidated:
+        $ref: '#/components/messages/HexagonFogInvalidated'
+
+operations:
+  publishHexagonFogInvalidated:
+    action: send
+    channel:
+      $ref: '#/channels/hexagonFogInvalidated'
+    summary: Publish a HexagonFogInvalidated event
+
+  consumeHexagonFogInvalidated:
+    action: receive
+    channel:
+      $ref: '#/channels/hexagonFogInvalidated'
+    summary: Subscribe to HexagonFogInvalidated events
+    description: |
+      Primary consumers:
+      - Notifications — optional re-engagement nudge ("Your map is fresh again!")
+      - Observability — cache-freshness analytics
+
+components:
+  messages:
+    HexagonFogInvalidated:
+      name: HexagonFogInvalidated
+      title: Hexagon Fog Invalidated
+      summary: A hexagon cache row was invalidated; will regen on next fetch
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/consumption/knowledge_graph.proto#/chora.consumption.v1.HexagonFogInvalidated'

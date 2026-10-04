@@ -1,0 +1,609 @@
+// =============================================================================
+// chora.delivery.v1 — Assessment + Submission lifecycle events
+// =============================================================================
+//
+// Source-of-truth: docs/architecture/adrs/adr-155-assessment-grading-dispatch.md
+//   §"R+ Delivery State Machine" + §"In Scope for Phyllis demo"
+// + .claude/rules/ddd-enforcement.md
+// + chora-contracts/openapi/delivery-assessments.yaml
+//
+// Owning domain  : Content Delivery (chora_delivery database)
+// Owning team    : Team 2 (Delivery)
+// Topic prefix   : chora.delivery.assessment.* + chora.delivery.submission.*
+//
+// -----------------------------------------------------------------------------
+// Two aggregates, two FSMs
+// -----------------------------------------------------------------------------
+//
+// 1. Assessment — instructor-instantiated live run of a TestSet for a class/
+//    cohort. Lifecycle:
+//      DRAFT      → SCHEDULED (via /publish; requires scheduled_open_at >= now)
+//      SCHEDULED  → OPEN      (auto-flip at scheduled_open_at; or admin override)
+//      OPEN       → CLOSED    (auto-flip at scheduled_close_at OR all
+//                              attempts exhausted)
+//      CLOSED     → GRADING   (auto-trigger grading job after all submissions
+//                              finalise OR timeout)
+//      GRADING    → GRADED    (when grading_finalized.v1 received for all
+//                              submissions)
+//      GRADED     → RELEASED  (manual via /release-results; or auto if
+//                              grading_config.auto_release=true)
+//      any        → ARCHIVED  (manual; preserves immutable audit trail)
+//
+// 2. Submission — per-learner attempt against an Assessment. Lifecycle:
+//      IN_PROGRESS → SUBMITTED (via /submit; or auto on time-out)
+//      SUBMITTED   → GRADING   (assessment-level batch grading dispatches)
+//      GRADING     → GRADED    (grading_finalized.v1 received)
+//      GRADED      → RELEASED  (parent assessment released)
+//
+// -----------------------------------------------------------------------------
+// Eight topics defined here
+// -----------------------------------------------------------------------------
+//
+// chora.delivery.assessment.created.v1     — POST /assessments lands
+// chora.delivery.assessment.published.v1   — DRAFT → SCHEDULED
+// chora.delivery.assessment.closed.v1      — OPEN → CLOSED (auto or admin)
+// chora.delivery.assessment.released.v1    — GRADED → RELEASED
+// chora.delivery.submission.started.v1     — learner starts an attempt
+// chora.delivery.submission.submitted.v1   — learner finalises (triggers grading)
+// chora.delivery.submission.graded.v1      — grading_finalized.v1 propagated to
+//                                            the submission's state
+// chora.delivery.submission.released.v1    — parent assessment release
+//                                            propagated to this submission
+//
+// Composes with `chora.delivery.grading.*` topics in grading.proto. The
+// boundary: assessment.* + submission.* describe lifecycle transitions;
+// grading.* describes the grading-job sub-machine triggered by
+// submission.submitted.v1 and consumed by submission.graded.v1.
+//
+// EVERY event embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.delivery.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/delivery/v1;deliveryv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// AssessmentState — Assessment lifecycle (FSM)
+// -----------------------------------------------------------------------------
+enum AssessmentState {
+  ASSESSMENT_STATE_UNSPECIFIED = 0;
+  ASSESSMENT_STATE_DRAFT       = 1;
+  ASSESSMENT_STATE_SCHEDULED   = 2;
+  ASSESSMENT_STATE_OPEN        = 3;
+  ASSESSMENT_STATE_CLOSED      = 4;
+  ASSESSMENT_STATE_GRADING     = 5;
+  ASSESSMENT_STATE_GRADED      = 6;
+  ASSESSMENT_STATE_RELEASED    = 7;
+  ASSESSMENT_STATE_ARCHIVED    = 8;
+}
+
+// -----------------------------------------------------------------------------
+// SubmissionState — Submission lifecycle (FSM)
+// -----------------------------------------------------------------------------
+enum SubmissionState {
+  SUBMISSION_STATE_UNSPECIFIED = 0;
+  SUBMISSION_STATE_IN_PROGRESS = 1;
+  SUBMISSION_STATE_SUBMITTED   = 2;
+  SUBMISSION_STATE_GRADING     = 3;
+  SUBMISSION_STATE_GRADED      = 4;
+  SUBMISSION_STATE_RELEASED    = 5;
+  SUBMISSION_STATE_ARCHIVED    = 6;
+}
+
+// -----------------------------------------------------------------------------
+// SubmissionCloseReason — why a submission transitioned to SUBMITTED
+// -----------------------------------------------------------------------------
+enum SubmissionCloseReason {
+  SUBMISSION_CLOSE_REASON_UNSPECIFIED       = 0;
+  SUBMISSION_CLOSE_REASON_LEARNER_SUBMITTED = 1;  // explicit /submit
+  SUBMISSION_CLOSE_REASON_TIME_OUT          = 2;  // hit assessment close time
+  SUBMISSION_CLOSE_REASON_ADMIN_FORCE_CLOSE = 3;  // instructor force-close
+}
+
+// -----------------------------------------------------------------------------
+// AssessmentCreated — chora.delivery.assessment.created.v1
+// -----------------------------------------------------------------------------
+//
+// Fired when an instructor instantiates a PUBLISHED TestSet as a live
+// Assessment (POST /assessments in delivery-assessments.yaml).
+//
+// Consumers:
+//   - chora-consumption (so the assessment can be surfaced in the learner's
+//     "upcoming assessments" feed via cross-domain projection)
+//   - Notifications (queue invite emails for class-bound assessments)
+//   - R+ monitoring (record new assessment in dashboard)
+message AssessmentCreated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 of the assessment instance.
+  string assessment_id = 2;
+
+  // UUIDv7 of the TestSet this assessment instantiated.
+  string test_set_id = 3;
+
+  // Revision number of the test-set snapshot captured at creation. The
+  // assessment locks against this revision — later test-set forks are NOT
+  // propagated to live assessments.
+  int32 test_set_revision_snapshot = 4;
+
+  // GCID of the instructor who created the assessment.
+  string instructor_gcid = 5;
+
+  // Optional class_id binding (UUIDv7; cross-domain UUID-no-FK). When
+  // present, R+ enforces class roster membership for submissions. Empty =
+  // freestanding assessment (v1 demo default).
+  string class_id = 6;
+
+  // Initial state — always DRAFT for created events.
+  AssessmentState state = 7;
+
+  // Instructor-supplied title (may override the test-set's learner_facing_name).
+  string title = 8;
+
+  // Scheduling window (UTC).
+  google.protobuf.Timestamp scheduled_open_at = 9;
+  google.protobuf.Timestamp scheduled_close_at = 10;
+
+  // Attempt cap (1..3 per spec).
+  int32 max_attempts = 11;
+
+  // Question count + total points (snapshot from test-set).
+  int32 question_count = 12;
+  int32 total_points = 13;
+
+  google.protobuf.Timestamp created_at = 14;
+}
+
+// -----------------------------------------------------------------------------
+// AssessmentPublished — chora.delivery.assessment.published.v1
+// -----------------------------------------------------------------------------
+//
+// Fired when the instructor publishes a DRAFT assessment to SCHEDULED via
+// POST /assessments/{id}/publish. After this event, the assessment is
+// visible to invited learners (or all tenant members if class_id is empty).
+//
+// Auto-flip note: the SCHEDULED → OPEN transition is a clock-driven auto-
+// flip in chora-delivery's scheduler (Cloud Scheduler cron + idempotent
+// state update). It does NOT emit a separate `.opened.v1` event — consumers
+// watch `scheduled_open_at` from this event + check `state` on GET.
+//
+// Consumers:
+//   - Notifications (send "assessment scheduled" email to invited learners
+//     OR to all class members if class_id present)
+//   - chora-consumption (refresh learner "upcoming assessments" feed)
+//   - R+ monitoring
+message AssessmentPublished {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string assessment_id = 2;
+  string test_set_id = 3;
+  string instructor_gcid = 4;
+  string class_id = 5;
+
+  // Always SCHEDULED for this event.
+  AssessmentState state = 6;
+
+  string title = 7;
+  google.protobuf.Timestamp scheduled_open_at = 8;
+  google.protobuf.Timestamp scheduled_close_at = 9;
+  int32 max_attempts = 10;
+
+  google.protobuf.Timestamp published_at = 11;
+}
+
+// -----------------------------------------------------------------------------
+// AssessmentClosed — chora.delivery.assessment.closed.v1
+// -----------------------------------------------------------------------------
+//
+// Fired when the assessment transitions OPEN → CLOSED. Reasons:
+//   - SCHEDULED_TIME_REACHED — scheduled_close_at hit (clock-driven)
+//   - ALL_ATTEMPTS_EXHAUSTED — every invited learner used all max_attempts
+//   - INSTRUCTOR_FORCE_CLOSE — manual close via R+ surface
+//
+// After CLOSED, no new submissions accepted; chora-delivery triggers the
+// grading dispatch (one grading_requested.v1 per finalised submission).
+message AssessmentClosed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string assessment_id = 2;
+  string test_set_id = 3;
+  string instructor_gcid = 4;
+  string class_id = 5;
+
+  AssessmentState state = 6;  // CLOSED
+
+  // Reason discriminator (free string for forward-compat; current values:
+  // "scheduled_time_reached" | "all_attempts_exhausted" | "instructor_force_close")
+  string close_reason = 7;
+
+  // Final tallies at close time (informational).
+  int32 total_invited = 8;
+  int32 total_started = 9;
+  int32 total_submitted = 10;
+
+  google.protobuf.Timestamp closed_at = 11;
+}
+
+// -----------------------------------------------------------------------------
+// AssessmentReleased — chora.delivery.assessment.released.v1
+// -----------------------------------------------------------------------------
+//
+// Fired when the instructor (or auto-release scheduler) flips the assessment
+// from GRADED → RELEASED. All graded submissions become visible to learners
+// post this event.
+//
+// Consumers:
+//   - chora-consumption (commit XP + reward accrual; previously held pending
+//     release)
+//   - Notifications ("Your results are ready" email/push to each learner)
+//   - chora-sharing (atomic feedback / share-prompts post-release)
+message AssessmentReleased {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string assessment_id = 2;
+  string test_set_id = 3;
+  string instructor_gcid = 4;
+  string class_id = 5;
+
+  AssessmentState state = 6;  // RELEASED
+
+  // Were results released manually (instructor) or auto (per GradingConfig)?
+  // Values: "manual" | "auto"
+  string release_method = 7;
+
+  // Final aggregate tallies at release time.
+  int32 total_invited = 8;
+  int32 total_submitted = 9;
+  int32 total_graded = 10;
+  float average_score_percent = 11;
+  float median_score_percent = 12;
+  int32 passed_count = 13;
+  int32 failed_count = 14;
+
+  // Optional instructor announcement attached at release time (≤500 chars).
+  string release_announcement = 15;
+
+  google.protobuf.Timestamp released_at = 16;
+}
+
+// -----------------------------------------------------------------------------
+// AssessmentOpened — chora.delivery.assessment.opened.v1
+// -----------------------------------------------------------------------------
+//
+// Fired when the assessment transitions SCHEDULED → OPEN. Two trigger paths:
+//   - Scheduled auto-open (clock-driven) at `scheduled_open_at`.
+//   - Instructor manual open via R+ (forward-compat — v1 demo only auto).
+//
+// Earlier the contract elided this event (consumers were expected to derive
+// the SCHEDULED→OPEN flip from `scheduled_open_at` on AssessmentPublished).
+// IMDA D2 audit (Tier 5) requires an explicit transition marker — both the
+// fact of the flip AND the actor (auto vs manual) — so `.opened.v1` is now
+// the canonical edge. Per ADR-155 §"FSM-complete event surface".
+//
+// Consumers:
+//   - chora-consumption (move from "upcoming" to "in-flight" projection)
+//   - R+ monitoring (set in-flight banner)
+//   - chora-observability (IMDA D2 transparency audit row)
+message AssessmentOpened {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string assessment_id = 2;
+  string test_set_id = 3;
+  string instructor_gcid = 4;
+  string class_id = 5;
+
+  AssessmentState state = 6;  // OPEN
+
+  // "scheduled_auto_open" | "instructor_force_open"
+  string open_trigger = 7;
+
+  // Snapshot of the time window (UTC) as visible at open time.
+  google.protobuf.Timestamp opens_at = 8;
+  google.protobuf.Timestamp closes_at = 9;
+
+  // Invited cohort size at open time (informational).
+  int32 total_invited = 10;
+
+  google.protobuf.Timestamp opened_at = 11;
+}
+
+// -----------------------------------------------------------------------------
+// AssessmentGradingStarted — chora.delivery.assessment.grading_started.v1
+// -----------------------------------------------------------------------------
+//
+// Fired when the assessment transitions CLOSED → GRADING. Triggered by
+// chora-delivery's in-process grading-orchestrator after CLOSED. This is the
+// fan-out edge — one assessment.grading_started.v1 precedes N
+// grading.requested.v1 (one per finalised submission).
+//
+// Consumers:
+//   - R+ monitoring (grading-in-progress banner)
+//   - chora-observability (IMDA D2 audit row + latency histogram start)
+//   - Notifications (instructor "grading in progress" digest, batched)
+message AssessmentGradingStarted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string assessment_id = 2;
+  string test_set_id = 3;
+  string instructor_gcid = 4;
+  string class_id = 5;
+
+  AssessmentState state = 6;  // GRADING
+
+  // Total submissions fanned out into grading.requested.v1.
+  int32 submissions_dispatched = 7;
+
+  // How many of those carry OE questions (drive OE batch grouping).
+  int32 oe_question_submission_count = 8;
+
+  google.protobuf.Timestamp grading_started_at = 9;
+}
+
+// -----------------------------------------------------------------------------
+// AssessmentGraded — chora.delivery.assessment.graded.v1
+// -----------------------------------------------------------------------------
+//
+// Fired when all per-submission grading.finalized.v1 events have landed for
+// the assessment AND chora-delivery flips the parent state GRADING → GRADED.
+// This is the per-assessment grading-complete marker (distinct from
+// per-submission `submission.graded.v1`).
+//
+// `assessment.released.v1` only fires AFTER `graded.v1` + a release
+// decision (manual or auto per GradingConfig).
+//
+// Consumers:
+//   - R+ monitoring (graded count, dashboard update)
+//   - chora-observability (latency histogram end + per-assessment grading-
+//     SLA tracking)
+//   - Notifications (instructor "grading complete; release when ready" cue)
+message AssessmentGraded {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string assessment_id = 2;
+  string test_set_id = 3;
+  string instructor_gcid = 4;
+  string class_id = 5;
+
+  AssessmentState state = 6;  // GRADED
+
+  // Aggregate tallies at graded time.
+  int32 total_invited = 7;
+  int32 total_submitted = 8;
+  int32 total_graded = 9;
+  float average_score_percent = 10;
+  float median_score_percent = 11;
+  int32 passed_count = 12;
+  int32 failed_count = 13;
+
+  // Sum of grading wall-clock latency (ms) across all submissions —
+  // observability uses this to attribute to mean-latency SLO.
+  int64 total_grading_latency_ms = 14;
+
+  google.protobuf.Timestamp graded_at = 15;
+}
+
+// -----------------------------------------------------------------------------
+// AssessmentArchived — chora.delivery.assessment.archived.v1
+// -----------------------------------------------------------------------------
+//
+// Fired when an assessment transitions RELEASED → ARCHIVED. Two trigger paths:
+//   - Instructor manual archive via R+ (POST /assessments/{id}/archive).
+//   - Scheduler-driven retention sweep (per-tenant TTL on terminal states).
+//
+// Post-archive: assessment is read-only across all surfaces (instructor R+
+// surfaces a read-only banner; learner A+ /me/assessments hides the row by
+// default; admin can opt-in via filter param).
+//
+// Consumers:
+//   - chora-consumption (drop from learner projections)
+//   - R+ monitoring (decrement live-assessment count)
+//   - chora-observability (terminal-state audit row)
+message AssessmentArchived {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string assessment_id = 2;
+  string test_set_id = 3;
+  string instructor_gcid = 4;
+  string class_id = 5;
+
+  AssessmentState state = 6;  // ARCHIVED
+
+  // "instructor_manual" | "retention_sweep"
+  string archive_trigger = 7;
+
+  // Free-text instructor note attached at archive time (≤500 chars; empty
+  // for retention_sweep).
+  string archive_note = 8;
+
+  google.protobuf.Timestamp archived_at = 9;
+}
+
+// -----------------------------------------------------------------------------
+// SubmissionStarted — chora.delivery.submission.started.v1
+// -----------------------------------------------------------------------------
+//
+// Fired when a learner starts a new attempt via
+// POST /me/assessments/{id}/submissions. Establishes the time-limit clock +
+// attempt_number assignment.
+//
+// Consumers:
+//   - R+ monitoring (in-progress count++)
+//   - chora-consumption (reserve a SubmitAtomicSession placeholder if the
+//     assessment also creates AtomicSessions for XP — TBD per consumption-
+//     domain composition decision; v1 = no link)
+message SubmissionStarted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string submission_id = 2;
+  string assessment_id = 3;
+  string test_set_id = 4;
+  string learner_gcid = 5;
+  string class_id = 6;
+
+  SubmissionState state = 7;  // IN_PROGRESS
+
+  // Per-attempt counter (1..max_attempts of parent assessment).
+  int32 attempt_number = 8;
+
+  // Time-window snapshot.
+  google.protobuf.Timestamp opens_at = 9;
+  google.protobuf.Timestamp closes_at = 10;
+  int32 time_limit_seconds = 11;
+
+  google.protobuf.Timestamp started_at = 12;
+}
+
+// -----------------------------------------------------------------------------
+// SubmissionSubmitted — chora.delivery.submission.submitted.v1
+// -----------------------------------------------------------------------------
+//
+// Fired when a learner finalises an attempt — explicitly via
+// POST /me/assessments/{id}/submissions/{sid}/submit OR auto-finalised at
+// scheduled_close_at.
+//
+// This event TRIGGERS grading. chora-delivery's grading-orchestrator service
+// (NOT the LangGraph one — the in-process Go batched-dispatcher) subscribes
+// + emits `grading.requested.v1` per submission. See grading.proto.
+//
+// Consumers:
+//   - chora-delivery grading-dispatcher (in-process; emits grading.requested.v1)
+//   - R+ monitoring (in-progress count--; submitted count++)
+//   - chora-consumption (refresh learner's "pending grades" projection)
+message SubmissionSubmitted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string submission_id = 2;
+  string assessment_id = 3;
+  string test_set_id = 4;
+  string learner_gcid = 5;
+  string class_id = 6;
+
+  SubmissionState state = 7;  // SUBMITTED
+
+  int32 attempt_number = 8;
+
+  // Reason for transition (LEARNER_SUBMITTED vs TIME_OUT vs admin close).
+  SubmissionCloseReason close_reason = 9;
+
+  // Answer counts (informational; full per-answer list is in
+  // chora_delivery.submissions.answers_jsonb).
+  int32 total_questions = 10;
+  int32 answered_count = 11;
+  int32 skipped_count = 12;
+
+  google.protobuf.Timestamp started_at = 13;
+  google.protobuf.Timestamp submitted_at = 14;
+}
+
+// -----------------------------------------------------------------------------
+// SubmissionGraded — chora.delivery.submission.graded.v1
+// -----------------------------------------------------------------------------
+//
+// Fired by chora-delivery after receiving `grading.finalized.v1` for the
+// submission's grading job. Propagates the GRADING → GRADED transition to
+// the submission aggregate.
+//
+// NOT visible to the learner yet — visibility flips at AssessmentReleased
+// (or via per-submission auto-release if grading_config.auto_release=true,
+// in which case .released.v1 is emitted alongside .graded.v1).
+//
+// Consumers:
+//   - chora-consumption (refresh learner "pending grades" → "graded; await release")
+//   - R+ monitoring (graded count++)
+//   - chora-governance (IMDA D2 — audit trail; grading evidence packed)
+message SubmissionGraded {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string submission_id = 2;
+  string assessment_id = 3;
+  string learner_gcid = 4;
+  string grading_job_id = 5;
+
+  SubmissionState state = 6;  // GRADED
+
+  // Final tallies (mirrors grading.finalized.v1 totals).
+  float total_points_earned = 7;
+  int32 total_points_possible = 8;
+  int32 passing_threshold_percent = 9;
+  bool passed = 10;
+
+  google.protobuf.Timestamp graded_at = 11;
+
+  // Number of hints the learner used on this submission; 0 enables the
+  // ADR-203 first-attempt-mastery EXP bonus. Additive within v1.
+  int32 hint_count = 12;
+
+  // Human-readable assessment title (snapshot at grade time). Additive within
+  // v1 (ADR-205 WS-6, CHO-1958): the whole-submission grade carries no per-atom
+  // topic, so chora-consumption's Growth-Edge projector keys a DERIVED
+  // learner_weakness on this title (its only concept-bearing signal) when the
+  // graded accuracy lands below the mastery bar. Empty ⇒ the projector acks
+  // without minting an edge (unmappable evidence), mirroring the existing
+  // derived paths' ack-on-no-concept behaviour.
+  string assessment_title = 13;
+
+  // The parent Offering's delivery_type, snapshotted at grade time
+  // ({graduate|short|async}; ADR-190 D1 puts delivery_type on the Offering, so
+  // one Course stays reusable across modes). Additive within v1 (CHO-2224).
+  //
+  // WHY: this grade is chora-consumption's ONLY mode-bearing signal. Its
+  // StudentTranscript projects both a graduate assessment and a short-course
+  // grade as kind='assessment', so WITHOUT this field the two are
+  // indistinguishable and the §10.6 capstone ("one transcript rolls up graded
+  // components from >=2 MODES") can only ever demonstrate 2 KINDS.
+  //
+  // A string, NOT an enum: offerings.delivery_type is bare TEXT validated in
+  // the delivery domain (DeliveryType.IsValid()), so a string carries it
+  // end-to-end with ZERO hand-written label<->wire mapping to drift out of
+  // sync. Mirrors the assessment_title precedent.
+  //
+  // Empty ⇒ genuinely unattributable, NOT a default: assessments.offering_id is
+  // NULLABLE (migration 0033), so a freestanding assessment has no Offering and
+  // therefore no delivery_type. Consumers persist NULL rather than invent one.
+  //
+  // ⚠⚠ SCHEMA REGISTRY: chora.delivery.submission.graded.v1 has a schema
+  // ATTACHED. Populating this field before the matching revision is committed
+  // returns 400 AT PUBLISH and NEVER reaches a DLQ. The encoder omits an empty
+  // value, so the break is DATA-DEPENDENT — exactly how fields 12/13 stayed
+  // invisible for ~3 weeks. Commit the revision BEFORE deploying a producer
+  // that populates this.
+  string delivery_type = 14;
+}
+
+// -----------------------------------------------------------------------------
+// SubmissionReleased — chora.delivery.submission.released.v1
+// -----------------------------------------------------------------------------
+//
+// Fired when the parent assessment is released (AssessmentReleased) AND
+// this submission has been graded. Triggered per-submission so subscribers
+// can fan-out per learner.
+//
+// Consumers:
+//   - chora-consumption (XP credit commits; "Your grade is ready" UI surface
+//     enabled)
+//   - Notifications (per-learner "Your results are ready" push/email)
+//   - chora-sharing (eligible for atomic feedback / share-prompts)
+message SubmissionReleased {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string submission_id = 2;
+  string assessment_id = 3;
+  string learner_gcid = 4;
+  string grading_job_id = 5;
+
+  SubmissionState state = 6;  // RELEASED
+
+  // Indicates whether release-on-submit was instructor-driven or auto.
+  // "manual" | "auto"
+  string release_method = 7;
+
+  // Echo of the parent assessment's release announcement (≤500 chars).
+  string release_announcement = 8;
+
+  google.protobuf.Timestamp released_at = 9;
+}

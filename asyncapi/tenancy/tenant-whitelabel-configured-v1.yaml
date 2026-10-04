@@ -1,0 +1,62 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Tenancy — TenantWhitelabelConfigured
+  version: 1.0.0
+  description: |
+    Published when a WHITE_LABEL or FRANCHISE tenant configures custom
+    branding (logo, primary color, custom domain). Triggers per-surface
+    theme rebuild and Cloud DNS / GCLB cert renewal for the custom domain.
+
+    - Domain: Tenancy + Billing (`chora_tenancy` DB)
+    - Topic: `chora.tenancy.tenant.whitelabel_configured.v1`
+    - Source proto: `proto/events/tenancy/tenant.proto`
+       message `chora.tenancy.v1.TenantWhitelabelConfigured`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  tenantWhitelabelConfigured:
+    address: chora.tenancy.tenant.whitelabel_configured.v1
+    messages:
+      tenantWhitelabelConfigured:
+        $ref: '#/components/messages/TenantWhitelabelConfigured'
+
+operations:
+  publishTenantWhitelabelConfigured:
+    action: send
+    channel:
+      $ref: '#/channels/tenantWhitelabelConfigured'
+    messages:
+      - $ref: '#/channels/tenantWhitelabelConfigured/messages/tenantWhitelabelConfigured'
+
+  consumeTenantWhitelabelConfigured:
+    action: receive
+    channel:
+      $ref: '#/channels/tenantWhitelabelConfigured'
+    description: |
+      Consumers: Per-surface theme rebuilders, Cloud DNS / GCLB cert
+      manager, Observability (asset uri auditing).
+    messages:
+      - $ref: '#/channels/tenantWhitelabelConfigured/messages/tenantWhitelabelConfigured'
+
+components:
+  messages:
+    TenantWhitelabelConfigured:
+      name: TenantWhitelabelConfigured
+      title: Tenant White-Label Configured
+      summary: A tenant has updated white-label / franchise branding
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/tenancy/tenant.proto#/chora.tenancy.v1.TenantWhitelabelConfigured'

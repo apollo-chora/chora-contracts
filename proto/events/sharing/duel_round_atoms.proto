@@ -1,0 +1,92 @@
+// =============================================================================
+// Chora Content Sharing: duel round atoms on the bus
+// =============================================================================
+//
+// ADR-254 D1/D4 (R1): a duel's atoms are smithed by the duel_atom_smith agent
+// through the kennel, never by an HTTP call from chora-sharing
+// (DUEL_ATOM_SMITH_GKE_ENDPOINT is deleted). When two learners match, sharing
+// persists the duel as `preparing`, publishes this request in the same
+// transaction, pushes `preparing` on the duel WebSocket, and on the result
+// applies the picks (StartBattle) and pushes `ready`.
+//
+// Wire (ADR-254 D4): JSON on the bus, schema-less; envelope in attributes and
+// field 1; envelope.idempotency_key = round_id (one request per duel start
+// today: round_id = the duel's first-round id).
+//
+//   Request : chora.sharing.duel_round_atoms.requested.v1
+//   Result  : chora.sharing.duel_round_atoms.completed.v1
+//             (sharing pulls chora-sharing.duel-round-atoms-completed)
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.sharing.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/sharing/v1;sharingv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// A candidate atom from the tenant's pool the smith may pick from.
+message DuelAtomCandidate {
+  string atom_id = 1;
+  string revision_id = 2;
+  string title = 3;
+  repeated string tags = 4;
+}
+
+// Topic: chora.sharing.duel_round_atoms.requested.v1
+message DuelRoundAtomsRequested {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // The request key (UUIDv7); the first round of the duel.
+  string round_id = 2;
+  string duel_id = 3;
+
+  // The duel's topic / shared tags the smith targets.
+  string topic = 4;
+
+  // How many atoms the duel needs (the duel's round count).
+  int32 count = 5;
+
+  // The two duellists (GCIDs) and the candidate pool + proficiency context
+  // the smith selects from (as sharing composes it today).
+  repeated string duellist_gcids = 6;
+  repeated DuelAtomCandidate candidates = 7;
+  string context_json = 8;
+
+  google.protobuf.Timestamp requested_at = 9;
+}
+
+// One atom picked or generated for a round. Mirrors sharing's duel.AtomPick.
+message DuelRoundAtom {
+  // Pool atom id (empty when generated).
+  string atom_id = 1;
+  string revision_id = 2;
+  // The question shown in the round.
+  string question = 3;
+  repeated string options = 4;
+  // The correct option (label text, not an index: UI letter != option id).
+  string answer = 5;
+  // "pool" | "generated".
+  string source = 6;
+}
+
+// Topic: chora.sharing.duel_round_atoms.completed.v1
+message DuelRoundAtomsCompleted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string round_id = 2;
+  string duel_id = 3;
+
+  // "OK" | "FAILED" | "REJECTED".
+  string status = 4;
+  string error_code = 5;
+  string workflow_id = 6;
+  string generated_by_model_id = 7;
+
+  // Ordered atoms, one per round (len == request.count on OK).
+  repeated DuelRoundAtom atoms = 8;
+
+  google.protobuf.Timestamp completed_at = 9;
+}

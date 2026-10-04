@@ -1,0 +1,178 @@
+// =============================================================================
+// Chora Model Broker — Gateway Service (gRPC)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 2 D6
+//   + .claude/skills/model-broker-3-services/SKILL.md
+//   + memory project_chora_data_plane.md
+//
+// One of THREE Model Broker services (Router + Gateway + Classifier).
+// LOCKED Tier 2 D6: NEVER fold these three into a single binary (god-object reject).
+//
+// Gateway responsibility: actual model invocation execution. Caller passes the
+// chosen_model_id from the Router (Gateway never picks fallbacks itself —
+// fallback chain comes from RouteResponse). Gateway dispatches via the
+// adapter pattern (Vertex AI / self-hosted Gemma / future provider) and
+// performs:
+//   - two-tier cache lookup (exact match + per-tenant semantic via pgvector)
+//   - retry / fallback per Router-issued chain
+//   - atomic TokenUsageLedger write per call (in chora_observability)
+//   - OTLP span emission with OpenInference attributes (gen_ai.system,
+//     llm.model_name, llm.token_count.{prompt,completion,total}, ...)
+//   - per-tenant LoRA adapter loading when ModelDecision.adapter_uri set
+//     (cross-tenant adapter loading FORBIDDEN — Tier 5 D19)
+//
+// Two RPC shapes:
+//   - Invoke: synchronous unary (full completion in one response)
+//   - InvokeStreaming: server-stream of chunks for token-streaming UX
+//
+// Cloud Run scale-to-zero in chora-489812 team-platform. mTLS via Cloud
+// Service Mesh; SPIFFE identity in mesh; W3C trace context in gRPC metadata.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.services.model_broker_gateway.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/model_broker_gateway/v1;model_broker_gatewayv1";
+
+import "google/protobuf/timestamp.proto";
+
+// -----------------------------------------------------------------------------
+// Service
+// -----------------------------------------------------------------------------
+
+service ModelBrokerGateway {
+  // Synchronous unary invocation. Returns the full completion in one response.
+  // Idempotency: caller MUST set invocation_id (UUIDv7); Gateway dedups on it.
+  rpc Invoke(InvokeRequest) returns (InvokeResponse);
+
+  // Server-streaming invocation for token-streaming UX. Emits InvokeChunk
+  // messages incrementally; the FINAL chunk has is_final=true and carries
+  // the full InvokeResponse for ledger write + caller bookkeeping.
+  rpc InvokeStreaming(InvokeRequest) returns (stream InvokeChunk);
+}
+
+// -----------------------------------------------------------------------------
+// Shared enums
+// -----------------------------------------------------------------------------
+
+// Mirrors GuardrailTier in model_broker_router.proto. Duplicated locally to
+// avoid cross-service proto imports (Gateway accepts the list verbatim from
+// the Router's RouteResponse).
+enum GuardrailTier {
+  GUARDRAIL_TIER_UNSPECIFIED = 0;
+  GUARDRAIL_TIER_REGEX = 1;
+  GUARDRAIL_TIER_DLP = 2;
+  GUARDRAIL_TIER_MODEL_ARMOR = 3;
+  GUARDRAIL_TIER_OUTPUT_VALIDATOR = 4;
+}
+
+// Why the model stopped generating. Set in InvokeResponse.finish_reason.
+enum FinishReason {
+  FINISH_REASON_UNSPECIFIED = 0;
+  FINISH_REASON_COMPLETE = 1;          // model emitted EOS naturally
+  FINISH_REASON_MAX_TOKENS = 2;        // hit max_tokens ceiling
+  FINISH_REASON_GUARDRAIL_BLOCK = 3;   // guardrail intervened (input or output)
+  FINISH_REASON_ERROR = 4;             // transport / provider / adapter error
+}
+
+// -----------------------------------------------------------------------------
+// Prompt message (chat-format compatible)
+// -----------------------------------------------------------------------------
+
+message PromptMessage {
+  // Chat role: typically "system", "user", "assistant", "tool".
+  string role = 1;
+
+  // Message content (string form; multimodal extensions are out-of-scope v1).
+  string content = 2;
+}
+
+// -----------------------------------------------------------------------------
+// Invoke RPC
+// -----------------------------------------------------------------------------
+
+message InvokeRequest {
+  // UUIDv7. Idempotency key for this invocation. Gateway dedups on it across
+  // retries (atomic via TokenUsageLedger insert ON CONFLICT DO NOTHING).
+  string invocation_id = 1;
+
+  // Tenant scope. Required (multi-tenant isolation; semantic cache scoped here).
+  string tenant_id = 2;
+
+  // Calling agent identity (AGID).
+  string agid = 3;
+
+  // Canonical model identifier from RouteResponse.chosen_model_id.
+  // Gateway routes to the matching adapter (Vertex AI / Gemma self-hosted / ...).
+  string model_id = 4;
+
+  // Chat-format prompt messages. At least one message required.
+  repeated PromptMessage prompt_messages = 5;
+
+  // Provider-neutral parameters (temperature, top_p, top_k, ...). String
+  // values keep the contract provider-agnostic; adapters parse + validate.
+  map<string, string> parameters = 6;
+
+  // Guardrail tiers the Gateway MUST enforce for this invocation.
+  // Forwarded verbatim from RouteResponse.guardrail_tier_list.
+  repeated GuardrailTier guardrail_tier_list = 7;
+
+  // Optional: per-tenant LoRA adapter URI. When set, Gateway loads the
+  // adapter for THIS request only. Cross-tenant adapter loading FORBIDDEN.
+  string adapter_uri = 8;
+}
+
+message InvokeResponse {
+  // Echo of InvokeRequest.invocation_id.
+  string invocation_id = 1;
+
+  // Generated text (concatenation of streamed chunks for streaming variant).
+  string response_content = 2;
+
+  // Token accounting (provider-reported; Gateway writes to TokenUsageLedger).
+  int32 tokens_in = 3;
+  int32 tokens_out = 4;
+
+  // Cost in USD micros (1e-6) — Gateway computes from per-model price config.
+  int64 cost_micros = 5;
+
+  // End-to-end latency observed by the Gateway (provider call + retry).
+  int32 latency_ms = 6;
+
+  // Why the model stopped.
+  FinishReason finish_reason = 7;
+
+  // Provider-reported finish detail (e.g., "stop_sequence", "tool_call",
+  // "safety"). Useful for debugging guardrail vs natural-stop.
+  string finish_detail = 8;
+
+  // Set when finish_reason = GUARDRAIL_BLOCK — which guardrail tier blocked.
+  GuardrailTier blocking_tier = 9;
+
+  // Completion timestamp (Gateway clock).
+  google.protobuf.Timestamp completed_at = 10;
+}
+
+// -----------------------------------------------------------------------------
+// InvokeStreaming RPC
+// -----------------------------------------------------------------------------
+
+message InvokeChunk {
+  // Echo of InvokeRequest.invocation_id.
+  string invocation_id = 1;
+
+  // Monotonically increasing chunk index starting at 0.
+  int32 chunk_index = 2;
+
+  // Delta token text in this chunk (concatenate to assemble full output).
+  string delta_content = 3;
+
+  // True only on the final chunk. When true, final_response is set.
+  bool is_final = 4;
+
+  // Set ONLY on the final chunk (is_final=true). Carries totals + finish_reason
+  // + cost so callers receive ledger-grade accounting at stream end.
+  InvokeResponse final_response = 5;
+}

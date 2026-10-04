@@ -1,0 +1,62 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Payments — TenantAddonPurchasePaymentFailed
+  version: 1.0.0
+  description: |
+    chora-payments observed Stripe `payment_intent.payment_failed` for a
+    H+ Marketplace tenant-add-on subscription. chora-tenancy does NOT
+    activate the entitlement for this purchase; chora-notifications
+    surfaces a failure email to the tenant admin.
+
+    - Domain: Payments (`chora_payments` DB)
+    - Topic: `chora.payments.tenant_addon_purchase.payment_failed.v1`
+    - Source proto: `proto/events/payments/tenant_addon_purchase.proto`
+       message `chora.payments.v1.TenantAddonPurchasePaymentFailed`
+    - Aggregate: TenantAddonPurchase (CHO-1736 H+ Marketplace Subscribe)
+    - Per ADR-164 (chora-payments service + 13th DB).
+    - IMDA: envelope.chora_imda_dimension = "accountability"
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  tenantAddonPurchasePaymentFailed:
+    address: chora.payments.tenant_addon_purchase.payment_failed.v1
+    messages:
+      tenantAddonPurchasePaymentFailed:
+        $ref: '#/components/messages/TenantAddonPurchasePaymentFailed'
+
+operations:
+  publishTenantAddonPurchasePaymentFailed:
+    action: send
+    channel:
+      $ref: '#/channels/tenantAddonPurchasePaymentFailed'
+    messages:
+      - $ref: '#/channels/tenantAddonPurchasePaymentFailed/messages/tenantAddonPurchasePaymentFailed'
+
+  consumeTenantAddonPurchasePaymentFailed:
+    action: receive
+    channel:
+      $ref: '#/channels/tenantAddonPurchasePaymentFailed'
+    messages:
+      - $ref: '#/channels/tenantAddonPurchasePaymentFailed/messages/tenantAddonPurchasePaymentFailed'
+
+components:
+  messages:
+    TenantAddonPurchasePaymentFailed:
+      name: TenantAddonPurchasePaymentFailed
+      title: Stripe payment failed for a H+ Marketplace tenant-add-on subscription (CHO-1736)
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/payments/tenant_addon_purchase.proto#/chora.payments.v1.TenantAddonPurchasePaymentFailed'

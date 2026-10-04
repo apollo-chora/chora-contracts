@@ -1,0 +1,65 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Closure — CryptoShredComplete
+  version: 1.0.0
+  description: |
+    Cloud KMS DEK destruction complete — user data permanently unrecoverable.
+    Marks COLD_ARCHIVED -> CRYPTO_SHREDDED transition.
+
+    HIGHLY audited — feeds IMDA D1 Accountability evidence chain (per
+    ADR-141). Envelope MUST carry chora_imda_dimension = "accountability".
+
+    - Domain: AI Kernel — Closure Orchestrator (`chora_ai_kernel` DB)
+    - Topic: `chora.closure.crypto_shred_complete.v1`
+    - Source proto: `proto/events/closure/saga.proto`
+       message `chora.closure.v1.ClosureCryptoShredComplete`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  closureCryptoShredComplete:
+    address: chora.closure.crypto_shred_complete.v1
+    messages:
+      closureCryptoShredComplete:
+        $ref: '#/components/messages/ClosureCryptoShredComplete'
+
+operations:
+  publishClosureCryptoShredComplete:
+    action: send
+    channel:
+      $ref: '#/channels/closureCryptoShredComplete'
+    messages:
+      - $ref: '#/channels/closureCryptoShredComplete/messages/closureCryptoShredComplete'
+
+  consumeClosureCryptoShredComplete:
+    action: receive
+    channel:
+      $ref: '#/channels/closureCryptoShredComplete'
+    description: |
+      Consumers:
+        - chora-governance (compliance audit log — IMDA D1 evidence)
+        - chora-observability (O+ closure-pipeline terminal dashboard)
+        - chora-identity (terminal saga state mirror)
+    messages:
+      - $ref: '#/channels/closureCryptoShredComplete/messages/closureCryptoShredComplete'
+
+components:
+  messages:
+    ClosureCryptoShredComplete:
+      name: ClosureCryptoShredComplete
+      title: Cloud KMS DEK destroyed; user data unrecoverable
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/closure/saga.proto#/chora.closure.v1.ClosureCryptoShredComplete'

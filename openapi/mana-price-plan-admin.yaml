@@ -1,0 +1,496 @@
+openapi: "3.2.0"
+info:
+  title: "Chora Mana Price-Plan Admin API"
+  version: "1.0.0"
+  description: |
+    Admin-only REST API for the configurable mana price-plan rules layer
+    (ADR-178 / CHO-1661). A tenant admin under H+ views the *effective*
+    price plan (override > plan default > catalogue fallback), sets/overrides
+    per-action mana prices, and (BACKLOG) per-LLM-tier prices.
+
+    Owning domain : Identity (`chora_identity` database) — the rules layer
+                    extends the existing `mana_action_pricing` catalogue
+                    (ADR-178 Decision §1).
+    Owning team   : Team 3 (Platform)
+    Surface       : H+ Hub+ (admin) + O+ Observability+ (auditor read-only,
+                    role-driven visibility per chora-design-system — NOT a
+                    toggle).
+
+    Precedence (ADR-178 §1.4):
+      resolve(action_code, tenant_id, tier) :=
+        COALESCE(
+          tenant_active_plan_rule(action_code, tier),    -- (1)  tenant override
+          tenant_active_plan_rule(action_code, NULL),    -- (1b) tenant override, tier-agnostic
+          platform_default_plan_rule(action_code, tier), -- (2)  plan default
+          platform_default_plan_rule(action_code, NULL), -- (2b) plan default, tier-agnostic
+          flat_catalogue(action_code)                    -- (3)  mana_action_pricing fallback
+        )
+
+    Mana action costs are NOT currency-denominated — mana is the internal
+    prepaid umbrella unit (ADR-178 Decision §4). Real-money pricing
+    (mana-pack / course / egg / subscription multi-currency price book) is a
+    separate concern and lives elsewhere; it is NOT in this contract.
+
+    AP-01: This contract exists BEFORE implementation. The H+ FE panel is
+    design-only (no chora-web change in this increment).
+
+    Source-of-truth:
+      docs/architecture/adrs/adr-178-configurable-mana-price-plan-rules-layer.md
+      docs/design/mana_price_plan_rules_layer.md §3
+  contact:
+    name: "Chora Platform Team (Team 3)"
+  license:
+    name: "Proprietary"
+
+servers:
+  - url: "https://api.chora.app"
+    description: "Production"
+  - url: "http://localhost:8080"
+    description: "Local development"
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: EffectivePlan
+    description: "The resolved effective price plan for the caller's tenant"
+  - name: ActionRegistry
+    description: "The action registry (mana_action_def) reference"
+  - name: TenantOverride
+    description: "Per-action tenant override management"
+  - name: Preview
+    description: "Dry-run price resolution without persisting"
+  - name: Health
+    description: "Health check"
+
+paths:
+  /api/v1/admin/mana/price-plan/effective:
+    get:
+      operationId: getEffectivePricePlan
+      summary: "Get the resolved effective price plan for the caller's tenant"
+      description: |
+        Returns one row per active action with the *resolved* mana price
+        (override > plan default > catalogue fallback), plus the action
+        semantics (`refundable`, `per_item`, `meter_home`), the
+        `price_source` (which precedence rung won), and the optional
+        resolved `tier`. Powers the H+ effective-plan table.
+      tags: [EffectivePlan]
+      responses:
+        "200":
+          description: "Effective price plan"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EffectivePlanResponse"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/mana/actions:
+    get:
+      operationId: listManaActions
+      summary: "List the action registry (mana_action_def)"
+      description: |
+        Returns the action registry — canonical action codes with their
+        category, `refundable`, `per_item`, `meter_home`, and `tier_aware`
+        flags. Reference for the override editor.
+      tags: [ActionRegistry]
+      responses:
+        "200":
+          description: "Action registry"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManaActionListResponse"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/mana/price-plan:
+    get:
+      operationId: getTenantPricePlan
+      summary: "Get the caller's tenant's own active plan (overridden rules only)"
+      description: |
+        Returns the tenant's own active plan + its status, listing ONLY the
+        rules the tenant has overridden. An empty rule list means the tenant
+        fully inherits the platform default plan.
+      tags: [TenantOverride]
+      responses:
+        "200":
+          description: "Tenant plan"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantPricePlanResponse"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/mana/price-plan/rules/{actionCode}:
+    parameters:
+      - $ref: "#/components/parameters/ActionCodePath"
+    put:
+      operationId: setManaPriceRule
+      summary: "Set/override one action's mana price for this tenant"
+      description: |
+        Creates/activates the tenant plan (if absent) and upserts the rule.
+        `tier` omitted ⇒ tier-agnostic override (today's path). `tier` set
+        ⇒ BACKLOG tier-specific override (only honoured when the action is
+        `tier_aware`).
+      tags: [TenantOverride]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetPriceRuleRequest"
+      responses:
+        "200":
+          description: "Rule upserted"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PriceRule"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      operationId: deleteManaPriceRule
+      summary: "Remove a tenant override (revert to platform default)"
+      description: |
+        Removes the tenant override for `actionCode`, reverting that action
+        to the platform default price.
+      tags: [TenantOverride]
+      parameters:
+        - name: tier
+          in: query
+          required: false
+          description: "BACKLOG — omit to remove the tier-agnostic override"
+          schema:
+            $ref: "#/components/schemas/Tier"
+      responses:
+        "204":
+          description: "Override removed"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/mana/price-plan/preview:
+    post:
+      operationId: previewManaPrice
+      summary: "Dry-run resolve a price WITHOUT persisting"
+      description: |
+        Resolves `{ action_code, tier?, item_count? }` against the effective
+        plan and returns `{ units, effective_total, refundable, per_item,
+        price_source }`. Lets an admin see the effect before saving. For a
+        `per_item` action, `effective_total = units × item_count`.
+      tags: [Preview]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PreviewRequest"
+      responses:
+        "200":
+          description: "Resolved preview"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PreviewResponse"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/mana/price-plan/health:
+    get:
+      operationId: manaPricePlanHealth
+      summary: "Health check"
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: "Healthy"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    example: "ok"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: "JWT issued by Identity Platform. Admin-only (H+); auditor (O+) gets read-only."
+
+  parameters:
+    ActionCodePath:
+      name: actionCode
+      in: path
+      required: true
+      description: "Canonical mana action code (e.g. question_authoring_ai_draft)"
+      schema:
+        type: string
+        maxLength: 64
+
+  responses:
+    NotFound:
+      description: "Unknown action_code or plan"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Forbidden:
+      description: "Caller is not an admin, or attempted a cross-tenant write"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Conflict:
+      description: "Stale plan version"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ValidationError:
+      description: "Validation failed (e.g. negative mana_cost)"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    InternalError:
+      description: "Internal server error"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    Tier:
+      type: string
+      nullable: true
+      enum: [low, high]
+      description: "BACKLOG LLM-tier axis (ADR-178 §5). null/omitted = tier-agnostic."
+
+    Category:
+      type: string
+      enum: [authoring, companion, consumption, grading, free]
+      description: "Action category (mana_action_def.category)."
+
+    MeterHome:
+      type: string
+      enum: [gateway, creation, consumption]
+      description: "Who is allowed to debit this action (ADR-178 §1.1, FU-4 lever)."
+
+    PriceSource:
+      type: string
+      enum: [tenant_override, plan_default, catalogue_fallback]
+      description: "Which precedence rung resolved the price (ADR-178 §1.4)."
+
+    ManaAction:
+      type: object
+      required: [action_code, display_name, category, refundable, per_item, meter_home, tier_aware]
+      properties:
+        action_code:
+          type: string
+          example: question_authoring_ai_draft
+        display_name:
+          type: string
+        category:
+          $ref: "#/components/schemas/Category"
+        refundable:
+          type: boolean
+          example: true
+        per_item:
+          type: boolean
+          example: false
+        meter_home:
+          $ref: "#/components/schemas/MeterHome"
+        tier_aware:
+          type: boolean
+          example: false
+
+    ManaActionListResponse:
+      type: object
+      required: [actions]
+      properties:
+        actions:
+          type: array
+          items:
+            $ref: "#/components/schemas/ManaAction"
+
+    EffectivePriceRow:
+      type: object
+      required: [action_code, units, refundable, per_item, meter_home, price_source]
+      properties:
+        action_code:
+          type: string
+          example: question_authoring_ai_draft
+        display_name:
+          type: string
+        category:
+          $ref: "#/components/schemas/Category"
+        units:
+          type: integer
+          format: int64
+          minimum: 0
+          example: 10
+        refundable:
+          type: boolean
+          example: true
+        per_item:
+          type: boolean
+          example: false
+        meter_home:
+          $ref: "#/components/schemas/MeterHome"
+        tier:
+          $ref: "#/components/schemas/Tier"
+        price_source:
+          $ref: "#/components/schemas/PriceSource"
+
+    EffectivePlanResponse:
+      type: object
+      required: [tenant_id, rows]
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        rows:
+          type: array
+          items:
+            $ref: "#/components/schemas/EffectivePriceRow"
+
+    PriceRule:
+      type: object
+      required: [action_code, mana_cost]
+      properties:
+        rule_id:
+          type: string
+          format: uuid
+        action_code:
+          type: string
+        tier:
+          $ref: "#/components/schemas/Tier"
+        mana_cost:
+          type: integer
+          format: int64
+          minimum: 0
+        note:
+          type: string
+
+    TenantPricePlanResponse:
+      type: object
+      required: [plan_code, scope, status, rules]
+      properties:
+        plan_id:
+          type: string
+          format: uuid
+        plan_code:
+          type: string
+          example: tenant-acme
+        scope:
+          type: string
+          enum: [platform, tenant]
+        status:
+          type: string
+          enum: [draft, active, archived]
+        rules:
+          type: array
+          description: "Only the actions this tenant has overridden. Empty = full inheritance."
+          items:
+            $ref: "#/components/schemas/PriceRule"
+
+    SetPriceRuleRequest:
+      type: object
+      required: [mana_cost]
+      properties:
+        mana_cost:
+          type: integer
+          format: int64
+          minimum: 0
+          example: 12
+        tier:
+          $ref: "#/components/schemas/Tier"
+        note:
+          type: string
+
+    PreviewRequest:
+      type: object
+      required: [action_code]
+      properties:
+        action_code:
+          type: string
+          example: question_authoring_batch_per_item
+        tier:
+          $ref: "#/components/schemas/Tier"
+        item_count:
+          type: integer
+          format: int64
+          minimum: 1
+          default: 1
+          description: "Multiplier for a per_item action (× N). Ignored when per_item=false."
+
+    PreviewResponse:
+      type: object
+      required: [units, effective_total, refundable, per_item, price_source]
+      properties:
+        units:
+          type: integer
+          format: int64
+          minimum: 0
+          description: "Resolved per-unit cost (BEFORE per-item multiply)."
+          example: 5
+        effective_total:
+          type: integer
+          format: int64
+          minimum: 0
+          description: "units × item_count for a per_item action; otherwise == units."
+          example: 35
+        refundable:
+          type: boolean
+        per_item:
+          type: boolean
+        tier:
+          $ref: "#/components/schemas/Tier"
+        price_source:
+          $ref: "#/components/schemas/PriceSource"
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            correlation_id:
+              type: string
+              format: uuid

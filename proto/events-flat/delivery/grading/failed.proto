@@ -1,0 +1,77 @@
+// =============================================================================
+// GENERATED — DO NOT EDIT.
+// Source : events/delivery/grading.proto message GradingFailed
+// Tool   : chora-contracts/internal/protoflatten
+// Why    : GCP Pub/Sub Schema Registry rejects (a) schemas with `import`
+//          statements and (b) schemas with more than one top-level message.
+//          This flat copy contains exactly ONE top-level message;
+//          EventEnvelope + Timestamp + transitive deps are nested inside.
+// Path C : see chora-contracts/CHANGELOG.md and m10-data-plane main.tf.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.delivery.v1;
+
+message GradingFailed {
+  // Inlined chora.common.v1.EventEnvelope (nested for self-contained schema).
+  message Envelope {
+    string event_id = 1;
+    string idempotency_key = 2;
+    string tenant_id = 3;
+    string gcid = 4;
+    Timestamp occurred_at = 5;
+    Timestamp published_at = 6;
+    string traceparent = 7;
+    string tracestate = 8;
+    string source_project = 9;
+    string source_service = 10;
+    int32 schema_version = 11;
+    string correlation_id = 12;
+    string causation_id = 13;
+    string chora_imda_dimension = 14;
+    string imda_lifecycle_stage = 15;
+  }
+
+  // Inlined google.protobuf.Timestamp (nested; wire-compatible).
+  message Timestamp {
+    int64 seconds = 1;
+    int32 nanos = 2;
+  }
+
+  // Inlined enum dep: GradingFailureCategory
+  enum GradingFailureCategory {
+    GRADING_FAILURE_CATEGORY_UNSPECIFIED = 0;
+    GRADING_FAILURE_CATEGORY_VERTEX_AI_5XX = 1;
+    GRADING_FAILURE_CATEGORY_MODEL_ARMOR_BLOCKED = 2;
+    GRADING_FAILURE_CATEGORY_TIMEOUT = 3;
+    GRADING_FAILURE_CATEGORY_QUOTA_EXCEEDED = 4;
+    GRADING_FAILURE_CATEGORY_INSUFFICIENT_TENANT_MANA = 5;
+    GRADING_FAILURE_CATEGORY_INTERNAL_ERROR = 6;
+  }
+
+  // Inlined enum dep: GradingJobStatus
+  enum GradingJobStatus {
+    GRADING_JOB_STATUS_UNSPECIFIED = 0;
+    GRADING_JOB_STATUS_REQUESTED = 1;
+    GRADING_JOB_STATUS_RUNNING = 2;
+    GRADING_JOB_STATUS_MCQ_DETERMINISTIC_DONE = 3;
+    GRADING_JOB_STATUS_OE_BATCH_PENDING = 4;
+    GRADING_JOB_STATUS_OE_BATCH_COMPLETE = 5;
+    GRADING_JOB_STATUS_SCORED = 6;
+    GRADING_JOB_STATUS_FINALIZED = 7;
+    GRADING_JOB_STATUS_FAILED = 8;
+  }
+
+  Envelope envelope = 1;
+  string grading_job_id = 2;
+  string submission_id = 3;
+  string assessment_id = 4;
+  string learner_gcid = 5;
+  GradingFailureCategory failure_category = 6;
+  string failure_message = 7;
+  GradingJobStatus status = 8;
+  int32 attempt_count = 9;
+  string oe_batch_id = 10;
+  Timestamp failed_at = 11;
+}

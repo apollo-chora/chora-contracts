@@ -1,0 +1,62 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Tenancy — TenantSuspended
+  version: 1.0.0
+  description: |
+    Published on platform-initiated suspension (non-payment, policy
+    violation, security event). Tenant is read-only; learners receive
+    a suspension notice.
+
+    - Domain: Tenancy + Billing (`chora_tenancy` DB)
+    - Topic: `chora.tenancy.tenant.suspended.v1`
+    - Source proto: `proto/events/tenancy/tenant.proto`
+       message `chora.tenancy.v1.TenantSuspended`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  tenantSuspended:
+    address: chora.tenancy.tenant.suspended.v1
+    messages:
+      tenantSuspended:
+        $ref: '#/components/messages/TenantSuspended'
+
+operations:
+  publishTenantSuspended:
+    action: send
+    channel:
+      $ref: '#/channels/tenantSuspended'
+    messages:
+      - $ref: '#/channels/tenantSuspended/messages/tenantSuspended'
+
+  consumeTenantSuspended:
+    action: receive
+    channel:
+      $ref: '#/channels/tenantSuspended'
+    description: |
+      Consumers: ALL surfaces (read-only mode), Notifications
+      (suspension notice), Identity (block new logins).
+    messages:
+      - $ref: '#/channels/tenantSuspended/messages/tenantSuspended'
+
+components:
+  messages:
+    TenantSuspended:
+      name: TenantSuspended
+      title: Tenant Suspended
+      summary: A Tenant has been platform-suspended (reversible)
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/tenancy/tenant.proto#/chora.tenancy.v1.TenantSuspended'

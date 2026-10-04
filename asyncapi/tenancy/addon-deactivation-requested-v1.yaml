@@ -1,0 +1,67 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Tenancy — AddonDeactivationRequested
+  version: 1.0.0
+  description: |
+    Published when a tenant admin requests deactivation. May fire
+    immediately before AddonDeactivated (immediate path) OR ahead of
+    a future effective_at (deferred path — e.g., end of billing
+    cycle). Powers STITCH-H-ADD-2 audit trail and downstream
+    notification + billing-schedule consumers.
+
+    - Domain: Tenancy + Billing (`chora_tenancy` DB)
+    - Topic: `chora.tenancy.addon.deactivation_requested.v1`
+    - Source proto: `proto/events/tenancy/addon.proto`
+       message `chora.tenancy.v1.AddonDeactivationRequested`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  addonDeactivationRequested:
+    address: chora.tenancy.addon.deactivation_requested.v1
+    messages:
+      addonDeactivationRequested:
+        $ref: '#/components/messages/AddonDeactivationRequested'
+
+operations:
+  publishAddonDeactivationRequested:
+    action: send
+    channel:
+      $ref: '#/channels/addonDeactivationRequested'
+    messages:
+      - $ref: '#/channels/addonDeactivationRequested/messages/addonDeactivationRequested'
+
+  consumeAddonDeactivationRequested:
+    action: receive
+    channel:
+      $ref: '#/channels/addonDeactivationRequested'
+    description: |
+      Consumers: Notifications (admin email confirmation with
+      effective_at), Billing (schedule refund / proration on the
+      Stripe schedule), Observability (capture deactivation reason
+      audit dimension for the H+ analytics dashboard), AI Kernel
+      (pre-warn LoRA adapter retirement when applicable).
+    messages:
+      - $ref: '#/channels/addonDeactivationRequested/messages/addonDeactivationRequested'
+
+components:
+  messages:
+    AddonDeactivationRequested:
+      name: AddonDeactivationRequested
+      title: Add-On Deactivation Requested
+      summary: A tenant admin has requested an add-on deactivation
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/tenancy/addon.proto#/chora.tenancy.v1.AddonDeactivationRequested'

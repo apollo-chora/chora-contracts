@@ -1,0 +1,677 @@
+// =============================================================================
+// Chora Model Gateway — Service Contract (gRPC)
+// =============================================================================
+//
+// Source-of-truth:
+//   - docs/architecture/adrs/adr-163-model-gateway-gke-asia-southeast1.md
+//     (PROPOSED 2026-05-24 — load-bearing decision document)
+//   - docs/architecture/adrs/adr-146-model-broker-full-retirement.md
+//     (amended by ADR-163 — supersedes the 3-service Model Broker shape)
+//   - docs/architecture/adrs/adr-152-chora-guardrail-superseded-by-cloud-model-armor.md
+//     (Cloud Model Armor SDK direct-call pattern composed inside the gateway)
+//   - docs/m15/continuous-llm-refinement-plan-2026-05-22.md (amended 2026-05-24)
+//   - .claude/skills/cloud-model-armor-guardrails/SKILL.md
+//   - .claude/skills/ai-cost-tracking/SKILL.md
+//   - .claude/skills/gemma-lora-tenant/SKILL.md
+//   - .claude/skills/adk-tool-calling-loop/SKILL.md
+//
+// The Chora Model Gateway is the SINGLE chokepoint for every Chora LLM call
+// (managed Gemini + self-hosted Gemma + BYOA external models). It composes
+// inside the request path:
+//
+//   caller (ADK Go agent / LangGraph Python orchestrator / BFF aggregator)
+//     |  gRPC Invoke
+//     v
+//   ┌────────────────────────────────────────────────┐
+//   │  chora-model-gateway (asia-southeast1, GKE)    │
+//   │   1. resolve agent + crew routing policy       │
+//   │   2. check per-tenant LLM budget (RLS)         │
+//   │   3. Cloud Model Armor PRE  (input sanitise)   │
+//   │   4. vendor dispatch (Gemini / Gemma / BYOA)   │
+//   │   5. Cloud Model Armor POST (output sanitise)  │
+//   │   6. atomic ledger write + outbox emit on      │
+//   │      chora.observability.token_usage.recorded  │
+//   │      .v1 (canonical topic — never coin a new   │
+//   │      ai_kernel.model_invoked.v1)               │
+//   └────────────────────────────────────────────────┘
+//
+// Per ADR-163 the gateway is hosted on GKE Autopilot chora-prod-cluster in
+// asia-southeast1 to collapse the cross-region tax that the BFF was paying
+// during M14 (BFF asia-southeast1 -> Vertex AI Agent Engine us-central1
+// -> Vertex AI us-central1). The gateway sits in-region with the BFF;
+// agents in us-central1 Agent Engine accept ~150-250 ms one-way RTT during
+// the ADR-148 us-central1 carve-out, then the cost vanishes when Vertex AI
+// Agent Engine GAs in asia-southeast1.
+//
+// PORT + APP-PROTOCOL: this service listens on canonical gRPC port :9090
+// named "grpc" with appProtocol: grpc per ADR-140 + the Wave-1.5 mass
+// remediation (docs/m13/grpc-mass-remediation-2026-05-16.md).
+//
+// STREAMING: v1 ships unary Invoke ONLY. Server-streaming InvokeStreaming
+// is deferred to Phase 6 of the M15 plan; the proto leaves room for it
+// without breaking back-compat (add a new RPC + InvokeChunk message).
+//
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.services.model_gateway.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/model_gateway/v1;model_gatewayv1";
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+// -----------------------------------------------------------------------------
+// Service
+// -----------------------------------------------------------------------------
+
+service ModelGatewayService {
+  // Synchronous unary invocation. The gateway composes the full chain
+  // (budget gate -> ModelArmor PRE -> vendor dispatch -> ModelArmor POST
+  // -> outbox emit) and returns the completion in one response.
+  //
+  // Idempotency: callers SHOULD set InvokeRequest.invocation_id (UUIDv7);
+  // the gateway dedups on it via the atomic ledger insert. Repeated calls
+  // with the same invocation_id collapse to a single ledger entry +
+  // a single token-usage event.
+  //
+  // Errors:
+  //   - INVALID_ARGUMENT  : missing tenant_id / gcid / agent_id / prompt
+  //   - FAILED_PRECONDITION : budget exceeded (see error_details.reason)
+  //   - PERMISSION_DENIED : Cloud Model Armor PRE blocked the prompt
+  //   - RESOURCE_EXHAUSTED : Cloud Model Armor POST blocked the response
+  //                         (gateway still emits a partial-cost ledger row
+  //                         covering input + sanitised-but-rejected output)
+  //   - UNAVAILABLE       : vendor unreachable AFTER full fallback_chain
+  //                         exhausted; caller MAY retry the whole call
+  //   - INTERNAL          : adapter bug; check OTLP span for stack
+  rpc Invoke(InvokeRequest) returns (InvokeResponse);
+
+  // GroundedSearch — the platform's SINGLE controlled web-egress call
+  // (ADR-231, operationalising ADR-220 "Far Sight"). Given a screened
+  // learner directive, the gateway runs Vertex AI "Grounding with Google
+  // Search" (the google_search built-in tool on :generateContent) and
+  // returns a grounded, CITED completion. It reuses the full Invoke
+  // orchestration internally — the SAME governed chain, one extra gate:
+  //
+  //   external_egress gate (NEW, fail-closed, per-tenant)  [ADR-231 D6]
+  //     -> budget gate (RLS)
+  //     -> Cloud Model Armor PRE (on the directive — pre-egress screen)
+  //     -> Vertex google_search grounded dispatch
+  //     -> Cloud Model Armor POST (on the web-sourced answer —
+  //        prompt-injection-via-webpage defence)
+  //     -> mana debit (high-price external_egress action_code; sole meter)
+  //     -> token-usage outbox (chora.observability.token_usage.recorded.v1)
+  //
+  // WHY a dedicated RPC rather than fields on Invoke (ADR-231 D2): egress is
+  // a distinct governed capability — the Istio AuthorizationPolicy allow-lists
+  // WHICH callers may reach GroundedSearch SEPARATELY from Invoke (only the
+  // consumption Seeker path may trigger web egress; qgen / companion-chat /
+  // moderation must NOT reach the web via a stray Invoke field). Every call
+  // is a priced egress and a single O+ kill-switch target — no "was grounding
+  // on this Invoke?" branching in the ledger or the toggle.
+  //
+  // CITATION MANDATE (ADR-220 D3 / IMDA D2): EMPTY citations ⇒ the caller MUST
+  // hedge (never present web content as companion knowledge). A citation counts
+  // only when BOTH uri and title are non-empty (mirrors consumer grounded.Hit).
+  //
+  // Idempotency: callers SHOULD set GroundedSearchRequest.invocation_id
+  // (UUIDv7); the gateway dedups on it — a retried Seeker turn collapses to
+  // one ledger row + one mana debit.
+  //
+  // Errors:
+  //   - INVALID_ARGUMENT   : missing tenant_id / gcid / agent_id / directive
+  //   - FAILED_PRECONDITION : external_egress disabled for the tenant
+  //                          (error_details.reason == "external_egress_disabled")
+  //                          OR per-tenant LLM budget exhausted
+  //   - PERMISSION_DENIED  : Cloud Model Armor PRE blocked the directive
+  //                          (no web call fires)
+  //   - RESOURCE_EXHAUSTED : Cloud Model Armor POST blocked the grounded
+  //                          answer, OR per-user mana exhausted (finish_detail
+  //                          carries the upsell); a partial-cost ledger row is
+  //                          still emitted
+  //   - UNAVAILABLE        : vendor unreachable AFTER fallback_chain exhausted
+  //   - INTERNAL           : adapter bug; check the OTLP egress span
+  rpc GroundedSearch(GroundedSearchRequest) returns (GroundedSearchResponse);
+
+  // Embed: dense text embeddings THROUGH the chokepoint (requirement G1'-1,
+  // owner-ruled 2026-08-07; supersedes the ADR-173 carve-out that sanctioned
+  // direct Vertex `:predict` calls from chora-consumption and chora-creation
+  // because this proto had no embeddings RPC).
+  //
+  // Posture, per the 2026-08-07 closing rule ("close them all now, and never
+  // tighten"): the embedding path ENTERS AT PERMISSIVE. No Model Armor leg
+  // runs (embeddings are text-to-vector with no generation surface; the
+  // response cannot carry instructions), the response records the verdicts
+  // as MODEL_ARMOR_VERDICT_BYPASSED, the same marker the permissive tier
+  // uses on Invoke. No price is attached (cost_micros 0) because a priced
+  // embedding would be user-visible; every call still produces a ledger row
+  // + token-usage event for attribution, which is the point of the re-route.
+  //
+  // Errors:
+  //   - INVALID_ARGUMENT : missing tenant_id / gcid / agent_id / text
+  //   - UNAVAILABLE      : embedding vendor unreachable
+  //   - INTERNAL         : ledger/outbox failure (the call is not silently
+  //                        un-ledgered; fail loud per the chokepoint rules)
+  rpc Embed(EmbedRequest) returns (EmbedResponse);
+}
+
+// -----------------------------------------------------------------------------
+// Shared enums
+// -----------------------------------------------------------------------------
+
+// Cloud Model Armor verdict, captured pre- and post-LLM, for ledger +
+// outbox emission + OTLP span attribution. Maps to the Cloud Model Armor
+// SDK SanitizeUserPrompt / SanitizeModelResponse return enum.
+//
+// Per ADR-152 the chora-guardrail Go service is DECOMMISSIONED; the
+// gateway calls Cloud Model Armor SDK directly. The MODEL_ARMOR_VERDICT_*
+// values mirror the SDK enum 1:1 so we can pass through without lossy
+// remapping.
+enum ModelArmorVerdict {
+  MODEL_ARMOR_VERDICT_UNSPECIFIED = 0;
+  MODEL_ARMOR_VERDICT_ALLOW = 1;        // template policy allowed the content
+  MODEL_ARMOR_VERDICT_BLOCK = 2;        // template policy blocked (terminal)
+  MODEL_ARMOR_VERDICT_SANITISE = 3;     // template policy redacted but allowed
+  MODEL_ARMOR_VERDICT_ERROR = 4;        // SDK error; treat as block by default
+  MODEL_ARMOR_VERDICT_BYPASSED = 5;     // tier intentionally skipped (e.g.
+                                        // synthetic eval traffic with
+                                        // explicit opt-out — only allowed
+                                        // for the Governance role)
+}
+
+// Why the model stopped generating. Surfaced on InvokeResponse for caller
+// bookkeeping + ledger correlation.
+enum FinishReason {
+  FINISH_REASON_UNSPECIFIED = 0;
+  FINISH_REASON_COMPLETE = 1;           // model emitted EOS naturally
+  FINISH_REASON_MAX_TOKENS = 2;         // hit max_tokens ceiling
+  FINISH_REASON_MODEL_ARMOR_BLOCK = 3;  // Cloud Model Armor PRE or POST blocked
+  FINISH_REASON_BUDGET_BLOCK = 4;       // per-tenant LLM budget exhausted
+  FINISH_REASON_VENDOR_ERROR = 5;       // vendor returned 4xx/5xx; fallback exhausted
+  FINISH_REASON_MANA_BLOCK = 6;         // per-user mana exhausted (WS-1 umbrella metering, ADR-142 §4); finish_detail carries the upsell (insufficient_mana required=<n> available=<n> action=<code>)
+}
+
+// -----------------------------------------------------------------------------
+// Invoke RPC — request + response
+// -----------------------------------------------------------------------------
+
+// InvokeRequest is the gateway's wire input. Field numbers MUST be stable
+// across v1 (additive-only evolution per buf breaking config).
+message InvokeRequest {
+  // OPTIONAL — caller-supplied UUIDv7. If empty, the gateway generates one
+  // and echoes it in InvokeResponse.invocation_id. Idempotency key for
+  // ledger dedup + outbox.
+  string invocation_id = 1;
+
+  // REQUIRED — tenant scope. RLS-enforced inside the gateway against
+  // chora_observability.per_tenant_llm_budget + downstream Pub/Sub
+  // tenant attribution. UUIDv7.
+  string tenant_id = 2;
+
+  // REQUIRED — actor identity. Either learner GCID (Phyllis-style end-user
+  // call) or agent AGID (autonomous agent invocation). The envelope's
+  // gcid field on the outbox event carries the same value verbatim.
+  // UUIDv7.
+  string gcid = 3;
+
+  // REQUIRED — calling agent identifier. For ADK Go reasoning engines
+  // this is the engine's logical name (e.g., "qgen_question",
+  // "companion_chat"); for orchestrator graph nodes this is the
+  // crew + node (e.g., "ai_assist_crew.broker_call"). The gateway uses
+  // it as the lookup key into per-agent routing policy YAML.
+  // Cross-references the LIVE engines listed in
+  // chora-infra/agents-cli/registry.json.
+  string agent_id = 4;
+
+  // OPTIONAL — crew classification (e.g., "qgen", "companion",
+  // "content_moderation", "fog_orchestrator"). Used for cost-attribution
+  // dashboards and routing-policy fallback when agent_id has no explicit
+  // policy entry.
+  string crew_kind = 5;
+
+  // REQUIRED — logical model identifier the caller is asking for. The
+  // gateway resolves this through the per-agent routing policy:
+  //   - "gemini-2.5-pro" / "gemini-2.5-flash" / "gemini-2.5-flash-lite"
+  //     -> Vertex AI Gemini adapter
+  //   - "gemma-sg-academic" / "gemma-tenant-lora:<id>"
+  //     -> Vertex AI Endpoints Gemma adapter with per-tenant LoRA
+  //   - "openai/gpt-4o" / "anthropic/claude-opus-4-6" / ...
+  //     -> BYOA adapter (per-tenant secret resolution)
+  // The actual model the gateway dispatches to MAY differ from this when
+  // Vertex AI Model Optimizer picks a tier (Flash vs Pro); the resolved
+  // model is reported back in InvokeResponse.model_version.
+  string logical_model_id = 6;
+
+  // REQUIRED — user-facing prompt content. Cloud Model Armor PRE will
+  // sanitise / block this before the vendor dispatch.
+  string prompt = 7;
+
+  // OPTIONAL — system-instruction prompt. NOT screened by Cloud Model
+  // Armor PRE (it is platform-controlled, not user input). The gateway
+  // logs the system_prompt_hash to OTLP for tamper detection.
+  string system_prompt = 8;
+
+  // OPTIONAL — provider-neutral generation parameters (temperature,
+  // top_p, top_k, max_tokens, stop_sequences, response_mime_type, ...).
+  // The gateway's vendor adapters parse + validate per-vendor.
+  //
+  // Using google.protobuf.Struct rather than a tight map<string,string>
+  // because some vendors (Anthropic, OpenAI) expect nested objects (e.g.,
+  // "tools": [...], "tool_choice": {...}). Struct accommodates both flat
+  // numeric/string parameters AND nested objects without a custom oneof.
+  google.protobuf.Struct generation_config = 9;
+
+  // REQUIRED for distributed tracing. W3C traceparent header value the
+  // caller has propagated through gRPC metadata. The gateway also reads
+  // it from metadata but mirrors it here for typed-stub consumers that
+  // don't introspect metadata.
+  string traceparent = 10;
+
+  // OPTIONAL — W3C tracestate header value, propagated alongside
+  // traceparent through Pub/Sub event envelopes.
+  string tracestate = 11;
+
+  // OPTIONAL — agent-declared ordered fallback chain of logical model ids,
+  // tried in order if the primary logical_model_id dispatch fails (vendor
+  // 4xx/5xx or unavailability). Each id resolves against the SAME vendor the
+  // primary resolved to (e.g. gemini-* -> Vertex AI Gemini). This is the
+  // AGENT-DRIVEN tiering contract (CR qgen 2026-06-01): each agent owns a
+  // build-time YAML declaring tier/primary/fallback/prompt_version; the agent
+  // sends its primary as logical_model_id (6) + this declared chain, and the
+  // gateway HONOURS it rather than hardcoding a per-tier ladder. Empty =
+  // single-shot (no fallback). Additive field per buf-breaking config.
+  repeated string fallback_logical_model_ids = 12;
+
+  // OPTIONAL — output modality selector. "TEXT" (default/empty) or "IMAGE"
+  // — selects gemini responseModalities. When "IMAGE" the gateway routes to
+  // an image-capable gemini model and returns the generated image bytes on
+  // InvokeResponse.image_bytes / image_mime_type. Additive field per
+  // buf-breaking config.
+  string response_modality = 13;
+
+  // OPTIONAL — mana metering action_code (WS-1 umbrella metering, ADR-142 §4).
+  // Names the priced action in chora_identity.mana_action_pricing the gateway
+  // debits per-GCID after a successful LLM call (e.g. "companion_chat_turn_basic",
+  // "atom_authoring_assist", "knowledge_graph_traverse"). Empty = the gateway
+  // derives it from agent_id (4) / crew_kind (5) via a fallback map; an
+  // unmapped derivation is treated as un-metered + logged (fail-open audit).
+  // For tool-calling crews (ADR-177) per-turn metering: the caller sets
+  // action_code ONLY on the turn-initiating Invoke; tool-result continuations
+  // send it empty so one user turn = one debit. Additive field.
+  string action_code = 14;
+
+  // OPTIONAL — tool-calling conversation (ADR-177 full-umbrella tool-passthrough).
+  // JSON of the genai []*Content multi-turn history (roles user/model + parts:
+  // text / functionCall / functionResponse / inlineData). When non-empty the
+  // vendor adapter builds the model request from THIS and ignores `prompt` (7).
+  // Empty = legacy text-only path (qgen text, image-gen). Additive field.
+  string contents_json = 15;
+
+  // OPTIONAL — tool/function declarations (ADR-177). JSON of the genai []*Tool
+  // the model may call. The vendor adapter passes these as functionDeclarations
+  // + toolConfig. Empty = no tools (plain generation). Additive field.
+  string tools_json = 16;
+
+  // REQUIRED (ADR-254 D7 / ADR-252 Q1): the crew id of the invoking agent,
+  // the caller's honest declaration of what surface this call is:
+  //   companion_chat | companion_diagnosis | kg_exploration | qgen | oe_grading |
+  //   content_recommender | content_moderation | duel_atom_smith | profile_conjurer
+  // The gateway treats an ABSENT surface as a loud condition: FAILED_PRECONDITION
+  // with the status message leading with the token "surface_unstamped", before
+  // any debit. For the companion surfaces (companion_chat, companion_diagnosis)
+  // the gateway reads the ADR-252 containment tables uncached on every call and
+  // refuses a contained turn with FAILED_PRECONDITION "companion_suspended"
+  // (sibling of kill_switch_engaged), deny-before-debit; an unreadable
+  // containment store refuses with UNAVAILABLE "suspension_unreadable".
+  // Additive field per buf-breaking config.
+  string surface = 17;
+
+  // OPTIONAL (ADR-254 D7 / R22): the dispatch idempotency_key the agent
+  // forwards verbatim from its Pub/Sub dispatch request. When set, the gateway
+  // takes a keyed debit claim on (gcid, dispatch_idempotency_key, action_code)
+  // before the mana debit: a redelivered dispatch bills ONCE (the second claim
+  // debits nothing and the call proceeds, debit_deduped=true in the gateway's
+  // log and claim ledger). Empty on calls that are not dispatched turns.
+  // Additive field per buf-breaking config.
+  string dispatch_idempotency_key = 18;
+}
+
+// InvokeResponse is the gateway's wire output. The same response is
+// emitted on the outbox event (with the additive v1 fields per ADR-163).
+message InvokeResponse {
+  // Echo of InvokeRequest.invocation_id (gateway-generated if caller
+  // left it empty).
+  string invocation_id = 1;
+
+  // Generated text. Empty if FinishReason indicates block (caller MUST
+  // surface a user-facing message rather than an empty completion).
+  string completion = 2;
+
+  // Token + cost accounting. Mirrors the canonical TokenUsageRecorded
+  // payload fields for easy outbox copy.
+  TokenUsage usage = 3;
+
+  // Resolved vendor identifier — "vertex_ai_gemini", "vertex_ai_gemma",
+  // "openai_byoa", "anthropic_byoa", "gemma_cloud_run_gpu", ...
+  // Captured separately from model_version because the vendor is the
+  // adapter-layer dimension; model_version is the model-instance dimension.
+  string vendor = 4;
+
+  // Resolved model identifier (post-optimizer / post-LoRA-resolution).
+  // Example: caller asked "gemini-2.5-pro"; Vertex AI Model Optimizer
+  // routed to "gemini-2.5-flash-lite"; this field reports
+  // "gemini-2.5-flash-lite". Example with LoRA: caller asked
+  // "gemma-tenant-lora:01HABC..."; this reports
+  // "gemma-3-27b-it@01HABC...".
+  string model_version = 5;
+
+  // Cloud Model Armor PRE verdict — what the input sanitiser decided.
+  ModelArmorVerdict model_armor_verdict_pre = 6;
+
+  // Cloud Model Armor POST verdict — what the output sanitiser decided.
+  ModelArmorVerdict model_armor_verdict_post = 7;
+
+  // Adapter dispatch chain. Index 0 is the first vendor the gateway
+  // tried; subsequent entries indicate retries / fallbacks. Example:
+  // ["vertex_ai_gemini:gemini-2.5-pro", "vertex_ai_gemini:gemini-2.5-flash"]
+  // means the gateway retried with Flash after a Pro 503. Length 1 on
+  // happy-path.
+  repeated string fallback_chain = 8;
+
+  // End-to-end latency observed by the gateway (input sanitise + vendor
+  // call + output sanitise + ledger write). Excludes the caller<->gateway
+  // network leg; that's visible in the Cloud Trace span tree.
+  int32 latency_ms = 9;
+
+  // Why the model stopped. FINISH_REASON_COMPLETE on happy-path.
+  FinishReason finish_reason = 10;
+
+  // Optional human-readable detail string. Set on non-happy finish
+  // reasons (e.g., "stop_sequence", "safety", "budget_exhausted").
+  string finish_detail = 11;
+
+  // When the gateway emitted this response (post-outbox write).
+  google.protobuf.Timestamp completed_at = 12;
+
+  // Build identifier of the gateway service that handled this request,
+  // e.g., "chora-model-gateway:58b28eb". Mirrored to TokenUsageRecorded
+  // .gateway_version on the outbox event so consumers can attribute
+  // anomalies to a specific gateway build.
+  string gateway_version = 13;
+
+  // Generated image bytes — populated ONLY for image-modality responses
+  // (e.g. PNG bytes from gemini image models when InvokeRequest
+  // .response_modality == "IMAGE"). Empty for text responses. Additive
+  // field per buf-breaking config.
+  bytes image_bytes = 14;
+
+  // MIME type of image_bytes (e.g. "image/png") — populated ONLY for
+  // image-modality responses; empty for text. Additive field per
+  // buf-breaking config.
+  string image_mime_type = 15;
+
+  // OPTIONAL — model-emitted tool/function calls (ADR-177 tool-passthrough).
+  // JSON of the genai functionCall parts the model returned this turn. Non-empty
+  // ⇒ the agent must execute the named tools + send results back in the next
+  // Invoke's contents_json (the loop the AGENT owns; the gateway is single-turn).
+  // Empty ⇒ terminal text turn (`completion` holds the answer). Additive field.
+  string tool_calls_json = 16;
+}
+
+// -----------------------------------------------------------------------------
+// GroundedSearch RPC — request + response (ADR-231)
+// -----------------------------------------------------------------------------
+
+// GroundedSearchRequest is the gateway's wire input for the single controlled
+// web-egress call. Field numbers are stable across v1 (additive-only). The
+// gateway maps this 1:1 onto the consumer's GroundedSearchPort.SearchGround.
+message GroundedSearchRequest {
+  // OPTIONAL — caller-supplied UUIDv7. If empty the gateway generates one and
+  // echoes it in GroundedSearchResponse.invocation_id. Idempotency key: a
+  // retried Seeker turn with the same id collapses to one ledger row + one
+  // mana debit.
+  string invocation_id = 1;
+
+  // REQUIRED — tenant scope. RLS-enforced inside the gateway; drives the
+  // per-tenant external_egress entitlement gate (ADR-231 D6) + budget gate +
+  // Pub/Sub tenant attribution + metering. UUIDv7.
+  string tenant_id = 2;
+
+  // REQUIRED — learner GCID. The per-GCID mana debit (action_code) lands on
+  // this actor; the outbox event's gcid carries it verbatim. UUIDv7.
+  string gcid = 3;
+
+  // REQUIRED — calling skill identifier, e.g. "companion_seeker". The gateway
+  // uses it for routing-policy lookup + cost attribution. The mesh
+  // AuthorizationPolicy allow-lists which agent_id may reach this RPC
+  // (web egress is Seeker-only — ADR-231 D2).
+  string agent_id = 4;
+
+  // OPTIONAL — crew classification (e.g. "companion"). Cost-attribution +
+  // routing-policy fallback when agent_id has no explicit policy entry.
+  string crew_kind = 5;
+
+  // REQUIRED — the screened, learner-pointed directive (ADR-220 D2: a
+  // ConceptNode label or a ≤120-char free-text query). This is the adversarial
+  // surface — Cloud Model Armor PRE-INSPECTS it before any web egress fires.
+  string directive = 6;
+
+  // OPTIONAL — citation cap. Default 5; the gateway hard-caps at 10. Bounds the
+  // number of GroundedCitation returned + the answer synthesis breadth.
+  int32 max_results = 7;
+
+  // OPTIONAL — grounding-capable logical model id (default "gemini-2.5-flash").
+  // Resolved through the per-agent routing policy like InvokeRequest
+  // .logical_model_id; the resolved model is reported on
+  // GroundedSearchResponse.model_version.
+  string logical_model_id = 8;
+
+  // REQUIRED — mana metering action_code naming the HIGH-PRICE external_egress
+  // action in chora_identity.mana_action_pricing the gateway debits after a
+  // successful grounded call (ADR-177: the gateway is the SOLE meter). Grounded
+  // search is the priciest action in the catalogue (ADR-220). Unlike Invoke
+  // this is REQUIRED — an un-priced egress is not permitted.
+  string action_code = 9;
+
+  // REQUIRED — W3C traceparent, propagated through gRPC metadata + mirrored
+  // here for typed-stub consumers. Anchors the OTLP egress span (ADR-231 D6).
+  string traceparent = 10;
+
+  // OPTIONAL — W3C tracestate, propagated alongside traceparent through the
+  // Pub/Sub event envelope.
+  string tracestate = 11;
+}
+
+// GroundedSearchResponse is the gateway's wire output — citations-first, no
+// completion/image/tool-call polymorphism (that lives on Invoke). The grounded
+// answer is synthesised over the cited sources and screened by Armor POST.
+message GroundedSearchResponse {
+  // Echo of GroundedSearchRequest.invocation_id (gateway-generated if empty).
+  string invocation_id = 1;
+
+  // Structured citations (IMDA D2 citation mandate). EMPTY ⇒ the caller MUST
+  // hedge (ADR-220 D3 fail-loud) — never presented as companion knowledge. A
+  // citation counts toward the mandate only when BOTH uri and title are set.
+  repeated GroundedCitation citations = 2;
+
+  // The model's grounded answer synthesised over the cited sources. OPTIONAL
+  // for the caller: the Seeker family MAY use it directly, or (as fact_check
+  // does) run its own fenced verify turn over `citations`. Screened by the
+  // Cloud Model Armor POST pass (untrusted-web-page defence).
+  string grounded_answer = 3;
+
+  // Google-mandated Search-Suggestions chip (Vertex
+  // searchEntryPoint.renderedContent — compliant HTML/CSS). The Far Sight FE
+  // MUST render this when non-empty — a Grounding-with-Google-Search Service
+  // Terms display obligation, not cosmetic (ADR-231 D5).
+  string search_entry_point_html = 4;
+
+  // The web search queries the model issued (Vertex webSearchQueries). O+
+  // transparency + the OTLP egress span; never presented to the learner as
+  // knowledge.
+  repeated string web_search_queries = 5;
+
+  // Token + cost accounting for the grounded call. Grounded billing is
+  // per-prompt (Gemini 2.5) / per-search-query (Gemini 3) — the priciest in
+  // the catalogue (ADR-220). Shared shape with Invoke's TokenUsage.
+  TokenUsage usage = 6;
+
+  // Resolved vendor identifier — "vertex_ai_gemini" for the grounded path.
+  string vendor = 7;
+
+  // Resolved grounding-capable model (post-optimizer). Example: caller asked
+  // "gemini-2.5-flash"; this reports the model that actually grounded.
+  string model_version = 8;
+
+  // Cloud Model Armor PRE verdict — on the learner directive.
+  ModelArmorVerdict model_armor_verdict_pre = 9;
+
+  // Cloud Model Armor POST verdict — on the WEB-SOURCED grounded answer (the
+  // prompt-injection-via-webpage screen; ADR-231 D6).
+  ModelArmorVerdict model_armor_verdict_post = 10;
+
+  // Why the call finished. FINISH_REASON_COMPLETE on happy-path;
+  // FINISH_REASON_MANA_BLOCK when the learner is out of mana;
+  // FINISH_REASON_MODEL_ARMOR_BLOCK when PRE or POST blocked.
+  FinishReason finish_reason = 11;
+
+  // Optional human-readable detail. Set on non-happy finish (e.g.
+  // "external_egress_disabled", "insufficient_mana required=<n> available=<n>").
+  string finish_detail = 12;
+
+  // When the gateway emitted this response (post-outbox write).
+  google.protobuf.Timestamp completed_at = 13;
+
+  // Build identifier of the gateway that handled the call, e.g.
+  // "chora-model-gateway:58b28eb". Mirrored to the token-usage event so
+  // consumers can attribute egress anomalies to a specific build.
+  string gateway_version = 14;
+}
+
+// GroundedCitation — one renderable source (IMDA D2). uri+title are the
+// citation surface; the caller's mandate counts a hit only when BOTH are set
+// (mirrors consumer grounded.Hit).
+message GroundedCitation {
+  // Vertex grounding-api-redirect URL — EPHEMERAL (documented ~30-day expiry,
+  // ADR-231 D4). Use it to link through, but persist `domain`+`title` durably
+  // (a memory-note that stored only this uri would rot to dead links).
+  string uri = 1;
+
+  // Source page title.
+  string title = 2;
+
+  // Publisher domain (e.g. "nature.com") — render THIS; it is durable, unlike
+  // the redirect uri (ADR-231 D4).
+  string domain = 3;
+
+  // Grounded evidence segment (from Vertex groundingSupports mapped to this
+  // chunk). Best-effort — MAY be empty; the citation mandate never depends on
+  // snippet, only on uri+title.
+  string snippet = 4;
+
+  // groundingSupports confidence for this citation (0..1; 0 when absent).
+  float confidence = 5;
+}
+
+// -----------------------------------------------------------------------------
+// Embed RPC : request + response (G1'-1, 2026-08-07)
+// -----------------------------------------------------------------------------
+
+// EmbedRequest is the gateway's wire input for one text embedding. One text
+// per call, matching both existing call sites (consumption's per-Companion
+// memory embedder and creation's atom embedder both embed single texts).
+message EmbedRequest {
+  // OPTIONAL : caller-supplied UUIDv7; gateway-generated when empty and
+  // echoed back. Ledger idempotency key.
+  string invocation_id = 1;
+
+  // REQUIRED : tenant scope for ledger + budget attribution. UUIDv7.
+  string tenant_id = 2;
+
+  // REQUIRED : actor identity (learner GCID or agent AGID). UUIDv7.
+  string gcid = 3;
+
+  // REQUIRED : calling adapter identity, e.g. "consumption_memory_embedder"
+  // or "creation_atom_embedder". Ledger AgentRole attribution + the
+  // per-agent guardrail contract row (declared `permissive`).
+  string agent_id = 4;
+
+  // OPTIONAL : crew classification for cost dashboards.
+  string crew_kind = 5;
+
+  // OPTIONAL : logical embedding model id. Empty resolves to the gateway's
+  // default embedding model (text-embedding-004). Non-embedding model ids
+  // are refused (INVALID_ARGUMENT), never silently re-routed.
+  string logical_model_id = 6;
+
+  // REQUIRED : the text to embed.
+  string text = 7;
+
+  // OPTIONAL : Vertex embedding task type ("RETRIEVAL_DOCUMENT",
+  // "RETRIEVAL_QUERY", ...). Empty defaults vendor-side to
+  // RETRIEVAL_DOCUMENT, matching the existing call sites.
+  string task_type = 8;
+
+  // OPTIONAL : requested dimensionality. 0 defaults to 768, matching every
+  // pgvector(768) column both call sites write.
+  int32 output_dimensions = 9;
+
+  // REQUIRED : W3C traceparent for the OTLP span + event envelope.
+  string traceparent = 10;
+
+  // OPTIONAL : W3C tracestate.
+  string tracestate = 11;
+}
+
+// EmbedResponse is the gateway's wire output for one embedding.
+message EmbedResponse {
+  // Echo of EmbedRequest.invocation_id (gateway-generated if empty).
+  string invocation_id = 1;
+
+  // The dense embedding vector (length == resolved output dimensionality).
+  repeated float values = 2;
+
+  // Resolved vendor identifier, "vertex_ai_gemini" for v1.
+  string vendor = 3;
+
+  // Resolved embedding model, e.g. "text-embedding-004".
+  string model_version = 4;
+
+  // Token accounting. input_tokens carries the vendor-reported statistics
+  // token_count when available; cost_micros is 0 by the no-price ruling.
+  TokenUsage usage = 5;
+
+  // When the gateway emitted this response (post-ledger write).
+  google.protobuf.Timestamp completed_at = 6;
+
+  // Build identifier of the gateway that handled the call.
+  string gateway_version = 7;
+}
+
+// -----------------------------------------------------------------------------
+// Shared sub-messages
+// -----------------------------------------------------------------------------
+
+// TokenUsage carries the provider-reported token counts + the gateway's
+// canonical cost computation. Identical shape to the additive fields the
+// gateway writes onto chora.observability.token_usage.recorded.v1 — keeps
+// gRPC + Pub/Sub representations symmetric.
+message TokenUsage {
+  // Input prompt tokens (post-Cloud Model Armor sanitise if PRE sanitised).
+  int64 input_tokens = 1;
+
+  // Output completion tokens (pre-Cloud Model Armor sanitise — counts what
+  // the vendor billed for, even if POST then redacted some of it).
+  int64 output_tokens = 2;
+
+  // Cached prompt tokens (when prompt caching is in effect — discounted
+  // billing per vendor). 0 when caching is disabled / inapplicable.
+  int64 cached_tokens = 3;
+
+  // Canonical cost in micro-dollars (1e-6 USD). Integer to avoid float
+  // drift. Computed by the gateway from per-model price config in
+  // GCS-managed pricing-config YAML.
+  int64 cost_micros = 4;
+}

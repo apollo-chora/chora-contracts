@@ -1,0 +1,472 @@
+openapi: "3.2.0"
+info:
+  title: "Chora Identity — Tenant CSV Mass-Import API"
+  version: "1.0.0"
+  description: |
+    BFF contract for the tenant + user CSV mass-import (ADR-221) and the
+    synthetic-batch lifecycle (ADR-222). One Excel/GSheets-edited CSV
+    onboards tenant(s) + their whole multi-role user roster; the same
+    machinery mints synthetic fleets for demo/load-testing and tears them
+    down via per-GCID account-closure sagas.
+
+    Owning domain : Identity (`chora_identity` database — ImportJob aggregate)
+    Owning team   : Team 3 (Platform)
+    Surface       : H+ Hub+ `/h/import` wizard (+ "Import members" on `/h/members`)
+    Edge          : chora-gateway BFF (this file is the gateway-facing contract)
+
+    AP-01: this contract exists BEFORE implementation (P0 CHO-2020; handlers
+    land P1+ per the CR phasing).
+
+    ## Gates (ADR-194 precedent)
+    - **operatorGate** — PLATFORM_OPERATOR (Secret-Manager email allowlist).
+      All run modes. Fleet create-new is operator-only.
+    - **adminGate** — tenant-scoped `admin` role, tenant from `X-Tenant-Id`
+      (P6): `run_mode` is FORCED to `tenant_admin`, tenant columns are
+      forbidden in the file, and the M-12 cap (2,000 rows) applies.
+
+    Every tenant-scoped write executes inside `RunInTenantTx(tenant_id)`
+    with RLS ON — explicitly NOT a third RLS-bypass surface (ADR-221).
+    `governance.audit.tenant_import_executed.v1` is published BEFORE writes
+    (IMDA D1).
+
+    ## Job lifecycle (ADR-221 D4)
+    `validating → awaiting_confirm → running →
+    completed | completed_with_errors | failed | cancelled`
+
+    Validation (dry-run) is MANDATORY: every upload parses + validates to a
+    report first; nothing writes until an explicit `:confirm`. One active
+    job per actor (M-7). Caps: 20 MB / 50,000 rows per file (M-6).
+  contact:
+    name: "Chora Platform Team (Team 3)"
+  license:
+    name: "Proprietary"
+
+servers:
+  - url: "https://api.chora.app"
+    description: "Production"
+  - url: "http://localhost:8080"
+    description: "Local development"
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: ImportJobs
+    description: "Upload, validate, confirm, monitor and report on CSV import jobs"
+  - name: ImportBatches
+    description: "Synthetic-batch lifecycle (ADR-222) — teardown via closure-saga fan-out"
+
+paths:
+  /api/v1/admin/tenant-imports:
+    post:
+      tags: [ImportJobs]
+      operationId: createTenantImport
+      summary: "Upload an import CSV and start server-side validation (dry-run)"
+      description: |
+        Multipart upload → GCS imports bucket (CMEK, 30-day lifecycle, M-11)
+        → `202` with a poll URL. The job starts in `validating` and settles
+        at `awaiting_confirm` (validation report ready) or `failed`
+        (structural FileError — empty/malformed/non-UTF-8 file, missing
+        required header, cap breach).
+
+        `409` when the actor already has an active job (M-7).
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, run_mode]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: "The CSV file (≤20 MB, ≤50k data rows, UTF-8; BOM tolerated; `,`/`;`/TAB sniffed)"
+                run_mode:
+                  $ref: '#/components/schemas/ImportRunMode'
+                materialization_mode:
+                  $ref: '#/components/schemas/ImportMaterializationMode'
+                send_invites:
+                  type: boolean
+                  default: true
+                  description: "Job-level invite-email toggle (GQ-4; P3 wiring). Per-row `send_invite` overrides. Synthetic modes never email."
+      responses:
+        "202":
+          description: "Upload accepted; validation running"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImportJobAccepted'
+        "400":
+          description: "Structural file rejection (FileError code in `error.code`: empty_file | file_too_large | too_many_rows | missing_required_header | malformed_csv | not_utf8) or bad form fields"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "401": { $ref: '#/components/responses/Unauthorized' }
+        "403": { $ref: '#/components/responses/Forbidden' }
+        "409":
+          description: "Actor already has an active import job (M-7)"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "413":
+          description: "Multipart body exceeds the transport cap (32 MB)"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    get:
+      tags: [ImportJobs]
+      operationId: listTenantImports
+      summary: "List the caller's import jobs, newest first"
+      description: |
+        Operator: jobs the operator created (all scopes). Tenant admin (P6):
+        jobs of the `X-Tenant-Id` tenant. Pagination via `limit`/`offset`.
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: state
+          in: query
+          description: "Optional state filter"
+          schema:
+            $ref: '#/components/schemas/ImportJobState'
+      responses:
+        "200":
+          description: "Jobs page"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [jobs, total]
+                properties:
+                  jobs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ImportJob'
+                  total:
+                    type: integer
+        "401": { $ref: '#/components/responses/Unauthorized' }
+        "403": { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/admin/tenant-imports/{job_id}:
+    parameters:
+      - $ref: '#/components/parameters/JobID'
+    get:
+      tags: [ImportJobs]
+      operationId: getTenantImport
+      summary: "Poll one import job (state, progress, validation summary)"
+      responses:
+        "200":
+          description: "Current job snapshot"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImportJob'
+        "401": { $ref: '#/components/responses/Unauthorized' }
+        "403": { $ref: '#/components/responses/Forbidden' }
+        "404": { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/admin/tenant-imports/{job_id}:confirm:
+    post:
+      tags: [ImportJobs]
+      operationId: confirmTenantImport
+      summary: "Confirm a validated job — begin chunked execution"
+      description: |
+        Legal only from `awaiting_confirm`. Publishes
+        `governance.audit.tenant_import_executed.v1` BEFORE the first write
+        (IMDA D1), then `chora.identity.tenant_import.started.v1`, then
+        executes in ~500-row checkpointed chunks (pod-death-safe, D4).
+        Create-new fleet runs serialized (M-7).
+      parameters:
+        - $ref: '#/components/parameters/JobID'
+      responses:
+        "202":
+          description: "Execution started"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImportJobAccepted'
+        "401": { $ref: '#/components/responses/Unauthorized' }
+        "403": { $ref: '#/components/responses/Forbidden' }
+        "404": { $ref: '#/components/responses/NotFound' }
+        "409":
+          description: "Job is not awaiting confirmation (already running / terminal / failed validation)"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/admin/tenant-imports/{job_id}:cancel:
+    post:
+      tags: [ImportJobs]
+      operationId: cancelTenantImport
+      summary: "Cancel a job (honoured at the next chunk boundary)"
+      description: |
+        Legal from `validating`, `awaiting_confirm` or `running`. A running
+        job stops at its next checkpoint; rows already committed STAY
+        committed (row-level semantics, GQ-7) and are fully accounted in the
+        result report.
+      parameters:
+        - $ref: '#/components/parameters/JobID'
+      responses:
+        "202":
+          description: "Cancellation accepted"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImportJobAccepted'
+        "401": { $ref: '#/components/responses/Unauthorized' }
+        "403": { $ref: '#/components/responses/Forbidden' }
+        "404": { $ref: '#/components/responses/NotFound' }
+        "409":
+          description: "Job already terminal"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/admin/tenant-imports/{job_id}/report:
+    get:
+      tags: [ImportJobs]
+      operationId: getTenantImportReport
+      summary: "Fetch the validation / result report (signed URLs)"
+      description: |
+        From `awaiting_confirm`: the validation report (counts + error-CSV
+        signed URL). From terminal states: the result report (per-row
+        outcome CSV — `created_tenant | invited | granted | merged | minted
+        | skipped | error` — plus error CSV, and the credentials CSV for
+        `synthetic_login` runs). Signed URLs are short-lived; reports live
+        in the imports bucket (30-day lifecycle, M-11). The credentials CSV
+        is operator-only (ADR-222 D2 guardrail 3 — passwords appear nowhere
+        else: not in logs, events or the DB).
+      parameters:
+        - $ref: '#/components/parameters/JobID'
+      responses:
+        "200":
+          description: "Report for the job's current phase"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImportReport'
+        "401": { $ref: '#/components/responses/Unauthorized' }
+        "403": { $ref: '#/components/responses/Forbidden' }
+        "404": { $ref: '#/components/responses/NotFound' }
+        "409":
+          description: "No report yet (job still validating)"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/admin/tenant-imports/batches/{batch_id}:teardown:
+    post:
+      tags: [ImportBatches]
+      operationId: teardownImportBatch
+      summary: "Tear down a SYNTHETIC batch via closure-saga fan-out (ADR-222 D3)"
+      description: |
+        Enqueues ONE account-closure saga per minted GCID in
+        `import_batch_members` (synthetic saga profile: zero grace period,
+        no cold-archive). Synthetic tenants close after their member sagas
+        complete; GCIP demo accounts are deleted in the saga's identity
+        step; GCS reports/CSVs purged. Audited BEFORE enqueue
+        (`action = "TEARDOWN"`).
+
+        **Async**: baseline restores when the sagas finish, not at request
+        time. **operatorGate only.** `409` for real-mode batches — teardown
+        NEVER applies to real principals.
+      parameters:
+        - name: batch_id
+          in: path
+          required: true
+          description: "UUIDv7 import batch identifier"
+          schema: { type: string, format: uuid }
+      responses:
+        "202":
+          description: "Teardown accepted; sagas enqueued"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TeardownAccepted'
+        "401": { $ref: '#/components/responses/Unauthorized' }
+        "403": { $ref: '#/components/responses/Forbidden' }
+        "404": { $ref: '#/components/responses/NotFound' }
+        "409":
+          description: "Batch is not synthetic (`error.code = real_batch_teardown_forbidden`) or teardown already running"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: "chora-session JWT; PLATFORM_OPERATOR asserted via allowlist (operatorGate) or tenant admin role (adminGate, P6)"
+
+  parameters:
+    JobID:
+      name: job_id
+      in: path
+      required: true
+      description: "UUIDv7 ImportJob identifier"
+      schema: { type: string, format: uuid }
+
+  responses:
+    Unauthorized:
+      description: "Missing/invalid bearer token"
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: "Caller lacks the required gate (operatorGate / adminGate)"
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: "Job/batch not found in the caller's scope"
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    ImportRunMode:
+      type: string
+      description: "WHO imports + whether tenants may be created (ADR-221 D3)"
+      enum: [operator_create_new, operator_existing_only, tenant_admin, sync]
+
+    ImportMaterializationMode:
+      type: string
+      description: "HOW rows become principals (ADR-221 D3 / ADR-222). `synthetic_login` requires every target tenant `is_synthetic` (hard 4xx otherwise)."
+      enum: [cold_invite, synthetic, synthetic_login]
+      default: cold_invite
+
+    ImportJobState:
+      type: string
+      enum: [validating, awaiting_confirm, running, completed, completed_with_errors, failed, cancelled]
+
+    ImportOutcomeCounts:
+      type: object
+      description: "Per-row outcome ledger — sums to executed rows (AC-1)"
+      properties:
+        created_tenants: { type: integer }
+        invited: { type: integer }
+        granted: { type: integer }
+        merged: { type: integer }
+        minted: { type: integer }
+        skipped: { type: integer }
+        errored: { type: integer }
+
+    ImportJobAccepted:
+      type: object
+      required: [job_id, state, poll_url]
+      properties:
+        job_id: { type: string, format: uuid }
+        state:
+          $ref: '#/components/schemas/ImportJobState'
+        poll_url:
+          type: string
+          description: "GET /api/v1/admin/tenant-imports/{job_id}"
+
+    ImportJob:
+      type: object
+      required: [job_id, state, run_mode, materialization_mode, created_at]
+      properties:
+        job_id: { type: string, format: uuid }
+        import_batch_id:
+          type: string
+          format: uuid
+          description: "Batch handle for the synthetic lifecycle (teardown scope)"
+        state:
+          $ref: '#/components/schemas/ImportJobState'
+        run_mode:
+          $ref: '#/components/schemas/ImportRunMode'
+        materialization_mode:
+          $ref: '#/components/schemas/ImportMaterializationMode'
+        send_invites: { type: boolean }
+        actor_gcid: { type: string, format: uuid }
+        source_filename: { type: string }
+        source_bytes: { type: integer, format: int64 }
+        detected_delimiter:
+          type: string
+          description: "Sniffed cell separator: ',' ';' or 'TAB' (M-1)"
+        total_rows:
+          type: integer
+          description: "Data rows found at validation"
+        valid_rows: { type: integer }
+        error_rows: { type: integer }
+        tenant_count:
+          type: integer
+          description: "Distinct tenant blocks in the file"
+        processed_rows:
+          type: integer
+          description: "Execution progress (checkpointed per chunk)"
+        counts:
+          $ref: '#/components/schemas/ImportOutcomeCounts'
+        failure_reason:
+          type: string
+          description: "FileError / system failure detail when state=failed"
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        started_at: { type: string, format: date-time }
+        completed_at: { type: string, format: date-time }
+
+    ImportReport:
+      type: object
+      required: [job_id, phase, counts]
+      properties:
+        job_id: { type: string, format: uuid }
+        phase:
+          type: string
+          enum: [validation, result]
+        counts:
+          $ref: '#/components/schemas/ImportOutcomeCounts'
+        total_rows: { type: integer }
+        valid_rows: { type: integer }
+        error_rows: { type: integer }
+        tenant_count: { type: integer }
+        error_csv_url:
+          type: string
+          description: "Signed URL — per-row (line, field, code, reason) error CSV (AC-5)"
+        result_csv_url:
+          type: string
+          description: "Signed URL — per-row outcome CSV (terminal states only)"
+        credentials_csv_url:
+          type: string
+          description: "Signed URL — synthetic_login credentials, OPERATOR-ONLY (ADR-222 D2; the only place passwords ever surface)"
+        urls_expire_at: { type: string, format: date-time }
+
+    TeardownAccepted:
+      type: object
+      required: [batch_id, sagas_enqueued]
+      properties:
+        batch_id: { type: string, format: uuid }
+        sagas_enqueued:
+          type: integer
+          description: "One account-closure saga per minted GCID"
+        tenants_closing:
+          type: integer
+          description: "Synthetic tenants that will close after member sagas complete"
+        note:
+          type: string
+          description: "Async completion notice — baseline restores when sagas finish"
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: "Stable machine code (e.g. active_job_exists, file_too_large, real_batch_teardown_forbidden)"
+            message: { type: string }

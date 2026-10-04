@@ -1,0 +1,64 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Identity — UserManaRefunded
+  version: 1.0.0
+  description: |
+    Published when a prior debit is reversed (LLM call failed after mana
+    already debited; admin-issued goodwill credit). Idempotency key MUST
+    derive from the original request_id (e.g., `{request_id}-refund`)
+    per ADR-142.
+
+    - Domain: Identity (`chora_identity` DB)
+    - Topic: `chora.identity.user_mana.refunded.v1`
+    - Source proto: `proto/events/identity/user_mana.proto`
+       message `chora.identity.v1.UserManaRefunded`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  userManaRefunded:
+    address: chora.identity.user_mana.refunded.v1
+    messages:
+      userManaRefunded:
+        $ref: '#/components/messages/UserManaRefunded'
+
+operations:
+  publishUserManaRefunded:
+    action: send
+    channel:
+      $ref: '#/channels/userManaRefunded'
+    messages:
+      - $ref: '#/channels/userManaRefunded/messages/userManaRefunded'
+
+  consumeUserManaRefunded:
+    action: receive
+    channel:
+      $ref: '#/channels/userManaRefunded'
+    description: |
+      Consumers: Notifications (refund toast + email), Observability
+      (refund-rate KPI), BigQuery streaming, Governance (audit trail
+      for compensation).
+    messages:
+      - $ref: '#/channels/userManaRefunded/messages/userManaRefunded'
+
+components:
+  messages:
+    UserManaRefunded:
+      name: UserManaRefunded
+      title: User Mana Refunded
+      summary: A prior mana debit has been reversed
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/identity/user_mana.proto#/chora.identity.v1.UserManaRefunded'

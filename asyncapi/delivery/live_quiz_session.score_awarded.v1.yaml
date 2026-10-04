@@ -1,0 +1,83 @@
+asyncapi: "3.0.0"
+info:
+  title: "chora.delivery.live_quiz_session.score_awarded.v1"
+  version: "1.0.1"
+  description: |
+    Published each time a learner's answer is graded in a Live Classroom
+    quiz session (ADR-168). The load-bearing cross-domain event: chora-sharing
+    rolls awarded_points into the durable cross-session Leaderboard (Three-
+    Currency XP economy). The learner is the envelope.gcid.
+    Companion to `proto/events/delivery/live_quiz_session.proto` message
+    `LiveQuizSessionScoreAwarded`.
+  contact: { name: "Chora Platform Team" }
+  license: { name: "Proprietary" }
+
+defaultContentType: application/x-protobuf
+
+servers:
+  local: { host: "localhost:8085", protocol: googlepubsub, description: "Pub/Sub Emulator" }
+  production: { host: "pubsub.googleapis.com", protocol: googlepubsub, description: "Google Cloud Pub/Sub" }
+
+channels:
+  liveQuizSessionScoreAwarded:
+    address: chora.delivery.live_quiz_session.score_awarded.v1
+    description: |
+      Carries LiveQuizSessionScoreAwarded Protobuf payload.
+
+      Downstream consumers:
+        - chora-sharing : leaderboard.Ranker (tenant weekly + all-time XP)
+        - chora-observability : token/score ledger analytics
+    messages:
+      liveQuizSessionScoreAwarded:
+        $ref: "#/components/messages/LiveQuizSessionScoreAwarded"
+
+operations:
+  publishLiveQuizSessionScoreAwarded:
+    action: send
+    channel: { $ref: "#/channels/liveQuizSessionScoreAwarded" }
+    summary: "Publish LiveQuizSessionScoreAwarded"
+    messages: [ { $ref: "#/channels/liveQuizSessionScoreAwarded/messages/liveQuizSessionScoreAwarded" } ]
+  consumeLiveQuizSessionScoreAwarded:
+    action: receive
+    channel: { $ref: "#/channels/liveQuizSessionScoreAwarded" }
+    summary: "Consume LiveQuizSessionScoreAwarded"
+    messages: [ { $ref: "#/channels/liveQuizSessionScoreAwarded/messages/liveQuizSessionScoreAwarded" } ]
+
+components:
+  messages:
+    LiveQuizSessionScoreAwarded:
+      name: LiveQuizSessionScoreAwarded
+      title: "Live Quiz Session Score Awarded"
+      summary: "A learner's answer was graded and cumulative points credited."
+      contentType: application/x-protobuf
+      payload:
+        type: object
+        description: "Mirrors chora.delivery.v1.LiveQuizSessionScoreAwarded."
+        properties:
+          envelope: { $ref: "#/components/schemas/EventEnvelope" }
+          session_id: { type: string, format: uuid }
+          live_quiz_id: { type: string, format: uuid }
+          question_id: { type: string }
+          awarded_points: { type: integer }
+          cumulative_score: { type: integer }
+          correct: { type: boolean }
+          answer_millis: { type: integer, format: int64 }
+  schemas:
+    EventEnvelope:
+      type: object
+      description: "Mirrors chora.common.v1.EventEnvelope."
+      required: [event_id, idempotency_key, tenant_id, occurred_at, published_at, traceparent, source_project, source_service, schema_version]
+      properties:
+        event_id: { type: string, format: uuid }
+        idempotency_key: { type: string }
+        tenant_id: { type: string }
+        gcid: { type: string }
+        occurred_at: { type: string, format: date-time }
+        published_at: { type: string, format: date-time }
+        traceparent: { type: string }
+        tracestate: { type: string }
+        source_project: { type: string }
+        source_service: { type: string }
+        schema_version: { type: integer }
+        correlation_id: { type: string }
+        causation_id: { type: string }

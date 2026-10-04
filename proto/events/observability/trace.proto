@@ -1,0 +1,74 @@
+// =============================================================================
+// chora.observability.v1 — Emergent trace-derived events
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 3 D11
+//   (OTLP everywhere; direct OTLP to Cloud Trace; no Langfuse, no OTel
+//    Collector unless trip-wired)
+//
+// Owning domain : Observability (chora_observability database)
+// Owning team   : Team 3 (Platform)
+// Topic prefix  : chora.observability.trace.*
+//
+// MOST tracing flows OTLP-direct from services to Cloud Trace. This proto
+// covers the EMERGENT subset — events derived AFTER trace ingestion that
+// require Pub/Sub fanout (e.g., critical error spike, latency SLO breach,
+// cross-trace anomalies). Span-by-span fanout is NOT used.
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.observability.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/observability/v1;observabilityv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// SpanFinalKind — categorisation of span-finalization events.
+// -----------------------------------------------------------------------------
+enum SpanFinalKind {
+  SPAN_FINAL_KIND_UNSPECIFIED = 0;
+  SPAN_FINAL_KIND_ERROR_SPIKE = 1;       // Aggregated error rate exceeded threshold
+  SPAN_FINAL_KIND_SLO_BREACH = 2;         // Latency / availability SLO breach
+  SPAN_FINAL_KIND_ANOMALY_DETECTED = 3;   // Statistical anomaly in trace pattern
+  SPAN_FINAL_KIND_LONG_TAIL = 4;           // P99 latency outlier candidate
+}
+
+// -----------------------------------------------------------------------------
+// OtlpSpanFinalized — chora.observability.trace.span_finalized.v1
+// -----------------------------------------------------------------------------
+//
+// Published when post-ingest trace analytics produce a finalized event
+// worth fanning out (e.g., to alerting, to AI Kernel for self-healing
+// hints, to governance for audit). NOT emitted per-span — only for
+// notable finalizations.
+message OtlpSpanFinalized {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // The W3C trace ID (32 hex chars) that triggered finalization.
+  string trace_id = 2;
+
+  // Optional root span ID (16 hex chars).
+  string root_span_id = 3;
+
+  SpanFinalKind kind = 4;
+
+  // Free-text summary (max 512 chars).
+  string summary = 5;
+
+  // Affected service name (matches envelope.source_service convention).
+  string service_name = 6;
+
+  // Severity in ["debug", "info", "warning", "error", "critical"].
+  string severity = 7;
+
+  // Optional metric value at trigger time (e.g., error rate, p99 latency
+  // in ms). Free-form; downstream alerting interprets.
+  double metric_value = 8;
+
+  google.protobuf.Timestamp finalized_at = 9;
+}

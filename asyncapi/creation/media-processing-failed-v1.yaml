@@ -1,0 +1,77 @@
+asyncapi: "3.0.0"
+info:
+  title: "Chora Content Creation — media.processing_failed.v1"
+  version: "1.0.0"
+  description: |
+    Published when the media-processing pipeline reaches a terminal failure
+    state (MEDIA_PROCESSING_STATUS_QUARANTINED or
+    MEDIA_PROCESSING_STATUS_FAILED). The asset MUST NOT be served.
+
+    Distinguish:
+      - QUARANTINED  -> security / moderation rejected (terminal, no retry)
+      - FAILED       -> transient pipeline error (eligible for retry)
+
+    Consumers should remove pending references and notify the uploader.
+
+    Owning team    : Team 1 (Content)
+    Owning domain  : Content Creation (chora_creation database)
+
+    Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 2 D8
+    + ADR-134 (legacy media-processor pipeline; topic taxonomy migrated).
+  contact:
+    name: "Chora Platform Team — Content Track"
+  license:
+    name: "Proprietary"
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  production:
+    host: "pubsub.googleapis.com"
+    protocol: googlepubsub
+    description: "Google Cloud Pub/Sub (production)"
+  emulator:
+    host: "localhost:8085"
+    protocol: googlepubsub
+    description: "Cloud Pub/Sub Emulator (local dev)"
+
+channels:
+  mediaProcessingFailed:
+    address: "chora.creation.media.processing_failed.v1"
+    description: |
+      Pub/Sub topic for MediaProcessingFailed events. DLQ configured at
+      subscription level (3 retries, exponential backoff).
+    messages:
+      mediaProcessingFailed:
+        $ref: "#/components/messages/MediaProcessingFailed"
+
+operations:
+  publishMediaProcessingFailed:
+    action: send
+    channel:
+      $ref: "#/channels/mediaProcessingFailed"
+    summary: "Publish a media-processing terminal failure event"
+    description: |
+      Producer: media-processor Cloud Run Job.
+      Consumers:
+        - chora-creation     -> mark Media as QUARANTINED/FAILED, remove
+                                pending atom references
+        - chora-notifications -> notify the uploader
+        - chora-governance   -> log moderation rejection (QUARANTINED only)
+        - audit log
+    messages:
+      - $ref: "#/channels/mediaProcessingFailed/messages/mediaProcessingFailed"
+
+components:
+  messages:
+    MediaProcessingFailed:
+      name: "MediaProcessingFailed"
+      title: "Media Processing Failed"
+      summary: "Media-processing pipeline failed — asset must not be served"
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf;version=3
+      payload:
+        schemaFormat: "application/vnd.google.protobuf;version=3"
+        schema:
+          protoFile: "proto/events/creation/media.proto"
+          messageName: "chora.creation.v1.MediaProcessingFailed"

@@ -1,0 +1,152 @@
+// =============================================================================
+// Chora Content Consumption - learner-owned ConceptNode binding events
+// =============================================================================
+//
+// ADR-244 D4. Before this event there was NO concept domain event of any kind:
+// manual attach, suggestion accept, cluster projection, merge and split all
+// mutated `concept_nodes` silently, with no outbox row, so nothing downstream
+// could react to a learner binding an atom to a concept. That made every
+// binding a side effect of a handler rather than a domain event with an owner,
+// which is the DDD gap ADR-244 exists to close.
+//
+// ONE event carries the whole delta AND the resulting state, deliberately, in
+// preference to separate attach/detach topics:
+//   - Carrying `resulting_atom_refs` makes consumers idempotent and
+//     self-healing: a consumer that misses one message recovers on the next
+//     rather than drifting forever.
+//   - One topic is one wiring surface. A new Pub/Sub lane costs five silent
+//     breaks (topic, per-subscription IAM, gateway push route, Istio authz,
+//     subscriber); two topics would double that for no semantic gain.
+//   - Separate topics would let a consumer observe an attach and miss its
+//     detach, silently corrupting any derived view.
+//
+// SOVEREIGNTY NOTE (ADR-212 D9). This event REPORTS a binding the learner
+// already accepted; it is not an instruction and confers no authority to bind.
+// A subscriber must never treat it as licence to mutate a learner's graph.
+//
+// EMITTER: chora-consumption, from EVERY path that changes `atom_refs`
+// (manual attach/detach, suggestion accept, cluster projection, split, and the
+// ADR-244 D6 merge union). A path that mutates bindings without emitting is a
+// defect, not an optimisation.
+//
+// Aggregate root : concept_node (chora_consumption; learner-owned, ADR-212 D1)
+// Owning domain  : Content Consumption (chora_consumption)
+// Owning team    : Team 1 (Content)
+// Topic prefix   : chora.consumption.concept.*
+// Surface        : A+ (/a/knowledge)
+//
+// Subscribers (loosely-coupled, attach later):
+//   - chora-consumption   - daily-dose pool refresh (ADR-242 goal-FIRST dose).
+//   - chora-consumption   - campaign/fog reveal recompute (ADR-227/228).
+//   - chora-sharing       - Three-Currency Economy on curation milestones.
+//   - chora-observability - engagement + D1 governance evidence.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.consumption.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/consumption/v1;consumptionv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// ConceptAtomsBound - chora.consumption.concept.atoms_bound.v1
+// -----------------------------------------------------------------------------
+//
+// Emitted when a ConceptNode's `atom_refs` changes, by any path. Idempotent via
+// the envelope idempotency_key = concept_id:updated_at - a redelivery that
+// re-reports the same resulting set does not re-fire downstream work.
+//
+// A no-op mutation (attach of an already-present atom, detach of an absent one)
+// MUST NOT emit: `AttachAtom`/`DetachAtom` are idempotent at the aggregate and
+// only `touch()` when something actually changed, so an event here always
+// represents a real state transition.
+//
+// Topic: chora.consumption.concept.atoms_bound.v1
+message ConceptAtomsBound {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // The ConceptNode whose bindings changed (concept aggregate id; UUIDv7).
+  string concept_id = 2;
+
+  // Tenant context (also envelope.tenant_id; duplicated for sharded filters).
+  string tenant_id = 3;
+
+  // The learner who OWNS the concept (also envelope.gcid). The map is
+  // learner-sovereign (ADR-212), so there is no other legitimate actor.
+  string learner_gcid = 4;
+
+  // Atoms added by this change. May be empty (a pure detach, or a merge whose
+  // absorbed operand carried nothing new).
+  repeated string attached_atom_ids = 5;
+
+  // Atoms removed by this change. May be empty (a pure attach).
+  repeated string detached_atom_ids = 6;
+
+  // The concept's FULL atom_refs after the change. This is what makes the event
+  // self-healing: a consumer rebuilding from it needs no prior message. May be
+  // empty - an empty concept is a first-class state (ADR-212 D1).
+  repeated string resulting_atom_refs = 7;
+
+  // Which path caused the change, so a consumer can weight a learner's
+  // deliberate curation differently from a structural side effect:
+  //   "manual_attach"       - the learner attached/detached directly (ADR-243).
+  //   "suggestion_accepted" - the learner accepted a Companion proposal.
+  //   "cluster_projection"  - MapCluster→Goal projection seeded it (ADR-223).
+  //   "split"               - a split child inherited the parent's atoms.
+  //   "merge"               - the survivor absorbed the operand's (ADR-244 D6).
+  //   "ceremony_edge"       - a ceremony learning-edge minted it with drills.
+  // Consumers MUST treat an unrecognised value as "some other path" and carry
+  // on, never as an error: the set grows as new binding paths appear, and a
+  // hand-written exhaustive switch here would drift silently.
+  string change_source = 8;
+
+  // The concept's provenance at the time of the change (ADR-212 D4):
+  // "learner_authored" | "companion_suggested_accepted" | "system_derived".
+  string provenance = 9;
+
+  // When the binding changed (the concept row's updated_at).
+  google.protobuf.Timestamp occurred_at = 10;
+}
+
+// -----------------------------------------------------------------------------
+// ConceptDeleted - chora.consumption.concept.deleted.v1
+// -----------------------------------------------------------------------------
+//
+// Emitted when a learner soft-deletes a ConceptNode (A+ /a/knowledge "Remove
+// concept"). The node is tombstoned in the SAME request; this event is the
+// durable trigger for cleaning up everything that referenced it, so a removed
+// concept leaves no dangling relations (CHO-2324).
+//
+// FIRST subscriber (chora-consumption): the edge-cleanup subscriber soft-deletes
+// every concept_edges row incident to concept_id (source OR target), which the
+// concept delete handler deliberately does NOT do inline - per ADR-212 edges are
+// a SEPARATE aggregate, cleaned via THIS event rather than a cross-aggregate
+// write from the handler. Idempotent: a redelivery re-runs the live-only cascade
+// and soft-deletes 0 additional rows.
+//
+// SOVEREIGNTY NOTE (ADR-212 D9): this REPORTS a removal the learner already made;
+// it is not an instruction and confers no authority to mutate another actor's
+// graph. A subscriber MUST scope every write to (tenant_id, learner_gcid).
+//
+// Idempotency key = concept_id:occurred_at.
+//
+// Topic: chora.consumption.concept.deleted.v1
+message ConceptDeleted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // The ConceptNode that was soft-deleted (concept aggregate id; UUIDv7).
+  string concept_id = 2;
+
+  // Tenant context (also envelope.tenant_id; duplicated for sharded filters).
+  string tenant_id = 3;
+
+  // The learner who OWNS the concept (also envelope.gcid). The map is
+  // learner-sovereign (ADR-212), so there is no other legitimate actor.
+  string learner_gcid = 4;
+
+  // When the concept was soft-deleted (the node row's deleted_at / updated_at).
+  google.protobuf.Timestamp occurred_at = 5;
+}

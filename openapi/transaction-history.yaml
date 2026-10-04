@@ -1,0 +1,993 @@
+openapi: "3.2.0"
+info:
+  title: "Chora Transaction History API — Contextual, per-scope unified ledger"
+  version: "1.0.0"
+  description: |
+    REST surface (via chora-gateway BFF) for the Contextual Transaction
+    History rebuild (ADR-205). One unified, cursor-paginated timeline merging
+    Stripe-backed purchases (chora_payments) with mana movements — top-ups
+    (chora_payments / chora_identity) and per-day mana-spend rollups
+    (chora_observability token_usage). Served from a single CQRS read
+    projection (`transaction_ledger`) owned by the Tenancy + Billing domain
+    (chora_tenancy) — see proto/services/tenancy/v1/transaction_history.proto
+    for the backing gRPC contract (TransactionHistoryService).
+
+    AP-01 (API-First) contract — the dependency root for Waves B (backend)
+    and C (frontend). Supersedes the payments-admin ListPurchaseHistory read
+    path (openapi/payments-admin.yaml); CHO-1931 is won't-fix.
+
+    Three explicit scopes (ADR-205 D1), each mapped to an EXISTING isolation
+    mechanism — scope is explicit per surface, never an accident of which
+    roles a JWT carries:
+
+      - LEARNER  — `GET /api/v1/me/transactions*`. Sees ONLY the caller's own
+        rows (RLS by learner_gcid + active tenant_id, both from the JWT). No
+        tenant/learner selector.
+      - TENANT   — `GET /api/v1/admin/transactions*`, non-operator caller
+        (TENANT_ADMIN / OWNER / AUDITOR). Sees the caller's own tenant, all
+        members. managed_tenant_id is ignored.
+      - MASTER   — `GET /api/v1/admin/transactions*`, PLATFORM_OPERATOR caller
+        (ADR-165 / chora-master super admin). Cross-franchisee span-all by
+        default; `managed_tenant_id` narrows to one franchisee. The
+        span-all read engages ADR-165 WithRLSBypass(ctx) and MUST emit
+        `chora.governance.audit.cross_tenant_payments_viewed.v1` BEFORE the
+        SQL fires (IMDA D1 accountability; reused topic, no new bypass
+        surface).
+
+    Volume strategy (ADR-205 D5): cursor pagination only (never OFFSET); a
+    server-bounded default window (~90d) when `from` is unset; a summary-first
+    KPI panel (`/summary`); per-day mana rollups with per-call drill-down
+    (`/{ledger_id}`); and async export for large result sets (export returns
+    202 + an ExportJob when the set exceeds the sync threshold).
+
+    All authenticated file downloads MUST route through the FE
+    BffClientService.getBlob primitive (ADR-205 D6 / Phase 0), never an anchor
+    href / window.open.
+
+    Owning domain : Tenancy + Billing (chora_tenancy database)
+    Owning team   : Team 3 (Platform)
+    Surfaces      : A+ (/a/transactions, learner) · H+ (/h/transactions,
+                    tenant admin + PLATFORM_OPERATOR master)
+  contact:
+    name: "Chora Platform Team (Team 3)"
+  license:
+    name: "Proprietary"
+
+servers:
+  - url: "https://api.chora.app"
+    description: "Production"
+  - url: "http://localhost:8080"
+    description: "Local development"
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Learner Transactions
+    description: "A+ learner-scoped unified timeline (own rows only)"
+  - name: Admin Transactions
+    description: "H+ tenant-admin + PLATFORM_OPERATOR master-scoped timeline"
+  - name: Summary
+    description: "Server-computed KPI panel (summary-first)"
+  - name: Export
+    description: "CSV / NDJSON export (sync small sets; async job at scale)"
+  - name: Stream
+    description: "Real-time SSE live tail of newly-projected rows"
+  - name: Health
+    description: "Health check"
+
+paths:
+  # ---------------------------------------------------------------------------
+  # LEARNER scope (A+) — own rows only
+  # ---------------------------------------------------------------------------
+  /api/v1/me/transactions:
+    get:
+      operationId: listMyTransactions
+      summary: "List my unified transactions (cursor-paginated)"
+      description: |
+        Returns the authenticated learner's own unified timeline — purchases,
+        mana top-ups, and per-day mana-spend rollups — newest first by default.
+        Scope is bound to the caller's GCID + active tenant from the JWT;
+        there is no tenant or learner selector at this surface.
+      tags: [Learner Transactions]
+      parameters:
+        - $ref: "#/components/parameters/PageTokenQuery"
+        - $ref: "#/components/parameters/PageSizeQuery"
+        - $ref: "#/components/parameters/KindQuery"
+        - $ref: "#/components/parameters/StatusQuery"
+        - $ref: "#/components/parameters/FromQuery"
+        - $ref: "#/components/parameters/ToQuery"
+        - $ref: "#/components/parameters/SortQuery"
+      responses:
+        "200":
+          description: "Transactions listed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListTransactionsResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/me/transactions/summary:
+    get:
+      operationId: getMyTransactionsSummary
+      summary: "KPI summary for my transactions over the filtered window"
+      description: |
+        Server-computed KPIs (counts + net fiat by currency + mana topped-up
+        vs spent) over the same filtered window as listMyTransactions. Powers
+        the summary-first panel above the table.
+      tags: [Summary]
+      parameters:
+        - $ref: "#/components/parameters/KindQuery"
+        - $ref: "#/components/parameters/StatusQuery"
+        - $ref: "#/components/parameters/FromQuery"
+        - $ref: "#/components/parameters/ToQuery"
+      responses:
+        "200":
+          description: "Summary computed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransactionSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/me/transactions/export:
+    get:
+      operationId: exportMyTransactions
+      summary: "Export my transactions (CSV or NDJSON; async at scale)"
+      description: |
+        Exports the same filtered set as listMyTransactions. Small/filtered
+        sets stream synchronously (200). Sets exceeding the server sync
+        threshold return 202 with an ExportJob — poll the job (or await the
+        notification) for the signed download URL (ADR-205 D5 async export).
+      tags: [Export]
+      parameters:
+        - $ref: "#/components/parameters/ExportFormatQuery"
+        - $ref: "#/components/parameters/KindQuery"
+        - $ref: "#/components/parameters/StatusQuery"
+        - $ref: "#/components/parameters/FromQuery"
+        - $ref: "#/components/parameters/ToQuery"
+      responses:
+        "200":
+          $ref: "#/components/responses/ExportStream"
+        "202":
+          $ref: "#/components/responses/ExportAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/me/transactions/export/jobs/{job_id}:
+    parameters:
+      - name: job_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+        description: "ExportJob id returned by the 202 from exportMyTransactions."
+    get:
+      operationId: getMyExportJob
+      summary: "Poll an async export job for its signed download URL"
+      description: |
+        Poll the ExportJob returned by the 202 from exportMyTransactions until
+        `status=ready` (then `download_url` carries a signed GCS link) or
+        `status=failed` (ADR-205 D5 async export). Own jobs only.
+      tags: [Export]
+      responses:
+        "200":
+          description: "Export job handle"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExportJob"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/me/transactions/{ledger_id}:
+    parameters:
+      - $ref: "#/components/parameters/LedgerIdPath"
+    get:
+      operationId: getMyTransactionDetail
+      summary: "Drill a mana-spend-daily row into its per-call detail"
+      description: |
+        Expands a single MANA_SPEND_DAILY rollup row into its per-call mana
+        debits (action_code, mana_units, model, trace_id). For other kinds it
+        returns the parent row with an empty detail list. Authorised to the
+        caller's own rows only.
+      tags: [Learner Transactions]
+      parameters:
+        - $ref: "#/components/parameters/PageTokenQuery"
+        - $ref: "#/components/parameters/DetailPageSizeQuery"
+      responses:
+        "200":
+          description: "Detail rows"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransactionDetailResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---------------------------------------------------------------------------
+  # TENANT / MASTER scope (H+) — tenant admin + PLATFORM_OPERATOR
+  # ---------------------------------------------------------------------------
+  /api/v1/admin/transactions:
+    get:
+      operationId: listAdminTransactions
+      summary: "List tenant / cross-franchisee transactions (cursor-paginated)"
+      description: |
+        Returns the unified timeline at TENANT or MASTER scope.
+
+        TENANT scope (TENANT_ADMIN / OWNER / AUDITOR): the caller's own
+        tenant, all members. `managed_tenant_id` is ignored.
+
+        MASTER scope (PLATFORM_OPERATOR): cross-franchisee span-all by
+        default; `managed_tenant_id` narrows to one franchisee. The
+        span-all read engages ADR-165 WithRLSBypass(ctx) and emits
+        `chora.governance.audit.cross_tenant_payments_viewed.v1` BEFORE the
+        SQL fires, carrying the deduped tenant_ids the response touched.
+
+        `learner_gcid` (TENANT / MASTER) drills into a single learner's rows.
+      tags: [Admin Transactions]
+      parameters:
+        - $ref: "#/components/parameters/PageTokenQuery"
+        - $ref: "#/components/parameters/PageSizeQuery"
+        - $ref: "#/components/parameters/KindQuery"
+        - $ref: "#/components/parameters/StatusQuery"
+        - $ref: "#/components/parameters/FromQuery"
+        - $ref: "#/components/parameters/ToQuery"
+        - $ref: "#/components/parameters/SortQuery"
+        - $ref: "#/components/parameters/ManagedTenantIdQuery"
+        - $ref: "#/components/parameters/LearnerGcidQuery"
+      responses:
+        "200":
+          description: "Transactions listed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListTransactionsResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/admin/transactions/summary:
+    get:
+      operationId: getAdminTransactionsSummary
+      summary: "KPI summary at tenant / master scope"
+      description: |
+        Server-computed KPIs over the filtered window at TENANT or MASTER
+        scope. Master span-all emits the same cross-tenant audit event as the
+        list path before reading.
+      tags: [Summary]
+      parameters:
+        - $ref: "#/components/parameters/KindQuery"
+        - $ref: "#/components/parameters/StatusQuery"
+        - $ref: "#/components/parameters/FromQuery"
+        - $ref: "#/components/parameters/ToQuery"
+        - $ref: "#/components/parameters/ManagedTenantIdQuery"
+        - $ref: "#/components/parameters/LearnerGcidQuery"
+      responses:
+        "200":
+          description: "Summary computed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransactionSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/admin/transactions/export:
+    get:
+      operationId: exportAdminTransactions
+      summary: "Export tenant / master transactions (CSV or NDJSON; async at scale)"
+      description: |
+        Exports the same filtered set as listAdminTransactions. Tenant-scoping
+        rules mirror the list path (PLATFORM_OPERATOR may span franchisees;
+        others are pinned to the caller's tenant). Large tenant/master sets
+        return 202 + an ExportJob (the synchronous stream would time out — the
+        old SSE export 504s at scale); small sets stream at 200.
+      tags: [Export]
+      parameters:
+        - $ref: "#/components/parameters/ExportFormatQuery"
+        - $ref: "#/components/parameters/KindQuery"
+        - $ref: "#/components/parameters/StatusQuery"
+        - $ref: "#/components/parameters/FromQuery"
+        - $ref: "#/components/parameters/ToQuery"
+        - $ref: "#/components/parameters/ManagedTenantIdQuery"
+        - $ref: "#/components/parameters/LearnerGcidQuery"
+      responses:
+        "200":
+          $ref: "#/components/responses/ExportStream"
+        "202":
+          $ref: "#/components/responses/ExportAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/admin/transactions/export/jobs/{job_id}:
+    parameters:
+      - name: job_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+        description: "ExportJob id returned by the 202 from exportAdminTransactions."
+    get:
+      operationId: getAdminExportJob
+      summary: "Poll an async admin export job for its signed download URL"
+      description: |
+        Poll the ExportJob returned by the 202 from exportAdminTransactions
+        until `status=ready` (then `download_url` carries a signed GCS link) or
+        `status=failed` (ADR-205 D5 async export). Tenant-scoping mirrors the
+        list path (PLATFORM_OPERATOR may poll any franchisee's job).
+      tags: [Export]
+      responses:
+        "200":
+          description: "Export job handle"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExportJob"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/admin/transactions/stream:
+    get:
+      operationId: streamAdminTransactionEvents
+      summary: "Subscribe to a real-time SSE live tail of newly-projected rows"
+      description: |
+        Long-lived SSE connection. Each newly-projected or updated ledger row
+        matching the scope + kind filter is rendered as:
+
+        ```
+        event: transaction_upsert
+        data: {"item":{...TransactionLedgerItem...},"change_type":"upsert",
+               "observed_at":"…"}
+        \n\n
+        ```
+
+        Heartbeat comments (`:keepalive\n\n`) every 30s keep the connection
+        alive through proxies. Tenant-scoping rules mirror the list path;
+        AUDITOR may subscribe (read-only). `from`/`to` are ignored (live tail).
+      tags: [Stream]
+      parameters:
+        - $ref: "#/components/parameters/KindQuery"
+        - $ref: "#/components/parameters/ManagedTenantIdQuery"
+        - $ref: "#/components/parameters/LearnerGcidQuery"
+      responses:
+        "200":
+          description: "Open SSE connection"
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  SSE stream. Each `data:` line is a JSON-encoded
+                  TransactionEvent (see Stream tag description).
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/admin/transactions/franchisees:
+    get:
+      operationId: listAdminFranchisees
+      summary: "List the franchisee tenants a master may filter transactions by"
+      description: |
+        MASTER scope (PLATFORM_OPERATOR) only. Returns the franchisee tenants —
+        the children of the platform-root chora-master tenant — name-searchable
+        + offset-paginated, backing the O+/H+ franchisee multi-select filter. A
+        tenant admin (non-operator) receives 403. Reads the RLS-free tenants
+        registry (no cross-DB, no migration).
+      parameters:
+        - name: q
+          in: query
+          required: false
+          schema: { type: string }
+          description: "Case-insensitive name substring filter (empty = all)."
+        - name: page_size
+          in: query
+          required: false
+          schema: { type: integer, enum: [10, 20, 50, 100] }
+        - name: page_token
+          in: query
+          required: false
+          schema: { type: string }
+          description: "Opaque forward cursor from a prior response."
+      responses:
+        "200":
+          description: "One page of franchisees the master may filter by."
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [franchisees]
+                properties:
+                  franchisees:
+                    type: array
+                    items:
+                      type: object
+                      required: [tenant_id, name]
+                      properties:
+                        tenant_id: { type: string, format: uuid }
+                        name: { type: string }
+                  next_page_token:
+                    type: string
+                    description: "Empty when this is the last page."
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/admin/transactions/{ledger_id}:
+    parameters:
+      - $ref: "#/components/parameters/LedgerIdPath"
+    get:
+      operationId: getAdminTransactionDetail
+      summary: "Drill a mana-spend-daily row into its per-call detail (admin)"
+      description: |
+        Expands a single MANA_SPEND_DAILY rollup row into its per-call mana
+        debits at TENANT / MASTER scope. Master span-all honours the
+        franchisee narrowing; the parent row must be visible under the
+        caller's scope or 404 is returned.
+      tags: [Admin Transactions]
+      parameters:
+        - $ref: "#/components/parameters/PageTokenQuery"
+        - $ref: "#/components/parameters/DetailPageSizeQuery"
+        - $ref: "#/components/parameters/ManagedTenantIdQuery"
+      responses:
+        "200":
+          description: "Detail rows"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransactionDetailResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /healthz:
+    get:
+      operationId: healthCheck
+      summary: "Health check"
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: "Healthy"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        ChoraSession JWT minted by chora-gateway. Learner routes (`/me/...`)
+        require an authenticated learner. Admin routes (`/admin/...`) require
+        at least one of TENANT_ADMIN / OWNER / AUDITOR / PLATFORM_OPERATOR.
+        PLATFORM_OPERATOR unlocks MASTER scope (cross-franchisee span-all +
+        the franchisee selector). The role check is case-insensitive
+        (ADR-205 D6 / Phase-0 fix).
+
+  parameters:
+    LedgerIdPath:
+      name: ledger_id
+      in: path
+      required: true
+      description: "UUIDv7 of the transaction_ledger row to drill open."
+      schema:
+        type: string
+        format: uuid
+
+    PageTokenQuery:
+      name: page_token
+      in: query
+      required: false
+      description: |
+        Opaque keyset cursor from a prior `next_page_token`. Omit on the first
+        call. Cursors are opaque — clients must not parse them. Keyset only
+        (never OFFSET) per ADR-205 D5.
+      schema:
+        type: string
+
+    PageSizeQuery:
+      name: page_size
+      in: query
+      required: false
+      description: "Page size. Allowed: 10, 20, 50, 100. Default 20."
+      schema:
+        type: integer
+        enum: [10, 20, 50, 100]
+        default: 20
+
+    DetailPageSizeQuery:
+      name: page_size
+      in: query
+      required: false
+      description: "Detail page size. Allowed: 10, 20, 50, 100. Default 50."
+      schema:
+        type: integer
+        enum: [10, 20, 50, 100]
+        default: 50
+
+    KindQuery:
+      name: kind
+      in: query
+      required: false
+      description: "Restrict to a single transaction kind. Omit for all kinds."
+      schema:
+        $ref: "#/components/schemas/TransactionKind"
+
+    StatusQuery:
+      name: status
+      in: query
+      required: false
+      description: "Restrict to a single status. `all` (or omission) = any."
+      schema:
+        type: string
+        enum: [captured, refunded, failed, expired, posted, all]
+        default: all
+
+    FromQuery:
+      name: from
+      in: query
+      required: false
+      description: |
+        Inclusive RFC-3339 lower bound on `occurred_at`. Unset => the server
+        default bounded window (~90d, ADR-205 D5).
+      schema:
+        type: string
+        format: date-time
+
+    ToQuery:
+      name: to
+      in: query
+      required: false
+      description: "Exclusive RFC-3339 upper bound on `occurred_at`. Unset => now."
+      schema:
+        type: string
+        format: date-time
+
+    SortQuery:
+      name: sort
+      in: query
+      required: false
+      description: "Sort spec (keyset-compatible fields only)."
+      schema:
+        type: string
+        enum:
+          - "occurred_at:desc"
+          - "occurred_at:asc"
+          - "amount:desc"
+          - "amount:asc"
+        default: "occurred_at:desc"
+
+    ManagedTenantIdQuery:
+      name: managed_tenant_id
+      in: query
+      required: false
+      style: form
+      explode: true
+      description: |
+        PLATFORM_OPERATOR (MASTER) only. Narrows the cross-franchisee span-all
+        to a SET of franchisee tenants (OR semantics). Repeatable
+        (`?managed_tenant_id=<a>&managed_tenant_id=<b>`); a single
+        comma-joined value is also accepted. Each element must be a tenant UUID
+        (a malformed element is a 400). A single id narrows to one franchisee
+        (back-compat); 2+ spans-all + filters to the set. Silently ignored for
+        tenant-scoped callers (TENANT_ADMIN / OWNER / AUDITOR), who always see
+        only their own tenant.
+      schema:
+        type: array
+        items:
+          type: string
+          format: uuid
+
+    LearnerGcidQuery:
+      name: learner_gcid
+      in: query
+      required: false
+      style: form
+      explode: true
+      description: |
+        TENANT / MASTER only. Drills the view into a SET of learners' rows (OR
+        semantics — a member's purchases + mana). Repeatable
+        (`?learner_gcid=<a>&learner_gcid=<b>`); a single comma-joined value is
+        also accepted. Each element must be a learner GCID (UUID); a malformed
+        element is a 400. A single id is a 1-element set (back-compat). Ignored
+        at LEARNER scope.
+      schema:
+        type: array
+        items:
+          type: string
+          format: uuid
+
+    ExportFormatQuery:
+      name: format
+      in: query
+      required: true
+      description: "Export format."
+      schema:
+        type: string
+        enum: [csv, json]
+
+  responses:
+    ExportStream:
+      description: "Synchronous streaming export (small / filtered sets)"
+      headers:
+        Content-Disposition:
+          schema:
+            type: string
+          description: |
+            attachment; filename="transactions-export-{YYYYMMDD-HHMMSS}.{ext}"
+      content:
+        text/csv:
+          schema:
+            type: string
+            format: binary
+            description: "RFC-4180 CSV; header row matches TransactionLedgerItem keys."
+        application/x-ndjson:
+          schema:
+            type: string
+            format: binary
+            description: "Newline-delimited JSON; one TransactionLedgerItem per line."
+
+    ExportAccepted:
+      description: |
+        Async export accepted (result set exceeds the sync threshold). The
+        file is built off-line (→ GCS) and the signed download URL is
+        delivered on the ExportJob once `status=ready`.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ExportJob"
+
+    BadRequest:
+      description: "Bad request"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: "Missing or invalid bearer token"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: "Caller lacks the required role"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: "Resource not found"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  schemas:
+    TransactionKind:
+      type: string
+      description: |
+        Unified row kind. Mirrors the gRPC
+        `chora.services.tenancy.v1.TransactionKind` enum.
+          - purchase          — a Stripe-backed purchase (course / application
+                                / companion-egg / subscription / KYC / add-on).
+          - mana_topup        — a purchase whose effect is mana credit.
+          - mana_spend_daily  — a per-day rollup of mana SPEND; drill open via
+                                GET /{ledger_id} for the per-call breakdown.
+      enum:
+        - purchase
+        - mana_topup
+        - mana_spend_daily
+
+    TransactionStatus:
+      type: string
+      description: |
+        Normalised surface status across fiat purchases and mana movements.
+        `posted` is terminal for mana movements (no Stripe payment FSM).
+      enum:
+        - captured
+        - refunded
+        - failed
+        - expired
+        - posted
+
+    TransactionAmount:
+      type: object
+      description: |
+        A row carries EITHER a fiat amount (currency + amount_minor) OR a mana
+        amount (mana_units), never both — the unused leg is zero/empty.
+      required:
+        - amount_minor
+        - mana_units
+      properties:
+        currency:
+          type: string
+          nullable: true
+          description: "ISO-4217 3-letter currency code (lowercase). Null for mana-only rows."
+        amount_minor:
+          type: integer
+          format: int64
+          description: "Fiat amount in minor units (cents). 0 for mana-only rows."
+        mana_units:
+          type: integer
+          format: int64
+          description: "Signed mana units (+credit / -spend). 0 for fiat-only rows."
+
+    TransactionLedgerItem:
+      type: object
+      description: |
+        One unified timeline row. All rows carry `tenant_id` so the MASTER
+        view can conditionally render the franchisee column.
+      required:
+        - ledger_id
+        - occurred_at
+        - tenant_id
+        - kind
+        - source_domain
+        - source_ref_id
+        - label
+        - amount
+        - status
+        - has_detail
+      properties:
+        ledger_id:
+          type: string
+          format: uuid
+          description: "UUIDv7 of the projection row."
+        occurred_at:
+          type: string
+          format: date-time
+          description: "When the underlying financial event occurred (sort key)."
+        tenant_id:
+          type: string
+          format: uuid
+        learner_gcid:
+          type: string
+          format: uuid
+          nullable: true
+          description: "Buyer / spender GCID. Null for tenant-level rows with no learner."
+        kind:
+          $ref: "#/components/schemas/TransactionKind"
+        source_domain:
+          type: string
+          description: '"payments" | "identity" | "observability".'
+        source_ref_id:
+          type: string
+          description: |
+            Soft reference into the source domain (purchase_id, mana txn id, or
+            the day-key for a mana_spend_daily rollup). No cross-DB FK.
+        label:
+          type: string
+          description: "Human-readable label."
+        amount:
+          $ref: "#/components/schemas/TransactionAmount"
+        status:
+          $ref: "#/components/schemas/TransactionStatus"
+        has_detail:
+          type: boolean
+          description: "True when kind=mana_spend_daily and per-call detail rows exist."
+        metadata:
+          type: object
+          additionalProperties: true
+          description: "Free-form aggregate-specific projection (e.g. course_id, sku, plan_sku)."
+
+    TransactionDetailItem:
+      type: object
+      description: "One per-call mana-spend row under a mana_spend_daily parent."
+      required:
+        - detail_id
+        - ledger_id
+        - tenant_id
+        - occurred_at
+        - action_code
+        - mana_units
+      properties:
+        detail_id:
+          type: string
+          format: uuid
+        ledger_id:
+          type: string
+          format: uuid
+          description: "Parent mana_spend_daily ledger_id."
+        tenant_id:
+          type: string
+          format: uuid
+        learner_gcid:
+          type: string
+          format: uuid
+          nullable: true
+        occurred_at:
+          type: string
+          format: date-time
+        action_code:
+          type: string
+          description: 'AI action that spent the mana (e.g. "question_generation").'
+        mana_units:
+          type: integer
+          format: int64
+          description: "Mana spent by this call (positive magnitude)."
+        model:
+          type: string
+          nullable: true
+          description: 'Model the call resolved to (e.g. "gemini-2.5-flash").'
+        trace_id:
+          type: string
+          nullable: true
+          description: "W3C trace id for cross-referencing Cloud Trace."
+        metadata:
+          type: object
+          additionalProperties: true
+
+    ListTransactionsResponse:
+      type: object
+      required:
+        - items
+        - next_page_token
+        - has_more
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/TransactionLedgerItem"
+        next_page_token:
+          type: string
+          nullable: true
+          description: "Opaque cursor for the next page. Null on the final page."
+        has_more:
+          type: boolean
+
+    TransactionDetailResponse:
+      type: object
+      required:
+        - parent
+        - details
+        - next_page_token
+        - has_more
+      properties:
+        parent:
+          $ref: "#/components/schemas/TransactionLedgerItem"
+        details:
+          type: array
+          items:
+            $ref: "#/components/schemas/TransactionDetailItem"
+        next_page_token:
+          type: string
+          nullable: true
+        has_more:
+          type: boolean
+
+    TransactionSummary:
+      type: object
+      description: "Server-computed KPIs over the filtered window (summary-first panel)."
+      required:
+        - total_count
+        - amount_minor_by_currency
+        - total_mana_topped_up
+        - total_mana_spent
+        - count_by_kind
+        - count_by_status
+        - window_from
+        - window_to
+      properties:
+        total_count:
+          type: integer
+          format: int64
+          description: "Total ledger rows in the filtered window."
+        amount_minor_by_currency:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int64
+          description: |
+            Net fiat captured (captured minus refunded) in minor units, keyed
+            by ISO-4217 currency. Cross-currency is NOT summed (ADR-205 deferred).
+        total_mana_topped_up:
+          type: integer
+          format: int64
+        total_mana_spent:
+          type: integer
+          format: int64
+        count_by_kind:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int64
+          description: "Row counts keyed by TransactionKind value."
+        count_by_status:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int64
+          description: "Row counts keyed by TransactionStatus value."
+        window_from:
+          type: string
+          format: date-time
+          description: "Effective window lower bound after server defaults."
+        window_to:
+          type: string
+          format: date-time
+
+    ExportJob:
+      type: object
+      description: "Async export job handle (returned on 202)."
+      required:
+        - job_id
+        - status
+        - format
+        - created_at
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [pending, building, ready, failed]
+        format:
+          type: string
+          enum: [csv, json]
+        created_at:
+          type: string
+          format: date-time
+        download_url:
+          type: string
+          format: uri
+          nullable: true
+          description: "Signed GCS URL. Present only when status=ready."
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: "Signed-URL expiry. Present only when status=ready."
+
+    HealthResponse:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum: [ok]
+
+    Error:
+      type: object
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+          description: "Machine-readable error code (snake_case)."
+        message:
+          type: string
+          description: "Human-readable error message."
+        details:
+          type: object
+          additionalProperties: true
+          description: "Optional structured error context."

@@ -1,0 +1,81 @@
+asyncapi: "3.0.0"
+info:
+  title: "chora.delivery.project_group.submitted.v1"
+  version: "1.0.0"
+  description: |
+    Published when the group submits its deliverable. Drives instructor
+    notification + immutable submission record.
+    Companion to `proto/events/delivery/project_group.proto` message `ProjectGroupSubmitted`.
+  contact: { name: "Chora Platform Team" }
+  license: { name: "Proprietary" }
+
+defaultContentType: application/x-protobuf
+
+servers:
+  local: { host: "localhost:8085", protocol: googlepubsub, description: "Pub/Sub Emulator" }
+  production: { host: "pubsub.googleapis.com", protocol: googlepubsub, description: "Google Cloud Pub/Sub" }
+
+channels:
+  projectGroupSubmitted:
+    address: chora.delivery.project_group.submitted.v1
+    description: |
+      Carries ProjectGroupSubmitted Protobuf payload.
+
+      Downstream consumers:
+        - chora-notifications : grading task assignment
+        - chora-delivery (audit) : immutable submission record
+    messages:
+      projectGroupSubmitted:
+        $ref: "#/components/messages/ProjectGroupSubmitted"
+
+operations:
+  publishProjectGroupSubmitted:
+    action: send
+    channel: { $ref: "#/channels/projectGroupSubmitted" }
+    summary: "Publish ProjectGroupSubmitted"
+    messages: [ { $ref: "#/channels/projectGroupSubmitted/messages/projectGroupSubmitted" } ]
+  consumeProjectGroupSubmitted:
+    action: receive
+    channel: { $ref: "#/channels/projectGroupSubmitted" }
+    summary: "Consume ProjectGroupSubmitted"
+    messages: [ { $ref: "#/channels/projectGroupSubmitted/messages/projectGroupSubmitted" } ]
+
+components:
+  messages:
+    ProjectGroupSubmitted:
+      name: ProjectGroupSubmitted
+      title: "Project Group Submitted"
+      summary: "A project group submitted its deliverable."
+      contentType: application/x-protobuf
+      payload:
+        type: object
+        description: "Mirrors chora.delivery.v1.ProjectGroupSubmitted."
+        properties:
+          envelope: { $ref: "#/components/schemas/EventEnvelope" }
+          group_id: { type: string, format: uuid }
+          course_id: { type: string, format: uuid }
+          member_gcids:
+            type: array
+            items: { type: string }
+          submission_url: { type: string, format: uri }
+          submitted_by_gcid: { type: string }
+          submitted_at: { type: string, format: date-time }
+  schemas:
+    EventEnvelope:
+      type: object
+      description: "Mirrors chora.common.v1.EventEnvelope."
+      required: [event_id, idempotency_key, tenant_id, occurred_at, published_at, traceparent, source_project, source_service, schema_version]
+      properties:
+        event_id: { type: string, format: uuid }
+        idempotency_key: { type: string }
+        tenant_id: { type: string }
+        gcid: { type: string }
+        occurred_at: { type: string, format: date-time }
+        published_at: { type: string, format: date-time }
+        traceparent: { type: string }
+        tracestate: { type: string }
+        source_project: { type: string }
+        source_service: { type: string }
+        schema_version: { type: integer }
+        correlation_id: { type: string }
+        causation_id: { type: string }

@@ -1,0 +1,116 @@
+// =============================================================================
+// Chora Model Broker — Classifier Service (gRPC)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 2 D6 +
+//   Tier 5 D19 (Gemma 4 LoRA classifier head, data flywheel target)
+//   + .claude/skills/model-broker-3-services/SKILL.md
+//   + memory project_chora_data_plane.md, project_chora_governance_ai.md
+//
+// One of THREE Model Broker services (Router + Gateway + Classifier).
+// LOCKED Tier 2 D6: NEVER fold these three into a single binary (god-object reject).
+//
+// Classifier responsibility: small-model fuzzy classification used by the
+// Router when deterministic rules are ambiguous (~10% of traffic). NOT the
+// default routing path.
+//
+// LLM-as-router is explicitly REJECTED (Tier 2 D6). Fuzzy routing uses a
+// fine-tuned Gemma 4 classifier HEAD, not a generative LLM. The Classifier
+// owns its own ML lifecycle (training, registry, A/B, drift detection).
+//
+// Hot-path: Autopilot Pod + GPU, min replicas >= 1 (low-latency calls from Router).
+// Cold-path: Cloud Run + GPU (batch / drift / async).
+// p50 latency target: 5-15ms on hot-path. mTLS via Cloud Service Mesh.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.services.model_broker_classifier.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/model_broker_classifier/v1;model_broker_classifierv1";
+
+import "google/protobuf/timestamp.proto";
+
+// -----------------------------------------------------------------------------
+// Service
+// -----------------------------------------------------------------------------
+
+service ModelBrokerClassifier {
+  // Classify input_text against candidate_labels. Returns the chosen label
+  // + confidence score + runner-up labels for explainability.
+  // Idempotent — retries are safe (and cheap, classifier results are cacheable).
+  rpc Classify(ClassifyRequest) returns (ClassifyResponse);
+}
+
+// -----------------------------------------------------------------------------
+// Classifier kind — what the classifier is being asked to decide
+// -----------------------------------------------------------------------------
+
+enum ClassifierKind {
+  CLASSIFIER_KIND_UNSPECIFIED = 0;
+
+  // Intent recognition (e.g., "creative", "factual", "extraction") — used by
+  // Router when task_kind alone doesn't disambiguate model selection.
+  CLASSIFIER_KIND_INTENT = 1;
+
+  // Topic classification (subject area / curriculum tag) — used by content
+  // creation pipelines + discovery KnowledgeGraph routing.
+  CLASSIFIER_KIND_TOPIC = 2;
+
+  // Pre-filter for guardrails — quick triage before invoking heavier
+  // Cloud Model Armor / DLP scans.
+  CLASSIFIER_KIND_GUARDRAIL_PRE_FILTER = 3;
+
+  // Agent routing — when a crew dispatcher needs to pick which specialist
+  // agent to summon for an ambiguous input.
+  CLASSIFIER_KIND_AGENT_ROUTING = 4;
+
+  // Cost tier — predicting whether this request needs Pro-tier model or can
+  // be served by Flash / Gemma. Feeds cost-optimisation gate.
+  CLASSIFIER_KIND_COST_TIER = 5;
+}
+
+// -----------------------------------------------------------------------------
+// Classify RPC
+// -----------------------------------------------------------------------------
+
+message ClassifyRequest {
+  // Tenant scope (per-tenant LoRA bias may apply, rare).
+  string tenant_id = 1;
+
+  // What kind of decision the Router/caller is asking for.
+  ClassifierKind classifier_kind = 2;
+
+  // Input text to classify.
+  string input_text = 3;
+
+  // Candidate labels — the closed set the classifier must choose from.
+  // Empty list = open-set classification (depends on classifier_kind).
+  repeated string candidate_labels = 4;
+}
+
+message ClassifyResponse {
+  // The label chosen (one of candidate_labels, or open-set output).
+  string chosen_label = 1;
+
+  // Confidence score in [0.0, 1.0].
+  float confidence = 2;
+
+  // Runner-up labels with their confidences (sorted descending).
+  // Useful for the Router to see if the decision was close (low margin =
+  // potential drift signal for the Classifier ML team).
+  repeated LabelConfidence runner_up_labels = 3;
+
+  // Classifier model ID used for this inference (e.g.,
+  // "gemma-4-classifier-head-v3.2"). Surfaced for observability + drift
+  // attribution; mirrors ModelRegistryEntry.
+  string classifier_model_id = 4;
+
+  // Inference timestamp (classifier clock).
+  google.protobuf.Timestamp inferred_at = 5;
+}
+
+message LabelConfidence {
+  string label = 1;
+  float confidence = 2;
+}

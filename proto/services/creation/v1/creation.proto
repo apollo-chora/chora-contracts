@@ -1,0 +1,651 @@
+// =============================================================================
+// Chora Content Creation Service (gRPC)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 1 D1
+//   + .claude/rules/ddd-enforcement.md (Aggregate Invariants)
+//   + chora-contracts/openapi/creation-admin.yaml
+//   + chora-contracts/proto/events/creation/atom.proto + revision.proto
+//
+// Inter-service gRPC contract for the Content Creation core domain
+// (chora_creation database, Team 1 / Content). Surface: A+ Creator mode.
+//
+// LearningAtom is the PRIMARY AGGREGATE ROOT of the entire Chora platform —
+// collections (LearningPath in Consumption, Course in Delivery) QUERY atoms;
+// they NEVER own them (per ddd-enforcement aggregate-invariant #1).
+//
+// AtomRevision is APPEND-ONLY (aggregate-invariant #4) — never UPDATE or
+// DELETE content in place. AppendRevision adds a new revision row.
+//
+// AI-assisted authoring: GenerateAtomsViaAI calls the Model Broker
+// Router -> Gateway through the AI Kernel; output is validated by the
+// 6-agent content gate (Validator -> Classifier -> Web Researcher ->
+// Q&A Generator -> Evaluator -> Reporter) before atoms are persisted.
+//
+// KnowledgeGraph queries are exposed as gRPC for service-to-service
+// traversal (Consumption Discovery mode). Learner-facing reads use
+// GraphQL (chora-contracts/graphql/creation.graphql).
+//
+// Cross-DB queries FORBIDDEN — references to other domains use UUIDs
+// without FK constraints (aggregate-invariant #3).
+//
+// Deployed in chora-content (Team 1 pool). mTLS via Cloud Service Mesh;
+// SPIFFE identity in mesh; W3C trace context in gRPC metadata.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.services.creation.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/creation/v1;creationv1";
+
+import "google/protobuf/timestamp.proto";
+
+// -----------------------------------------------------------------------------
+// Service
+// -----------------------------------------------------------------------------
+
+service Creation {
+  // Create a new LearningAtom in DRAFT status. Idempotent on
+  // (author_gcid, title, locale) within a 5-second window. Side-effect:
+  // emits chora.creation.atom.created.v1.
+  rpc CreateAtom(CreateAtomRequest) returns (CreateAtomResponse);
+
+  // AI-assisted bulk atom generation. Calls the AI Kernel content-gate
+  // crew (6 agents) to draft, validate, and persist atoms from a topic
+  // prompt. Long-running — caller may poll generation_id via the
+  // ai_kernel observability surface. Idempotent on generation_id.
+  rpc GenerateAtomsViaAI(GenerateAtomsViaAIRequest) returns (GenerateAtomsViaAIResponse);
+
+  // Resolve a single atom by ID. Returns the latest published revision
+  // by default; pin to a specific revision via revision_id.
+  rpc GetAtom(GetAtomRequest) returns (GetAtomResponse);
+
+  // Cheap existence check for an atom_id. Returns exists=true iff a row
+  // in chora_creation.atoms with the given (atom_id, tenant_id) is
+  // not soft-deleted; populates current_revision_id when published.
+  //
+  // Purpose: anti-fabrication guard for Companion Companion's cite_atom
+  // tool (and any future agentic surface that needs to validate an
+  // LLM-emitted atom_id before letting it reach the learner). Distinct
+  // from GetAtom because the caller does NOT need the full revision
+  // content payload — only the existence + revision pointer.
+  //
+  // Server-side complexity: O(1) primary key lookup with RLS filter.
+  // Idempotent and side-effect free. Designed to be safely called
+  // from the BeforeModelCallback / AfterToolCallback boundary.
+  rpc ValidateAtomID(ValidateAtomIDRequest) returns (ValidateAtomIDResponse);
+
+  // List atoms attached to a Course (cross-domain query — atoms remain
+  // owned by Creation; the Course aggregate carries atom_ids only).
+  // Returns atom projections — NOT a JOIN against chora_delivery.
+  rpc ListAtomsByCourse(ListAtomsByCourseRequest) returns (ListAtomsByCourseResponse);
+
+  // Append a new AtomRevision (immutable, append-only). Caller MUST set
+  // an idempotency_key to dedup retries. Side-effect: emits
+  // chora.creation.atom_revision.appended.v1.
+  rpc AppendRevision(AppendRevisionRequest) returns (AppendRevisionResponse);
+
+  // Query the KnowledgeGraph around a topic node. Returns edges (parent /
+  // child / prerequisite / related) up to depth N. Used by Consumption's
+  // Discovery mode to traverse curiosity-driven paths.
+  rpc QueryKnowledgeGraph(QueryKnowledgeGraphRequest) returns (QueryKnowledgeGraphResponse);
+
+  // Snapshot the canonical payload of a Question for an authoring-time
+  // one-shot lookup by chora-delivery at TestSet.Publish() time. Returns the
+  // discriminated payload (MCQ options + correct_options + scoring; OR OE
+  // model_answer + rubric) as a JSON string suitable for storage in
+  // chora_delivery.test_set_questions.payload_snapshot.
+  //
+  // Per ddd-enforcement #3 cross-DB queries are FORBIDDEN — this gRPC is
+  // the sanctioned mechanism for chora-delivery to obtain the canonical
+  // grading payload without joining against chora_creation.questions.
+  // Authoring-time one-shot (NOT a per-request runtime call); deterministic
+  // (no LLM); idempotent + side-effect-free.
+  //
+  // Per `feedback_agentic_pubsub_only` (durable rule 2026-05-16): the
+  // Pub/Sub-only mandate applies to LLM-bearing operations. Snapshot lookups
+  // are deterministic + authoring-time and intentionally use sync gRPC for
+  // atomicity with the DRAFT → PUBLISHED state transition.
+  rpc SnapshotQuestionByID(SnapshotQuestionByIDRequest) returns (SnapshotQuestionByIDResponse);
+
+  // Mint fresh short-lived V4 signed GET URLs for durable atom-media
+  // objects referenced by gs:// URI (OT#4 — W8 durable image re-home).
+  //
+  // chora-delivery calls this at learner read-time to resolve the durable
+  // gs:// image refs frozen in test_set_questions.payload_snapshot into
+  // renderable signed URLs. The durable atom-media bucket has
+  // public_access_prevention=enforced (no CDN) and an <img> cannot carry
+  // the app bearer JWT, so the URL is minted fresh on each authed read (the
+  // frozen snapshot ref never goes stale). Creation owns the bucket + the
+  // signing identity, so signing lives here — NOT replicated in delivery.
+  //
+  // Batched (one RPC per assessment load). Per-URI errors are returned in
+  // the response entry (a single stale ref does not fail the batch). The
+  // signer refuses any bucket other than the configured atom-media bucket.
+  // Deterministic + side-effect-free; sync gRPC per the SnapshotQuestionByID
+  // precedent (not LLM-bearing, so outside feedback_agentic_pubsub_only).
+  rpc MintAtomMediaDownloadURL(MintAtomMediaDownloadURLRequest) returns (MintAtomMediaDownloadURLResponse);
+}
+
+// -----------------------------------------------------------------------------
+// Shared enums (mirrors proto/events/creation/atom.proto enums)
+// -----------------------------------------------------------------------------
+
+// AtomType drives the content schema and answer-validation strategy.
+// Aligned with chora.creation.v1.AtomType in events.
+// CHO-2178 — 11-13 mirror chora.creation.v1.AtomType. The alignment promised
+// one line above is load-bearing, not decorative: one concept carried by two
+// wire enums that drift is precisely the defect that left `outline` atoms
+// unpublishable.
+enum AtomType {
+  ATOM_TYPE_UNSPECIFIED = 0;
+  ATOM_TYPE_MULTIPLE_CHOICE = 1;  // domain label: "mcq"
+  ATOM_TYPE_FILL_BLANK = 2;
+  ATOM_TYPE_TRUE_FALSE = 3;
+  ATOM_TYPE_SHORT_ANSWER = 4;
+  ATOM_TYPE_MATCHING = 5;
+  ATOM_TYPE_ORDERING = 6;
+  ATOM_TYPE_CODE = 7;
+  ATOM_TYPE_ESSAY = 8;
+  ATOM_TYPE_MULTIMEDIA = 9;
+  ATOM_TYPE_SIMULATION = 10;
+  ATOM_TYPE_OUTLINE = 11;
+  ATOM_TYPE_FLASHCARD = 12;
+  ATOM_TYPE_VIDEO = 13;
+}
+
+// AtomStatus — lifecycle state of the LearningAtom. Aligned with events.
+enum AtomStatus {
+  ATOM_STATUS_UNSPECIFIED = 0;
+  ATOM_STATUS_DRAFT = 1;
+  ATOM_STATUS_PUBLISHED = 2;
+  ATOM_STATUS_ARCHIVED = 3;
+}
+
+// EdgeKind — KnowledgeGraph edge semantic. Used by Consumption's Discovery
+// mode for curiosity-driven traversal.
+enum EdgeKind {
+  EDGE_KIND_UNSPECIFIED = 0;
+  EDGE_KIND_PARENT = 1;        // node is a parent topic
+  EDGE_KIND_CHILD = 2;         // node is a child / sub-topic
+  EDGE_KIND_PREREQUISITE = 3;  // node should be mastered before traversing
+  EDGE_KIND_RELATED = 4;       // lateral semantic relation
+}
+
+// -----------------------------------------------------------------------------
+// Common message types
+// -----------------------------------------------------------------------------
+
+// Atom — projection of LearningAtom + current published revision content.
+// Mirrors REST LearningAtom schema + revision content.
+message Atom {
+  // UUIDv7. Stable across revisions.
+  string atom_id = 1;
+
+  // Tenant scope (multi-tenant isolation; RLS-checked at repository).
+  string tenant_id = 2;
+
+  // Type of the learning atom.
+  AtomType atom_type = 3;
+
+  // Lifecycle status.
+  AtomStatus status = 4;
+
+  // Display title (1..256 chars, plain text).
+  string title = 5;
+
+  // GCID of the original author.
+  string author_gcid = 6;
+
+  // KnowledgeGraph topic-node IDs this atom is associated with.
+  repeated string topic_node_ids = 7;
+
+  // Difficulty level (1=easiest .. 5=hardest). 0 = unscored.
+  int32 difficulty = 8;
+
+  // BCP-47 locale tag (e.g., "en", "en-SG", "zh-Hans-SG").
+  string locale = 9;
+
+  // ID of the AtomRevision considered current at the time of read.
+  // Empty when status=DRAFT and no revisions have been appended yet.
+  string current_revision_id = 10;
+
+  // Monotonic revision number of current_revision_id. Zero when no
+  // revisions exist.
+  int32 current_revision_number = 11;
+
+  // JSON-stringified content payload of the current revision (schema
+  // varies by atom_type — opaque to the gRPC layer).
+  string current_revision_content_json = 12;
+
+  // When the atom was created.
+  google.protobuf.Timestamp created_at = 13;
+
+  // When the atom was last updated (metadata or revision append).
+  google.protobuf.Timestamp updated_at = 14;
+}
+
+// AtomRevision — immutable revision record (append-only).
+message AtomRevision {
+  // UUIDv7 of the revision.
+  string revision_id = 1;
+
+  // Atom the revision belongs to.
+  string atom_id = 2;
+
+  // Monotonic revision number (starts at 1, ++1 per append).
+  int32 revision_number = 3;
+
+  // GCID of the author who appended the revision.
+  string author_gcid = 4;
+
+  // JSON-stringified content payload (schema varies by atom_type).
+  string content_json = 5;
+
+  // Optional changelog note (max 512 chars) describing the revision intent.
+  string change_note = 6;
+
+  // When the revision was appended (immutable).
+  google.protobuf.Timestamp appended_at = 7;
+}
+
+// KnowledgeGraphEdge — edge in the KnowledgeGraph between two topic nodes.
+message KnowledgeGraphEdge {
+  // UUIDv7 of the source topic node.
+  string source_topic_node_id = 1;
+
+  // UUIDv7 of the target topic node.
+  string target_topic_node_id = 2;
+
+  // Edge semantic.
+  EdgeKind edge_kind = 3;
+
+  // Display label for the source node (denormalised).
+  string source_label = 4;
+
+  // Display label for the target node (denormalised).
+  string target_label = 5;
+
+  // Edge weight in [0.0, 1.0] (used by Discovery mode to rank traversals).
+  // 0 = unweighted.
+  float weight = 6;
+}
+
+// -----------------------------------------------------------------------------
+// CreateAtom RPC
+// -----------------------------------------------------------------------------
+
+message CreateAtomRequest {
+  // Tenant scope. Required.
+  string tenant_id = 1;
+
+  // GCID of the author. Required.
+  string author_gcid = 2;
+
+  // Type of the atom. Required.
+  AtomType atom_type = 3;
+
+  // Display title. Required, 1..256 chars.
+  string title = 4;
+
+  // KnowledgeGraph topic-node IDs to attach. Empty = unclassified.
+  repeated string topic_node_ids = 5;
+
+  // Difficulty level (1=easiest .. 5=hardest). 0 = unscored.
+  int32 difficulty = 6;
+
+  // BCP-47 locale tag. Required (e.g., "en-SG").
+  string locale = 7;
+
+  // Optional initial revision content (JSON-stringified). When set, the
+  // service appends revision #1 in the same transaction as the atom row.
+  string initial_revision_content_json = 8;
+
+  // Idempotency key (UUIDv7). The service dedups CreateAtom retries
+  // on this key for a 5-second window.
+  string idempotency_key = 9;
+}
+
+message CreateAtomResponse {
+  // The newly-created atom (status = DRAFT).
+  Atom atom = 1;
+}
+
+// -----------------------------------------------------------------------------
+// GenerateAtomsViaAI RPC
+// -----------------------------------------------------------------------------
+
+message GenerateAtomsViaAIRequest {
+  // Tenant scope. Required.
+  string tenant_id = 1;
+
+  // GCID of the author requesting AI assistance. Required.
+  string author_gcid = 2;
+
+  // Free-form prompt describing the desired atoms (e.g., "Generate 10
+  // multiple-choice atoms on Agile Estimation Techniques, difficulty 3").
+  string prompt = 3;
+
+  // Type of atoms to generate. Required.
+  AtomType atom_type = 4;
+
+  // Difficulty (1..5). Required.
+  int32 difficulty = 5;
+
+  // Number of atoms to generate (1..20).
+  int32 count = 6;
+
+  // KnowledgeGraph topic-node IDs to attach to all generated atoms.
+  repeated string topic_node_ids = 7;
+
+  // BCP-47 locale tag (e.g., "en-SG").
+  string locale = 8;
+
+  // UUIDv7 — idempotency key for this generation request. The service
+  // dedups via this key. Same key = same generation_id returned.
+  string generation_id = 9;
+}
+
+message GenerateAtomsViaAIResponse {
+  // Echo of generation_id.
+  string generation_id = 1;
+
+  // Atoms persisted by the AI gate (DRAFT status until author publishes).
+  // May be empty if the guardrail screening blocked the request.
+  repeated Atom atoms = 2;
+
+  // Aggregated screening verdict from the 6-agent content gate.
+  // One of: "allowed" / "redacted" / "blocked".
+  string screening_verdict = 3;
+
+  // Free-text explanation when verdict != "allowed".
+  string screening_explanation = 4;
+
+  // Total tokens consumed by the generation. Useful for cost telemetry.
+  int64 tokens_consumed_total = 5;
+
+  // Cost in USD micros (1e-6).
+  int64 cost_micros_total = 6;
+}
+
+// -----------------------------------------------------------------------------
+// GetAtom RPC
+// -----------------------------------------------------------------------------
+
+message GetAtomRequest {
+  // Atom UUIDv7. Required.
+  string atom_id = 1;
+
+  // Tenant scope (multi-tenant isolation). Required.
+  string tenant_id = 2;
+
+  // Optional revision_id to pin against. When empty, returns the current
+  // published revision (or DRAFT-with-no-revisions when never published).
+  optional string revision_id = 3;
+}
+
+message GetAtomResponse {
+  // Resolved atom. NOT_FOUND raised when soft-deleted or unknown.
+  Atom atom = 1;
+}
+
+// -----------------------------------------------------------------------------
+// ValidateAtomID RPC
+// -----------------------------------------------------------------------------
+
+message ValidateAtomIDRequest {
+  // Atom UUIDv7 to validate. Required.
+  string atom_id = 1;
+
+  // Tenant scope (multi-tenant isolation; RLS-enforced). Required.
+  string tenant_id = 2;
+}
+
+message ValidateAtomIDResponse {
+  // True when the atom_id exists for the tenant AND is not soft-deleted.
+  // False otherwise (unknown ID, wrong tenant, soft-deleted). The server
+  // does NOT distinguish those three cases on the wire — a single
+  // false signal prevents oracle leaks for cross-tenant probing.
+  bool exists = 1;
+
+  // When exists=true AND the atom has at least one published revision,
+  // the current revision_id. Empty otherwise. Used by the citation
+  // surface (e.g., Companion tool tip) to anchor the cite to a stable
+  // revision rather than the mutable atom pointer.
+  string current_revision_id = 2;
+}
+
+// -----------------------------------------------------------------------------
+// ListAtomsByCourse RPC
+// -----------------------------------------------------------------------------
+
+message ListAtomsByCourseRequest {
+  // Course UUIDv7 (cross-domain reference into chora_delivery — UUID only,
+  // no FK). Required.
+  string course_id = 1;
+
+  // Tenant scope. Required.
+  string tenant_id = 2;
+
+  // Pagination cursor (opaque). Empty for first page.
+  string cursor = 3;
+
+  // Page size (1..100, default 20).
+  int32 limit = 4;
+}
+
+message ListAtomsByCourseResponse {
+  // Atoms in this page (in course-defined order).
+  repeated Atom atoms = 1;
+
+  // Cursor for the next page; empty when no more pages.
+  string next_cursor = 2;
+}
+
+// -----------------------------------------------------------------------------
+// AppendRevision RPC
+// -----------------------------------------------------------------------------
+
+message AppendRevisionRequest {
+  // Atom the revision is appended to. Required.
+  string atom_id = 1;
+
+  // Tenant scope. Required.
+  string tenant_id = 2;
+
+  // GCID of the author appending the revision. Required.
+  string author_gcid = 3;
+
+  // JSON-stringified content payload. Required, schema varies by atom_type.
+  string content_json = 4;
+
+  // Optional change note (max 512 chars).
+  string change_note = 5;
+
+  // UUIDv7 — idempotency key. The service dedups retries on this key.
+  // REQUIRED (append-only invariant + retry safety).
+  string idempotency_key = 6;
+}
+
+message AppendRevisionResponse {
+  // The newly-appended revision (immutable).
+  AtomRevision revision = 1;
+
+  // The atom's new current_revision_number after the append.
+  int32 new_current_revision_number = 2;
+}
+
+// -----------------------------------------------------------------------------
+// QueryKnowledgeGraph RPC
+// -----------------------------------------------------------------------------
+
+message QueryKnowledgeGraphRequest {
+  // Topic node to start traversal from. Required.
+  string topic_node_id = 1;
+
+  // Tenant scope. Required.
+  string tenant_id = 2;
+
+  // Maximum traversal depth from the source node (1..5; default 2).
+  int32 depth = 3;
+
+  // Filter: include only edges of these kinds. Empty = all kinds.
+  repeated EdgeKind edge_kinds = 4;
+
+  // Maximum edges returned (cap at 1000 per call to bound response size).
+  int32 limit = 5;
+}
+
+message QueryKnowledgeGraphResponse {
+  // Edges around the source node, up to depth + limit. Order: BFS from source.
+  repeated KnowledgeGraphEdge edges = 1;
+
+  // True if the response was truncated by limit (caller should narrow
+  // the query or paginate via subsequent depth-bounded queries).
+  bool truncated = 2;
+}
+
+// -----------------------------------------------------------------------------
+// SnapshotQuestionByID RPC
+// -----------------------------------------------------------------------------
+//
+// Used by chora-delivery at TestSet.Publish() time to capture the canonical
+// MCQ + OE payload from chora_creation.questions into
+// chora_delivery.test_set_questions.payload_snapshot. The payload JSON is
+// opaque on the wire — the producer (chora-creation) controls the shape per
+// chora-contracts/openapi/creation-questions.yaml MCQPayload / OEPayload.
+
+message SnapshotQuestionByIDRequest {
+  // UUIDv7 of the Question to snapshot. Required.
+  string question_id = 1;
+
+  // Tenant scope (multi-tenant isolation; RLS-enforced). Required.
+  string tenant_id = 2;
+
+  // GCID of the caller on whose behalf the snapshot is taken (ADR-229 WS-2 /
+  // spec-001 T035 chokepoint 2). Additive: when present, chora-creation
+  // enforces the reuse-consent predicate (owner OR tenant-visible OR
+  // granted-or-orphaned) before serving the snapshot and writes the
+  // AtomUsageGrant audit record idempotently on success (ADR-229 D2).
+  // Empty = legacy caller during the migration window (predicate skipped);
+  // chora-delivery MUST populate it from the publish actor.
+  string caller_gcid = 3;
+}
+
+message SnapshotQuestionByIDResponse {
+  // Echo of question_id.
+  string question_id = 1;
+
+  // Question type — drives the payload shape interpretation downstream.
+  // For Phyllis scope only MCQ + OE are supported; reserved_* return
+  // an UNIMPLEMENTED gRPC status.
+  string question_type = 2;
+
+  // The canonical Question prompt / stem (plain text, max 8000 chars per
+  // OpenAPI). Cached at chora-delivery for rendering at runtime.
+  string prompt = 3;
+
+  // JSON-stringified MCQPayload (per chora-contracts/openapi/creation-questions.yaml
+  // MCQPayload schema) when question_type == "mcq". Empty otherwise.
+  //
+  // Shape (canonical):
+  //   {
+  //     "options": [
+  //       {"option_id":"<uuid>","label":"A","text":"...","is_correct":true,"explainer":"..."},
+  //       ...
+  //     ],
+  //     "scoring": {"mode":"single_correct"|"multi_correct"|"all_or_nothing",
+  //                 "partial_credit_policy":"none"|"proportional"},
+  //     "shuffle_options": bool
+  //   }
+  string mcq_payload_json = 4;
+
+  // JSON-stringified OEPayload (per OpenAPI) when question_type == "oe".
+  // Empty otherwise.
+  string oe_payload_json = 5;
+
+  // Authoring-side timestamp captured at the time the chora_creation row was
+  // last persisted (questions.updated_at). chora-delivery stores this in
+  // test_set_questions.snapshot_at for audit traceability.
+  google.protobuf.Timestamp snapshot_at = 6;
+}
+
+// -----------------------------------------------------------------------------
+// MintAtomMediaDownloadURL RPC (OT#4 — W8 durable image re-home)
+// -----------------------------------------------------------------------------
+
+message MintAtomMediaDownloadURLRequest {
+  // Tenant scope (RLS / audit). Required.
+  string tenant_id = 1;
+
+  // Durable gs:// URIs to sign. Each MUST reference the configured
+  // atom-media bucket; foreign buckets are rejected per-URI.
+  repeated string gs_uris = 2;
+}
+
+message MintAtomMediaDownloadURLResponse {
+  // One entry per input gs_uri, in request order.
+  repeated MintedMediaURL urls = 1;
+}
+
+message MintedMediaURL {
+  // Echo of the input gs:// URI.
+  string gs_uri = 1;
+
+  // Fresh short-lived V4 signed GET URL. Empty when minting failed for
+  // this URI (see error).
+  string signed_url = 2;
+
+  // Per-URI error message (empty on success). A single bad ref does NOT
+  // fail the whole batch — the caller passes through the original/blank.
+  string error = 3;
+
+  // Signed-URL expiry (UTC). Zero when minting failed.
+  google.protobuf.Timestamp expires_at = 4;
+}
+
+// -----------------------------------------------------------------------------
+// ContentRetrieval — semantic atom search over chora_creation.atom_embeddings
+// (pgvector). Epic-1b W4: chora-consumption resolves drill atoms for a
+// learner's Growth Edge by passing the edge's precomputed 768-d concept
+// embedding; creation answers with the nearest PUBLISHED atoms. Per
+// ddd-enforcement #3 cross-DB queries are FORBIDDEN — this gRPC is the
+// sanctioned mechanism (mirrors SnapshotQuestionByID: deterministic, no LLM,
+// idempotent + side-effect-free, so sync gRPC is permitted under
+// `feedback_agentic_pubsub_only`).
+// -----------------------------------------------------------------------------
+
+service ContentRetrieval {
+  // Nearest published atoms by cosine distance against atom_embeddings.
+  // The caller supplies the query embedding (text-embedding-004, 768-d) —
+  // creation never embeds the query itself.
+  rpc SearchEmbeddings(SearchEmbeddingsRequest) returns (SearchEmbeddingsResponse);
+}
+
+message SearchEmbeddingsRequest {
+  // Tenant scope (RLS enforced server-side; required).
+  string tenant_id = 1;
+
+  // 768-d query embedding (text-embedding-004). Required.
+  repeated float query_embedding = 2;
+
+  // Max matches to return. <=0 defaults to 5; capped at 20.
+  int32 limit = 3;
+}
+
+message SearchEmbeddingsResponse {
+  // Nearest matches, ascending cosine distance (best first).
+  repeated EmbeddingMatch matches = 1;
+}
+
+message EmbeddingMatch {
+  // The matched LearningAtom.
+  string atom_id = 1;
+
+  // Cosine distance in [0, 2] (pgvector `<=>`; lower = closer).
+  float cosine_distance = 2;
+
+  // Atom title (display hint — saves the caller a follow-up GetAtom).
+  string title = 3;
+}

@@ -1,0 +1,89 @@
+# =============================================================================
+# Chora Gamification subschema — federated GraphQL
+# =============================================================================
+#
+# Owns Wallet / XP / Coin / Reputation / Badge / Leaderboard for learner
+# reads. Spans Content Consumption (XP earnings) + Content Sharing
+# (Three-Currency Economy + Leaderboards) — surfaced as a single subschema
+# at the BFF gateway.
+#
+# Owning team   : Team 1 (Content)
+# Surface       : A+ (wallet/xp readouts) + C+ (leaderboards)
+# =============================================================================
+
+directive @key(fields: String!, resolvable: Boolean = true) repeatable on OBJECT | INTERFACE
+
+scalar UUID
+scalar DateTime
+
+enum LeaderboardScope {
+  TENANT
+  COURSE
+  COHORT
+  GLOBAL
+}
+
+enum BadgeRarity {
+  COMMON
+  RARE
+  EPIC
+  LEGENDARY
+}
+
+# -----------------------------------------------------------------------------
+# Query root — gamification subschema
+# -----------------------------------------------------------------------------
+
+type Query {
+  """Current learner's three-currency Wallet (XP / Coins / Reputation)."""
+  myWallet: Wallet!
+
+  """Earned + unearned badges for the current learner."""
+  myBadges: [Badge!]!
+
+  """Resolve a Leaderboard for a scope (current season unless seasonId pinned)."""
+  leaderboard(scope: LeaderboardScope!, scopeId: ID, seasonId: ID): Leaderboard!
+}
+
+# -----------------------------------------------------------------------------
+# Domain types
+# -----------------------------------------------------------------------------
+
+"""
+The Three-Currency Economy wallet. Per skill `domain-content-sharing`:
+XP (proficiency), Coins (engagement-tradable), Reputation (social capital).
+"""
+type Wallet @key(fields: "gcid") {
+  gcid: ID!
+  xp: Int!
+  coins: Int!
+  reputation: Int!
+  lastUpdatedAt: DateTime!
+}
+
+type Badge {
+  id: ID!
+  code: String!
+  name: String!
+  description: String
+  rarity: BadgeRarity!
+  earnedAt: DateTime
+  iconUri: String!
+}
+
+type Leaderboard {
+  id: ID!
+  scope: LeaderboardScope!
+  scopeId: UUID
+  seasonId: UUID!
+  topEntries: [LeaderboardEntry!]!
+  myEntry: LeaderboardEntry
+  updatedAt: DateTime!
+}
+
+type LeaderboardEntry {
+  gcid: UUID!
+  displayName: String!
+  score: Int!
+  rank: Int!
+}

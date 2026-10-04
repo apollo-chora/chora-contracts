@@ -1,0 +1,79 @@
+asyncapi: "3.0.0"
+info:
+  title: "Chora Content Creation — revision.published.v1"
+  version: "1.0.0"
+  description: |
+    Published when a new AtomRevision transitions DRAFT -> PUBLISHED.
+    AtomRevision is APPEND-ONLY (ddd-enforcement aggregate invariant #4) —
+    content (atom-type-specific JSONB) and validation rules are IMMUTABLE
+    once published.
+
+    The payload carries (atom_id, revision_id, revision_number, content_hash)
+    so downstream consumers can verify integrity without re-reading the full
+    content payload across the cross-DB boundary (FORBIDDEN).
+
+    Owning team    : Team 1 (Content)
+    Owning domain  : Content Creation (chora_creation database)
+
+    Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 2 D8
+    + .claude/rules/ddd-enforcement.md (HARD RULE: cross-DB queries forbidden)
+  contact:
+    name: "Chora Platform Team — Content Track"
+  license:
+    name: "Proprietary"
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  production:
+    host: "pubsub.googleapis.com"
+    protocol: googlepubsub
+    description: "Google Cloud Pub/Sub (production)"
+  emulator:
+    host: "localhost:8085"
+    protocol: googlepubsub
+    description: "Cloud Pub/Sub Emulator (local dev)"
+
+channels:
+  revisionPublished:
+    address: "chora.creation.revision.published.v1"
+    description: |
+      Pub/Sub topic for AtomRevisionPublished events. High-fanout — most
+      domains subscribe to invalidate caches and re-screen content.
+    messages:
+      revisionPublished:
+        $ref: "#/components/messages/AtomRevisionPublished"
+
+operations:
+  publishRevisionPublished:
+    action: send
+    channel:
+      $ref: "#/channels/revisionPublished"
+    summary: "Publish a new AtomRevision (append-only) event"
+    description: |
+      Producer: chora-creation service.
+      Consumers:
+        - chora-consumption  -> invalidate cached atom render, refresh KG
+        - chora-sharing      -> re-screen for PvP duel suitability
+        - chora-delivery     -> notify Course/Booking owners of revision
+        - AI Kernel          -> 6-agent content gate (Validator -> Classifier
+                                -> Web Researcher -> Q&A Generator ->
+                                Evaluator -> Reporter)
+        - Meilisearch        -> re-index publish tier
+        - audit log
+    messages:
+      - $ref: "#/channels/revisionPublished/messages/revisionPublished"
+
+components:
+  messages:
+    AtomRevisionPublished:
+      name: "AtomRevisionPublished"
+      title: "Atom Revision Published"
+      summary: "A new immutable AtomRevision has been appended and published"
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf;version=3
+      payload:
+        schemaFormat: "application/vnd.google.protobuf;version=3"
+        schema:
+          protoFile: "proto/events/creation/revision.proto"
+          messageName: "chora.creation.v1.AtomRevisionPublished"

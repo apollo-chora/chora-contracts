@@ -1,0 +1,61 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Governance — ImdaDimensionAttested
+  version: 1.0.0
+  description: |
+    Published when an authorised attester signs off on an IMDA dimension
+    for a tenant + period. Drives the O+ IMDA dashboard's status indicators.
+
+    - Domain: Governance (`chora_governance` DB)
+    - Topic: `chora.governance.imda.dimension_attested.v1`
+    - Source proto: `proto/events/governance/imda.proto`
+       message `chora.governance.v1.ImdaDimensionAttested`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  imdaDimensionAttested:
+    address: chora.governance.imda.dimension_attested.v1
+    messages:
+      imdaDimensionAttested:
+        $ref: '#/components/messages/ImdaDimensionAttested'
+
+operations:
+  publishImdaDimensionAttested:
+    action: send
+    channel:
+      $ref: '#/channels/imdaDimensionAttested'
+    messages:
+      - $ref: '#/channels/imdaDimensionAttested/messages/imdaDimensionAttested'
+
+  consumeImdaDimensionAttested:
+    action: receive
+    channel:
+      $ref: '#/channels/imdaDimensionAttested'
+    description: |
+      Consumers: O+ IMDA dashboard, Audit log, Notifications
+      (attestation confirmation).
+    messages:
+      - $ref: '#/channels/imdaDimensionAttested/messages/imdaDimensionAttested'
+
+components:
+  messages:
+    ImdaDimensionAttested:
+      name: ImdaDimensionAttested
+      title: IMDA Dimension Attested
+      summary: An IMDA dimension has been attested for a period
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/governance/imda.proto#/chora.governance.v1.ImdaDimensionAttested'

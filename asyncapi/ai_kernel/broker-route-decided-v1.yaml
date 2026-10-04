@@ -1,0 +1,57 @@
+asyncapi: 3.0.0
+info:
+  title: Chora AI Kernel — BrokerRouteDecided
+  version: 1.0.0
+  description: |
+    Published by chora-model-broker-gateway when a /broker/route call
+    completes. Carries the merged Classifier + Router decision.
+
+    - Domain: AI Kernel (`chora_ai_kernel` DB)
+    - Topic: `chora.ai_kernel.broker_route.decided.v1`
+    - Producer: chora-model-broker-gateway
+    - Consumers: Observability (TokenUsageLedger pre-aggregation),
+      Governance (audit), O+ runtime trace surface.
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  brokerRouteDecided:
+    address: chora.ai_kernel.broker_route.decided.v1
+    messages:
+      brokerRouteDecided:
+        $ref: '#/components/messages/BrokerRouteDecided'
+
+operations:
+  publishBrokerRouteDecided:
+    action: send
+    channel:
+      $ref: '#/channels/brokerRouteDecided'
+    messages:
+      - $ref: '#/channels/brokerRouteDecided/messages/brokerRouteDecided'
+
+  consumeBrokerRouteDecided:
+    action: receive
+    channel:
+      $ref: '#/channels/brokerRouteDecided'
+    description: |
+      Consumers: Observability (LedgerStream),
+      Governance (audit), O+ surface.
+    messages:
+      - $ref: '#/channels/brokerRouteDecided/messages/brokerRouteDecided'
+
+components:
+  messages:
+    BrokerRouteDecided:
+      name: BrokerRouteDecided
+      title: Broker Route Decided
+      summary: A broker /route call completed (Classifier + Router merged)
+      contentType: application/vnd.google.protobuf

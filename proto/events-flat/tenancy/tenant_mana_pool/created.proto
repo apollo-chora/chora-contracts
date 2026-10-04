@@ -1,0 +1,59 @@
+// =============================================================================
+// GENERATED — DO NOT EDIT.
+// Source : events/tenancy/tenant_mana_pool.proto message TenantManaPoolCreated
+// Tool   : chora-contracts/internal/protoflatten
+// Why    : GCP Pub/Sub Schema Registry rejects (a) schemas with `import`
+//          statements and (b) schemas with more than one top-level message.
+//          This flat copy contains exactly ONE top-level message;
+//          EventEnvelope + Timestamp + transitive deps are nested inside.
+// Path C : see chora-contracts/CHANGELOG.md and m10-data-plane main.tf.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.tenancy.v1;
+
+message TenantManaPoolCreated {
+  // Inlined chora.common.v1.EventEnvelope (nested for self-contained schema).
+  message Envelope {
+    string event_id = 1;
+    string idempotency_key = 2;
+    string tenant_id = 3;
+    string gcid = 4;
+    Timestamp occurred_at = 5;
+    Timestamp published_at = 6;
+    string traceparent = 7;
+    string tracestate = 8;
+    string source_project = 9;
+    string source_service = 10;
+    int32 schema_version = 11;
+    string correlation_id = 12;
+    string causation_id = 13;
+    string chora_imda_dimension = 14;
+    string imda_lifecycle_stage = 15;
+  }
+
+  // Inlined google.protobuf.Timestamp (nested; wire-compatible).
+  message Timestamp {
+    int64 seconds = 1;
+    int32 nanos = 2;
+  }
+
+  // Inlined enum dep: AllocationPolicy
+  enum AllocationPolicy {
+    ALLOCATION_POLICY_UNSPECIFIED = 0;
+    ALLOCATION_POLICY_MANUAL = 1;
+    ALLOCATION_POLICY_ON_ENROLLMENT = 2;
+    ALLOCATION_POLICY_EQUAL_SPLIT = 3;
+    ALLOCATION_POLICY_TIER_BASED = 4;
+  }
+
+  Envelope envelope = 1;
+  string pool_id = 2;
+  string tenant_id = 3;
+  int64 initial_balance_units = 4;
+  int64 monthly_topup_units = 5;
+  AllocationPolicy auto_allocation_policy = 6;
+  string created_by_gcid = 7;
+  Timestamp created_at = 8;
+}

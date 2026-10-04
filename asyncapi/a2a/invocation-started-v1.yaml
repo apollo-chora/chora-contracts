@@ -1,0 +1,63 @@
+asyncapi: "3.0.0"
+info:
+  title: "Chora Agent-to-Agent — invocation.started.v1"
+  version: "1.0.0"
+  description: |
+    Published immediately after the A2A Gateway accepts a well-formed
+    invocation request, BEFORE the owning agent runs. Trace context in
+    envelope.traceparent ties the entire invocation lifecycle.
+
+    Owning team   : Team 3 (Platform)
+    Owning domain : Agent-to-Agent (chora_a2a database)
+    Reference     : ADR-132 §5, §8
+  contact:
+    name: "Chora Platform Team — Platform Track"
+  license:
+    name: "Proprietary"
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  production:
+    host: "pubsub.googleapis.com"
+    protocol: googlepubsub
+    description: "Google Cloud Pub/Sub (production)"
+  emulator:
+    host: "localhost:8085"
+    protocol: googlepubsub
+    description: "Cloud Pub/Sub Emulator (local dev)"
+
+channels:
+  invocationStarted:
+    address: "chora.a2a.invocation.started.v1"
+    messages:
+      invocationStarted:
+        $ref: "#/components/messages/InvocationStarted"
+
+operations:
+  publishInvocationStarted:
+    action: send
+    channel:
+      $ref: "#/channels/invocationStarted"
+    summary: "Publish an A2A invocation start event"
+    description: |
+      Producer: chora-a2a-gateway.
+      Consumers: O+ live invocation feed,
+                 A2A billing meter (request count),
+                 Audit log (request_payload_hash for replay).
+    messages:
+      - $ref: "#/channels/invocationStarted/messages/invocationStarted"
+
+components:
+  messages:
+    InvocationStarted:
+      name: "InvocationStarted"
+      title: "A2A Invocation Started"
+      summary: "An A2A invocation has been accepted at the gateway"
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf;version=3
+      payload:
+        schemaFormat: "application/vnd.google.protobuf;version=3"
+        schema:
+          protoFile: "proto/events/a2a/invocation.proto"
+          messageName: "chora.a2a.v1.InvocationStarted"

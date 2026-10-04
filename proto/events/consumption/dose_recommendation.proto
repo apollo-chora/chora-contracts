@@ -1,0 +1,74 @@
+// =============================================================================
+// Chora Content Consumption: daily dose recommendation on the bus
+// =============================================================================
+//
+// ADR-254 D1/D4 (R1): the dose recommender is no longer dialled over HTTP
+// (RECOMMENDER_ENGINE_GKE_ENDPOINT is deleted). Consumption publishes a request
+// on the ADR-244 trigger or when a learner opens the dose, renders the dose as
+// "preparing" (or pre-composed), and the kennel's generic single-agent
+// workflow parks on the recommend lane and answers with the recommended atoms.
+//
+// Wire (ADR-254 D4): JSON on the bus, schema-less; envelope in attributes and
+// field 1; envelope.idempotency_key = dose_request_id.
+//
+//   Request : chora.consumption.dose_recommendation.requested.v1
+//   Result  : chora.consumption.dose_recommendation.completed.v1
+//             (consumption pulls chora-consumption.dose-recommendation-completed)
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.consumption.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/consumption/v1;consumptionv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// Topic: chora.consumption.dose_recommendation.requested.v1
+message DoseRecommendationRequested {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 minted by consumption; the idempotency key of this recommendation.
+  string dose_request_id = 2;
+
+  // The goal the dose is composed for (ADR-242 goal-first dose); empty when the
+  // dose is goal-less.
+  string goal_id = 3;
+
+  // What asked for it: "learner_open" | "atom_refresh" (ADR-244 D5 standing
+  // trigger) | "scheduled".
+  string trigger = 4;
+
+  // The learner's Companion instance, when one is hatched (for the greeting
+  // fragment the dose carries).
+  string companion_id = 5;
+
+  // Opaque JSON the recommender needs (candidate atom ids, recent performance,
+  // retention signals) as consumption composes it today.
+  string context_json = 6;
+
+  google.protobuf.Timestamp requested_at = 7;
+}
+
+// Topic: chora.consumption.dose_recommendation.completed.v1
+message DoseRecommendationCompleted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string dose_request_id = 2;
+  string goal_id = 3;
+
+  // "OK" | "FAILED" | "REJECTED".
+  string status = 4;
+  string error_code = 5;
+  string workflow_id = 6;
+  string generated_by_model_id = 7;
+
+  // Ordered recommended atoms (UUIDv7).
+  repeated string recommended_atom_ids = 8;
+
+  // The recommender's one-paragraph rationale (learner-facing copy).
+  string rationale = 9;
+
+  google.protobuf.Timestamp completed_at = 10;
+}

@@ -1,0 +1,61 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Tenancy — InvoicePaid
+  version: 1.0.0
+  description: |
+    Published when an invoice is paid in full. Drives SubscriptionRenewed
+    for recurring invoices.
+
+    - Domain: Tenancy + Billing (`chora_tenancy` DB)
+    - Topic: `chora.tenancy.billing.invoice_paid.v1`
+    - Source proto: `proto/events/tenancy/billing.proto`
+       message `chora.tenancy.v1.InvoicePaid`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  invoicePaid:
+    address: chora.tenancy.billing.invoice_paid.v1
+    messages:
+      invoicePaid:
+        $ref: '#/components/messages/InvoicePaid'
+
+operations:
+  publishInvoicePaid:
+    action: send
+    channel:
+      $ref: '#/channels/invoicePaid'
+    messages:
+      - $ref: '#/channels/invoicePaid/messages/invoicePaid'
+
+  consumeInvoicePaid:
+    action: receive
+    channel:
+      $ref: '#/channels/invoicePaid'
+    description: |
+      Consumers: Tenancy (drive SubscriptionRenewed),
+      Notifications (receipt), Observability (cash collected KPI).
+    messages:
+      - $ref: '#/channels/invoicePaid/messages/invoicePaid'
+
+components:
+  messages:
+    InvoicePaid:
+      name: InvoicePaid
+      title: Invoice Paid
+      summary: A tenant invoice has been paid in full
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/tenancy/billing.proto#/chora.tenancy.v1.InvoicePaid'

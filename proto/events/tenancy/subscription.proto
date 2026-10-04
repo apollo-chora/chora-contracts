@@ -1,0 +1,111 @@
+// =============================================================================
+// chora.tenancy.v1 — Subscription events
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 1 D1
+// + .claude/skills/monetization-patterns/SKILL.md
+//
+// Owning domain : Tenancy + Billing (chora_tenancy database)
+// Owning team   : Team 3 (Platform)
+// Topic prefix  : chora.tenancy.subscription.*
+//
+// Subscription bundles one or more AddOnPlans into a recurring billing
+// arrangement (monthly / annual). Subscription is the unit Stripe sees;
+// AddonActivated drives feature flags.
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.tenancy.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/tenancy/v1;tenancyv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// SubscriptionCreated — chora.tenancy.subscription.created.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a new Subscription is established (free trial, paid plan,
+// or contract enterprise plan). Triggers AddonActivated events for each
+// included addon_plan_id.
+message SubscriptionCreated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — Subscription aggregate root identifier.
+  string subscription_id = 2;
+
+  string tenant_id = 3;
+
+  // Add-on plans included in this subscription. At least one required.
+  repeated string plan_ids = 4;
+
+  // When this subscription is effective.
+  google.protobuf.Timestamp starts_at = 5;
+
+  // Next renewal date (driven by billing cycle).
+  google.protobuf.Timestamp renews_at = 6;
+
+  // Stripe subscription ID (provider correlation).
+  string stripe_subscription_id = 7;
+
+  // GCID of the OWNER / admin who established the subscription.
+  string created_by_gcid = 8;
+
+  google.protobuf.Timestamp created_at = 9;
+}
+
+// -----------------------------------------------------------------------------
+// SubscriptionRenewed — chora.tenancy.subscription.renewed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a subscription successfully renews (Stripe webhook
+// invoice.paid → InvoicePaid → SubscriptionRenewed). Carries the new
+// renews_at boundary.
+message SubscriptionRenewed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string subscription_id = 2;
+  string tenant_id = 3;
+  repeated string plan_ids = 4;
+
+  // The boundary that was just crossed.
+  google.protobuf.Timestamp prior_renews_at = 5;
+  // The new boundary set by this renewal.
+  google.protobuf.Timestamp renews_at = 6;
+
+  string stripe_subscription_id = 7;
+
+  google.protobuf.Timestamp renewed_at = 8;
+}
+
+// -----------------------------------------------------------------------------
+// SubscriptionCancelled — chora.tenancy.subscription.cancelled.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a subscription is cancelled (tenant request, non-payment
+// after dunning, contract end). Triggers AddonDeactivated events at the
+// effective_at boundary.
+message SubscriptionCancelled {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string subscription_id = 2;
+  string tenant_id = 3;
+  repeated string plan_ids = 4;
+
+  // Free-text cancellation reason (e.g., "tenant_request", "non_payment",
+  // "contract_end", "platform_initiated").
+  string cancellation_reason = 5;
+
+  // GCID of the actor cancelling (admin / system).
+  string cancelled_by_gcid = 6;
+
+  // When the cancellation takes effect — may differ from cancelled_at if
+  // billing-cycle-end semantics apply.
+  google.protobuf.Timestamp effective_at = 7;
+
+  google.protobuf.Timestamp cancelled_at = 8;
+}

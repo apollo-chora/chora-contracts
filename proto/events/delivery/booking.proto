@@ -1,0 +1,151 @@
+// =============================================================================
+// chora.delivery.v1 — Booking domain events (class enrolment lifecycle)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 2 D7+D8
+// + .claude/rules/ddd-enforcement.md
+// + .claude/skills/domain-content-delivery/SKILL.md.
+//
+// Owning domain  : Content Delivery (chora_delivery database)
+// Owning team    : Team 2 (Delivery)
+// Topic prefix   : chora.delivery.booking.*
+//
+// Booking represents a learner's enrolment / seat reservation against a
+// Course. It is a child aggregate (separate root) within Delivery — the
+// Course is queried by booking, never owned by it.
+//
+// Cross-domain references (no FK):
+//   - learner_gcid : Identity (UUID, no FK)
+//
+// Per ADR-129/130/131 collapse mandate, this proto absorbs what was previously
+// `chora.training.enrollment.*` lifecycle events.
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.delivery.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/delivery/v1;deliveryv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// BookingStatus — lifecycle of a booking aggregate.
+// Transitions: PENDING -> CONFIRMED -> COMPLETED
+//              PENDING -> CANCELLED
+//              CONFIRMED -> NO_SHOW (post-class auto-marked)
+enum BookingStatus {
+  BOOKING_STATUS_UNSPECIFIED = 0;
+  BOOKING_STATUS_PENDING = 1;
+  BOOKING_STATUS_CONFIRMED = 2;
+  BOOKING_STATUS_CANCELLED = 3;
+  BOOKING_STATUS_NO_SHOW = 4;
+  BOOKING_STATUS_COMPLETED = 5;
+}
+
+// -----------------------------------------------------------------------------
+// BookingCreated — chora.delivery.booking.created.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a learner reserves a seat (PENDING). For paid courses,
+// payment confirmation in Tenancy will trigger a follow-up confirmation.
+message BookingCreated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 identifier of the newly created Booking.
+  string booking_id = 2;
+
+  // UUID of the Course (within chora_delivery — same DB, FK permitted).
+  string course_id = 3;
+
+  // GCID of the learner who booked. Cross-domain — no FK.
+  string learner_gcid = 4;
+
+  // Always BOOKING_STATUS_PENDING for *.created events.
+  BookingStatus status = 5;
+
+  // Optional pre-assigned seat number (in-person or proctored). 0 = unassigned.
+  int32 seat_number = 6;
+
+  google.protobuf.Timestamp created_at = 7;
+}
+
+// -----------------------------------------------------------------------------
+// BookingConfirmed — chora.delivery.booking.confirmed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a booking transitions PENDING -> CONFIRMED. This is the
+// canonical "your seat is held" event — drives confirmation emails,
+// calendar invites, and entitles the learner to the related path.
+message BookingConfirmed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string booking_id = 2;
+
+  string course_id = 3;
+
+  string learner_gcid = 4;
+
+  // Always BOOKING_STATUS_CONFIRMED for this event.
+  BookingStatus status = 5;
+
+  int32 seat_number = 6;
+
+  google.protobuf.Timestamp confirmed_at = 7;
+}
+
+// -----------------------------------------------------------------------------
+// BookingCancelled — chora.delivery.booking.cancelled.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a learner or admin cancels a booking. Triggers refund
+// flow in Tenancy + roster removal + notifications.
+message BookingCancelled {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string booking_id = 2;
+
+  string course_id = 3;
+
+  string learner_gcid = 4;
+
+  // Always BOOKING_STATUS_CANCELLED for this event.
+  BookingStatus status = 5;
+
+  int32 seat_number = 6;
+
+  // GCID of the actor who cancelled — may equal learner_gcid (self-cancel)
+  // or be an admin GCID (admin-cancel).
+  string cancelled_by_gcid = 7;
+
+  // Optional human-readable reason (free text; max 512 chars).
+  string reason = 8;
+
+  google.protobuf.Timestamp cancelled_at = 9;
+}
+
+// -----------------------------------------------------------------------------
+// BookingNoShow — chora.delivery.booking.no_show.v1
+// -----------------------------------------------------------------------------
+//
+// Published after class start when an enrolled learner failed to attend.
+// Auto-emitted by the attendance reconciliation job. Triggers downstream
+// follow-up: makeup-eligibility check, instructor notification.
+message BookingNoShow {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string booking_id = 2;
+
+  string course_id = 3;
+
+  string learner_gcid = 4;
+
+  // Always BOOKING_STATUS_NO_SHOW for this event.
+  BookingStatus status = 5;
+
+  int32 seat_number = 6;
+
+  google.protobuf.Timestamp marked_at = 7;
+}

@@ -1,0 +1,313 @@
+// =============================================================================
+// Chora Identity Service (gRPC)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 1 D1
+//   + .claude/rules/ddd-enforcement.md (Account Closure federated saga)
+//   + chora-contracts/openapi/identity.yaml
+//   + chora-contracts/openapi/identity-admin.yaml
+//   + memory project_chora_topology.md
+//
+// Inter-service gRPC contract for the Identity supporting domain
+// (chora_identity database, Team 3 / Platform). REST surfaces in
+// chora-contracts/openapi/identity*.yaml are the user-facing equivalents;
+// gRPC is for internal service-to-service sync calls only (mTLS via
+// Cloud Service Mesh per CLAUDE.md §4 protocol strategy).
+//
+// Aggregates exposed:
+//   - GlobalChoraID (GCID)        — opaque UUIDv7, cross-tenant portable
+//   - PerCourseRoleContext        — projection of TenantMembership + role
+//   - AccountLifecycle (saga)     — federated closure saga state
+//
+// Per Comic Ch4 P8 invariant ("One Identity to Rule Them All"): a single
+// GCID carries DIFFERENT roles per course. ResolveRoleByCourse returns the
+// role context within a specific course; agents (AGID) cannot hold
+// TenantMembership (ddd-enforcement aggregate-invariant #10).
+//
+// Closure saga RPCs (InitiateClosure / AdvanceClosure) are the synchronous
+// control-plane entrypoints — actual per-domain pseudonymisation runs
+// asynchronously via Pub/Sub events fanned out by the AI-Kernel-owned
+// ClosureOrchestrator (see proto/services/closure_orchestrator.proto).
+//
+// Deployed in chora-489812 team-platform pool. mTLS via Cloud Service Mesh;
+// SPIFFE identity in mesh; W3C trace context in gRPC metadata.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.services.identity.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/identity/v1;identityv1";
+
+import "google/protobuf/timestamp.proto";
+
+// -----------------------------------------------------------------------------
+// Service
+// -----------------------------------------------------------------------------
+
+service Identity {
+  // Resolve the authenticated user's profile by GCID. Returns the global
+  // account metadata (email, display name, registered auth methods, linked
+  // IdPs). Mirrors REST GET /me. Idempotent; safe to retry.
+  rpc GetMe(GetMeRequest) returns (GetMeResponse);
+
+  // List all per-course role contexts the GCID currently holds. One row per
+  // (gcid, course_id) where role != NONE. Useful for downstream services
+  // that need to enumerate the caller's authorisation surface without going
+  // back to chora_identity per course.
+  rpc GetMeRoles(GetMeRolesRequest) returns (GetMeRolesResponse);
+
+  // Resolve the role + permissions the GCID holds on a specific course.
+  // Mirrors REST GET /me/roles?course_id=X. Returns role=NONE +
+  // permissions=[] when no assignment exists.
+  rpc ResolveRoleByCourse(ResolveRoleByCourseRequest) returns (ResolveRoleByCourseResponse);
+
+  // Initiate the federated account closure saga for a GCID. Idempotent on
+  // (gcid) — repeated calls return the existing saga state. Synchronously
+  // creates the saga row in chora_identity; pseudonymisation runs async via
+  // Pub/Sub. Pseudonymise + crypto-shred — NEVER hard-delete.
+  rpc InitiateClosure(InitiateClosureRequest) returns (InitiateClosureResponse);
+
+  // Advance an existing closure saga to its next state. Used by the AI
+  // Kernel ClosureOrchestrator after each per-domain ack converges, and
+  // by admin override paths. Idempotent on (saga_id, target_state).
+  rpc AdvanceClosure(AdvanceClosureRequest) returns (AdvanceClosureResponse);
+}
+
+// -----------------------------------------------------------------------------
+// Shared enums
+// -----------------------------------------------------------------------------
+
+// Per-course role assignment. Aligned with CourseRoleContext.role enum in
+// chora-contracts/openapi/identity.yaml. NONE = no assignment exists.
+enum CourseRole {
+  COURSE_ROLE_UNSPECIFIED = 0;
+  COURSE_ROLE_NONE = 1;
+  COURSE_ROLE_LEARNER = 2;
+  COURSE_ROLE_INSTRUCTOR = 3;
+  COURSE_ROLE_TENANT_ADMIN = 4;
+  COURSE_ROLE_SUPER_ADMIN = 5;
+  COURSE_ROLE_AUDITOR = 6;
+}
+
+// Auth methods the user has registered. Aligned with MeResponse.auth_methods
+// enum in chora-contracts/openapi/identity.yaml.
+enum AuthMethod {
+  AUTH_METHOD_UNSPECIFIED = 0;
+  AUTH_METHOD_PASSWORD = 1;
+  AUTH_METHOD_GOOGLE_OIDC = 2;
+  AUTH_METHOD_WEBAUTHN = 3;
+  AUTH_METHOD_SAML = 4;
+  AUTH_METHOD_SINGPASS = 5;
+}
+
+// Identity providers federated to a GCID. Aligned with MeResponse.linked_idps
+// enum in chora-contracts/openapi/identity.yaml.
+enum IdentityProvider {
+  IDENTITY_PROVIDER_UNSPECIFIED = 0;
+  IDENTITY_PROVIDER_GOOGLE = 1;
+  IDENTITY_PROVIDER_MICROSOFT = 2;
+  IDENTITY_PROVIDER_SINGPASS = 3;
+  IDENTITY_PROVIDER_WEBAUTHN = 4;
+  IDENTITY_PROVIDER_SAML = 5;
+}
+
+// Federated closure saga lifecycle states. Mirrors the AccountState enum in
+// proto/events/identity/account.proto and ClosureOrchestrator's
+// LifecycleState (deliberate duplicate per cross-service no-import rule).
+enum ClosureSagaLifecycleState {
+  CLOSURE_SAGA_LIFECYCLE_STATE_UNSPECIFIED = 0;
+  CLOSURE_SAGA_LIFECYCLE_STATE_ACTIVE = 1;
+  CLOSURE_SAGA_LIFECYCLE_STATE_CLOSING = 2;          // grace period
+  CLOSURE_SAGA_LIFECYCLE_STATE_SUSPENDED = 3;        // grace ended; reversible until pseudonymised
+  CLOSURE_SAGA_LIFECYCLE_STATE_PSEUDONYMIZED = 4;    // PII tokenised across all domains
+  CLOSURE_SAGA_LIFECYCLE_STATE_COLD_ARCHIVED = 5;    // moved to GCS Coldline
+  CLOSURE_SAGA_LIFECYCLE_STATE_CRYPTO_SHREDDED = 6;  // DEK deleted; data unrecoverable
+}
+
+// -----------------------------------------------------------------------------
+// Common message types
+// -----------------------------------------------------------------------------
+
+// Me — the authenticated user's profile. Mirrors REST schema MeResponse.
+message Me {
+  // Opaque cross-tenant-portable UUIDv7.
+  string gcid = 1;
+
+  // Primary email address.
+  string email = 2;
+
+  // Display name (1..128 chars).
+  string display_name = 3;
+
+  // When the GCID was created.
+  google.protobuf.Timestamp created_at = 4;
+
+  // Auth methods the user has registered (one or more).
+  repeated AuthMethod auth_methods = 5;
+
+  // Identity providers federated to this GCID.
+  repeated IdentityProvider linked_idps = 6;
+}
+
+// RoleContext — per-course role + permissions. Mirrors REST CourseRoleContext.
+message RoleContext {
+  // GCID of the user whose role is being resolved.
+  string gcid = 1;
+
+  // Course UUIDv7 the role context applies to.
+  string course_id = 2;
+
+  // Tenant that owns the course; empty when role=NONE.
+  string tenant_id = 3;
+
+  // Role assignment (NONE when no membership exists).
+  CourseRole role = 4;
+
+  // Permissions granted by the role. Hardcoded per role for MVP; dynamic
+  // policy lands at M12+. Examples: "read", "submit", "author", "grade",
+  // "publish", "moderate", "administer", "audit".
+  repeated string permissions = 5;
+}
+
+// ClosureSagaState — federated closure saga state snapshot.
+message ClosureSagaState {
+  // UUIDv7. Stable identifier for this saga.
+  string saga_id = 1;
+
+  // GCID being closed.
+  string gcid = 2;
+
+  // Current state of the saga.
+  ClosureSagaLifecycleState current_state = 3;
+
+  // When the saga was started.
+  google.protobuf.Timestamp started_at = 4;
+
+  // When the grace period expires (saga transitions CLOSING -> SUSPENDED
+  // at this time). Zero when not in CLOSING.
+  google.protobuf.Timestamp grace_expires_at = 5;
+
+  // Estimated completion of the full lifecycle (CRYPTO_SHREDDED).
+  google.protobuf.Timestamp eta_complete = 6;
+
+  // Per-domain async-completion of the current step. Keys are domain
+  // names matching the 11-domain set ("creation", ..., "ai_kernel").
+  map<string, bool> per_domain_completion_map = 7;
+
+  // CMEK DEK identifier — included primarily for the CRYPTO_SHREDDED
+  // transition. Empty when DEK still active.
+  string dek_id = 8;
+
+  // Free-text reason from the originating InitiateClosure call.
+  string reason = 9;
+}
+
+// -----------------------------------------------------------------------------
+// GetMe RPC
+// -----------------------------------------------------------------------------
+
+message GetMeRequest {
+  // GCID of the user whose profile is requested. Required.
+  string gcid = 1;
+}
+
+message GetMeResponse {
+  // The authenticated user's profile.
+  Me me = 1;
+}
+
+// -----------------------------------------------------------------------------
+// GetMeRoles RPC
+// -----------------------------------------------------------------------------
+
+message GetMeRolesRequest {
+  // GCID of the user whose role context list is requested. Required.
+  string gcid = 1;
+}
+
+message GetMeRolesResponse {
+  // All per-course role contexts where role != NONE. May be empty when the
+  // GCID holds no memberships.
+  repeated RoleContext roles = 1;
+}
+
+// -----------------------------------------------------------------------------
+// ResolveRoleByCourse RPC
+// -----------------------------------------------------------------------------
+
+message ResolveRoleByCourseRequest {
+  // GCID of the user. Required.
+  string gcid = 1;
+
+  // Course UUIDv7 to resolve the role against. Required.
+  string course_id = 2;
+}
+
+message ResolveRoleByCourseResponse {
+  // Resolved role context. role=NONE + empty permissions when no assignment.
+  RoleContext role_context = 1;
+}
+
+// -----------------------------------------------------------------------------
+// InitiateClosure RPC
+// -----------------------------------------------------------------------------
+
+message InitiateClosureRequest {
+  // GCID of the user being closed. Required.
+  string gcid = 1;
+
+  // GCID of the actor requesting closure (admin / self / regulator). Required
+  // for audit trail. Use the same GCID as the subject for self-initiated.
+  string requested_by_gcid = 2;
+
+  // Grace period before SUSPENDED in days. Default 30 if zero.
+  int32 grace_period_days = 3;
+
+  // Reason text for the audit log (e.g., "user-initiated", "GDPR-Art-17",
+  // "regulatory-compliance", "fraud").
+  string reason = 4;
+
+  // Optional override of terminal state. When unset, saga proceeds to
+  // CRYPTO_SHREDDED. Allowed terminal values are PSEUDONYMIZED,
+  // COLD_ARCHIVED, CRYPTO_SHREDDED.
+  optional ClosureSagaLifecycleState target_terminal_state = 5;
+}
+
+message InitiateClosureResponse {
+  // Snapshot of the newly-created (or pre-existing, on idempotent re-call)
+  // saga.
+  ClosureSagaState saga_state = 1;
+}
+
+// -----------------------------------------------------------------------------
+// AdvanceClosure RPC
+// -----------------------------------------------------------------------------
+
+message AdvanceClosureRequest {
+  // Saga to advance. Required.
+  string saga_id = 1;
+
+  // Target state — must be reachable from the saga's current state per the
+  // lifecycle invariants in account.proto. Reverse transitions are rejected.
+  ClosureSagaLifecycleState target_state = 2;
+
+  // GCID of the actor advancing the saga (admin override OR the AI-Kernel
+  // ClosureOrchestrator's AGID). Required for audit.
+  string actor_gcid = 3;
+
+  // Free-text reason. Examples:
+  //   "saga_step_pseudonymize_complete"
+  //   "admin_grace_skip"
+  //   "crypto_shred_executed"
+  string reason = 4;
+}
+
+message AdvanceClosureResponse {
+  // Updated saga snapshot.
+  ClosureSagaState saga_state = 1;
+
+  // True if the requested transition was applied; false if the request was
+  // a no-op (saga already at or beyond target_state — idempotent re-call).
+  bool transitioned = 2;
+}

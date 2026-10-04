@@ -1,0 +1,63 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Observability — KpiMetricRecorded
+  version: 1.0.0
+  description: |
+    Business-level KPI metric sample (DAU/MAU, completion rates, MRR,
+    guardrail block rate). Distinct from Cloud Monitoring's infra-level
+    metrics (CPU, memory) which flow direct to Cloud Monitoring without
+    Pub/Sub.
+
+    - Domain: Observability (`chora_observability` DB)
+    - Topic: `chora.observability.metric.kpi_recorded.v1`
+    - Source proto: `proto/events/observability/metric.proto`
+       message `chora.observability.v1.KpiMetricRecorded`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  metricKpiRecorded:
+    address: chora.observability.metric.kpi_recorded.v1
+    messages:
+      metricKpiRecorded:
+        $ref: '#/components/messages/KpiMetricRecorded'
+
+operations:
+  publishMetricKpiRecorded:
+    action: send
+    channel:
+      $ref: '#/channels/metricKpiRecorded'
+    messages:
+      - $ref: '#/channels/metricKpiRecorded/messages/metricKpiRecorded'
+
+  consumeMetricKpiRecorded:
+    action: receive
+    channel:
+      $ref: '#/channels/metricKpiRecorded'
+    description: |
+      Consumers: BigQuery (KPI warehouse), Looker Studio dashboards,
+      O+ KPI panels, anomaly detection pipelines.
+    messages:
+      - $ref: '#/channels/metricKpiRecorded/messages/metricKpiRecorded'
+
+components:
+  messages:
+    KpiMetricRecorded:
+      name: KpiMetricRecorded
+      title: KPI Metric Recorded
+      summary: A business KPI metric sample has been recorded
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/observability/metric.proto#/chora.observability.v1.KpiMetricRecorded'

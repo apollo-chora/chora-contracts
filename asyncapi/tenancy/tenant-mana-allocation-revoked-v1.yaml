@@ -1,0 +1,64 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Tenancy — TenantManaAllocationRevoked
+  version: 1.0.0
+  description: |
+    Published when an allocation is revoked (admin action, learner
+    offboarding from tenant). If status was PENDING, the allocated units
+    revert to the pool atomically with this event publish; CLAIMED units
+    stay (already debited).
+
+    - Domain: Tenancy + Billing (`chora_tenancy` DB)
+    - Topic: `chora.tenancy.tenant_mana_allocation.revoked.v1`
+    - Source proto: `proto/events/tenancy/tenant_mana_allocation.proto`
+       message `chora.tenancy.v1.TenantManaAllocationRevoked`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  tenantManaAllocationRevoked:
+    address: chora.tenancy.tenant_mana_allocation.revoked.v1
+    messages:
+      tenantManaAllocationRevoked:
+        $ref: '#/components/messages/TenantManaAllocationRevoked'
+
+operations:
+  publishTenantManaAllocationRevoked:
+    action: send
+    channel:
+      $ref: '#/channels/tenantManaAllocationRevoked'
+    messages:
+      - $ref: '#/channels/tenantManaAllocationRevoked/messages/tenantManaAllocationRevoked'
+
+  consumeTenantManaAllocationRevoked:
+    action: receive
+    channel:
+      $ref: '#/channels/tenantManaAllocationRevoked'
+    description: |
+      Consumers: Identity (decrement learner subsidy slice if still
+      pending), Notifications (admin / learner notice), Observability
+      (revocation-rate KPI), Governance (audit trail).
+    messages:
+      - $ref: '#/channels/tenantManaAllocationRevoked/messages/tenantManaAllocationRevoked'
+
+components:
+  messages:
+    TenantManaAllocationRevoked:
+      name: TenantManaAllocationRevoked
+      title: Tenant Mana Allocation Revoked
+      summary: A subsidy allocation has been revoked
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/tenancy/tenant_mana_allocation.proto#/chora.tenancy.v1.TenantManaAllocationRevoked'

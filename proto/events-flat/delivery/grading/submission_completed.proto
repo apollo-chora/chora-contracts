@@ -1,0 +1,83 @@
+// =============================================================================
+// GENERATED — DO NOT EDIT.
+// Source : events/delivery/grading.proto message GradingSubmissionCompleted
+// Tool   : chora-contracts/internal/protoflatten
+// Why    : GCP Pub/Sub Schema Registry rejects (a) schemas with `import`
+//          statements and (b) schemas with more than one top-level message.
+//          This flat copy contains exactly ONE top-level message;
+//          EventEnvelope + Timestamp + transitive deps are nested inside.
+// Path C : see chora-contracts/CHANGELOG.md and m10-data-plane main.tf.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.delivery.v1;
+
+message GradingSubmissionCompleted {
+  // Inlined chora.common.v1.EventEnvelope (nested for self-contained schema).
+  message Envelope {
+    string event_id = 1;
+    string idempotency_key = 2;
+    string tenant_id = 3;
+    string gcid = 4;
+    Timestamp occurred_at = 5;
+    Timestamp published_at = 6;
+    string traceparent = 7;
+    string tracestate = 8;
+    string source_project = 9;
+    string source_service = 10;
+    int32 schema_version = 11;
+    string correlation_id = 12;
+    string causation_id = 13;
+    string chora_imda_dimension = 14;
+    string imda_lifecycle_stage = 15;
+  }
+
+  // Inlined google.protobuf.Timestamp (nested; wire-compatible).
+  message Timestamp {
+    int64 seconds = 1;
+    int32 nanos = 2;
+  }
+
+  // Inlined dep: OEQuestionGradeResult
+  message OEQuestionGradeResult {
+    string test_set_question_id = 1;
+    string question_id = 2;
+    float points_earned = 3;
+    int32 points_possible = 4;
+    string criterion_scores_json = 5;
+    string comment = 6;
+    string grading_model_id = 7;
+    string grading_response_id = 8;
+    bool quality_flagged = 9;
+    int32 attempt_count = 10;
+  }
+
+  // Inlined enum dep: GradingFailureCategory
+  enum GradingFailureCategory {
+    GRADING_FAILURE_CATEGORY_UNSPECIFIED = 0;
+    GRADING_FAILURE_CATEGORY_VERTEX_AI_5XX = 1;
+    GRADING_FAILURE_CATEGORY_MODEL_ARMOR_BLOCKED = 2;
+    GRADING_FAILURE_CATEGORY_TIMEOUT = 3;
+    GRADING_FAILURE_CATEGORY_QUOTA_EXCEEDED = 4;
+    GRADING_FAILURE_CATEGORY_INSUFFICIENT_TENANT_MANA = 5;
+    GRADING_FAILURE_CATEGORY_INTERNAL_ERROR = 6;
+  }
+
+  Envelope envelope = 1;
+  string grading_job_id = 2;
+  string submission_id = 3;
+  string assessment_id = 4;
+  string learner_gcid = 5;
+  repeated OEQuestionGradeResult graded = 6;
+  string overall_comment = 7;
+  string overall_comment_model_id = 8;
+  string overall_comment_response_id = 9;
+  string outcome = 10;
+  GradingFailureCategory failure_category = 11;
+  string failure_message = 12;
+  int32 mana_debited = 13;
+  int64 total_input_tokens = 14;
+  int64 total_output_tokens = 15;
+  Timestamp completed_at = 16;
+}

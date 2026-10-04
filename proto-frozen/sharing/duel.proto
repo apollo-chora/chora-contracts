@@ -1,0 +1,244 @@
+// =============================================================================
+// FROZEN WIRE. DO NOT EDIT, DO NOT RENAME, DO NOT ADD FIELDS.
+// =============================================================================
+//
+// This tree holds the SOURCE protos for event generations whose topics are
+// still declared in Terraform and still LIVE in Pub/Sub, but whose current-
+// generation source has been renamed or deleted. It exists so those flat protos
+// stay GENERATED rather than hand-preserved.
+//
+// WHY (ruling 44, 2026-09-04). protoflatten derives its output from the source
+// tree; Terraform derives its file() inputs from the declared topic list. When
+// bca674d98 deleted the legacy duel protos. ⚠ DuelQuestionSetGenerated and DuelRoundResolved are deliberately ABSENT: their topics were never provisioned live and WP-B removed their declarations (fd6a67629), so nothing resolves them, the flattener stopped emitting these flat protos while Terraform
+// went on resolving them. Because the wrapper wipes the flat tree before
+// regenerating, running the generator DELETED live wire and the dev root module
+// could not plan at all (39 file() errors, hand-restored by 27d187ffb). Freezing
+// the source here makes the old generation reproducible instead of fragile.
+//
+// ⚠ These messages are FLATTEN-INPUT ONLY. `buf generate` excludes this tree, so
+// no Go or Python bindings are produced from it: gen/ describes the CURRENT
+// generation only, and nothing in the repo consumes these types (verified).
+//
+// ⚠ A field name here is frozen wire, not vocabulary. The registry treats a
+// field NAME at a fixed tag as part of the frozen wire and REFUSES a same-tag
+// rename (ADR-254 line 139, ADR-246 D2). Domain vocabulary is Companion; these
+// names are what the live schemas carry.
+//
+// Retirement is a deliberate act, not a side effect: when a topic is retired
+// from Terraform AND its live schema is gone, delete the entry here too.
+//
+// Source: chora-contracts/proto/events/sharing/duel.proto at bca674d98^
+// =============================================================================
+
+// =============================================================================
+// Chora Content Sharing — Duel events
+// =============================================================================
+//
+// Aggregate root: Duel (PvP atomic-knowledge competition between two GCIDs).
+// Owning domain : Content Sharing (chora_sharing DB).
+// Owning team   : Team 1 (Content)
+// Topic prefix  : chora.sharing.duel.*
+// Surface       : C+ Connect+
+//
+// Bimodal flow:
+//   1. INITIATED — challenger creates a duel and invites an opponent.
+//   2. ACCEPTED  — opponent agrees; both compete on a fixed atom set.
+//   3. COMPLETED — both sides finished; winner determined by score.
+//   3'. DECLINED — opponent rejects the invite.
+//   3''. EXPIRED — no acceptance within TTL OR completion within match TTL.
+//
+// Wagers: tied to DigitalSkin only. Per CLAUDE.md domain vocabulary,
+// DigitalSkin is EARNED-only — never purchasable. wager_skin_id is opaque
+// reference to a skin already in the challenger's inventory; it transfers
+// to the winner on COMPLETED. Empty wager_skin_id = no-stake friendly duel.
+//
+// Atom Sharing Redesign (feat/atom-sharing-redesign):
+//   R-19 — the legacy stake-XP wager model is DROPPED; ComboMultiplier is the
+//   single scoring model (1→2→3→5 on consecutive correct, wrong resets). Two
+//   modes (pool | topic_ai) + a ranked scope (affects ELO) are added to
+//   DuelInitiated/Completed additively. DuelReferee validates each answer.
+//   Reuses the existing duel_ratings/duel_match_history ELO store (R-10).
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.sharing.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/sharing/v1;sharingv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// DuelMode — how the round atoms are chosen (Atom Sharing Redesign).
+// -----------------------------------------------------------------------------
+enum DuelMode {
+  DUEL_MODE_UNSPECIFIED = 0;
+  DUEL_MODE_TOPIC_AI = 1;   // challenger picks a topic; QGen generates the set
+  DUEL_MODE_POOL = 2;       // challenger picks the atom pool up front
+}
+
+// DuelScope — friendly (no ELO) vs ranked (affects ELO + ranked leaderboard).
+enum DuelScope {
+  DUEL_SCOPE_UNSPECIFIED = 0;
+  DUEL_SCOPE_FRIENDLY = 1;
+  DUEL_SCOPE_RANKED = 2;
+}
+
+// -----------------------------------------------------------------------------
+// DuelInitiated — chora.sharing.duel.initiated.v1
+// -----------------------------------------------------------------------------
+//
+// Published when challenger creates a duel invite. Consumers: Notifications
+// (push the invite to opponent's R+ inbox), Observability.
+message DuelInitiated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 identifier of the Duel.
+  string duel_id = 2;
+
+  // GCID of the challenger (also envelope.gcid for actor provenance).
+  string challenger_gcid = 3;
+
+  // GCID of the invited opponent.
+  string opponent_gcid = 4;
+
+  // LearningAtom IDs that frame the duel rounds (cross-domain UUIDs from
+  // chora_creation; NO FK, validated via cached AtomProjection).
+  repeated string atom_ids = 5;
+
+  // Optional DigitalSkin wager. UUIDv7 of an already-earned skin in the
+  // challenger's inventory. Empty = no-stake friendly duel.
+  // Skins are NEVER purchasable — earned only.
+  string wager_skin_id = 6;
+
+  // Invite TTL deadline. After this, the duel auto-EXPIRES if not ACCEPTED.
+  google.protobuf.Timestamp expires_at = 7;
+
+  google.protobuf.Timestamp initiated_at = 8;
+
+  // ----- Atom Sharing Redesign (additive; optional on the wire — back-compat) -----
+
+  // Duel mode. Defaults to POOL for back-compat with pre-redesign duels.
+  DuelMode mode = 9;
+
+  // REQUIRED iff mode=TOPIC_AI; empty for POOL.
+  string topic = 10;
+
+  // For topic_ai: AI prompt + permission filter.
+  repeated string topic_tags = 11;
+
+  // Friendly (no ELO) vs ranked (affects ELO + ranked leaderboard).
+  DuelScope scope = 12;
+}
+
+// -----------------------------------------------------------------------------
+// DuelAccepted — chora.sharing.duel.accepted.v1
+// -----------------------------------------------------------------------------
+//
+// Published when the invited opponent accepts. Match round logic kicks off
+// after this event (atom-by-atom synchronous play).
+message DuelAccepted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string duel_id = 2;
+  string challenger_gcid = 3;
+  string opponent_gcid = 4;
+  repeated string atom_ids = 5;
+  string wager_skin_id = 6;
+
+  google.protobuf.Timestamp accepted_at = 7;
+}
+
+// -----------------------------------------------------------------------------
+// DuelDeclined — chora.sharing.duel.declined.v1
+// -----------------------------------------------------------------------------
+//
+// Published when the invited opponent rejects. Wager (if any) is restored
+// to the challenger's inventory. Terminal state.
+message DuelDeclined {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string duel_id = 2;
+  string challenger_gcid = 3;
+  string opponent_gcid = 4;
+  string wager_skin_id = 5;
+
+  // Optional decline reason — free text, max 256 chars.
+  string reason = 6;
+
+  google.protobuf.Timestamp declined_at = 7;
+}
+
+// -----------------------------------------------------------------------------
+// DuelCompleted — chora.sharing.duel.completed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when both sides finish all atoms and a winner is determined.
+// Consumers: Sharing (XP + skin transfer + leaderboard bump), Notifications
+// (congratulate winner / encourage loser), Observability.
+message DuelCompleted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string duel_id = 2;
+  string challenger_gcid = 3;
+  string opponent_gcid = 4;
+  repeated string atom_ids = 5;
+
+  // GCID of the winner. Empty string = tie (no winner; wager held by
+  // original challenger).
+  string winner_gcid = 6;
+
+  // Final atom-aggregate scores in [0.0, 1.0]. challenger_gcid's score is
+  // score_challenger; opponent_gcid's is score_opponent.
+  float score_challenger = 7;
+  float score_opponent = 8;
+
+  // Wager skin transfer (if any). Empty = no wager / tie / forfeit-to-challenger.
+  string wager_skin_id = 9;
+
+  google.protobuf.Timestamp completed_at = 10;
+
+  // ----- Atom Sharing Redesign (additive; optional on the wire — back-compat) -----
+
+  // GCID of the loser. Empty for a tie. (winner_gcid is field 6 above.)
+  string loser_gcid = 11;
+
+  // Duel mode this completion applies to.
+  DuelMode mode = 12;
+
+  // Friendly (no ELO change) vs ranked (ELO updated via duel_ratings, R-10).
+  DuelScope scope = 13;
+
+  // Best consecutive-correct streak this duel (ComboMultiplier peaked at 5).
+  int32 max_combo_challenger = 14;
+  int32 max_combo_opponent = 15;
+
+  // ELO delta applied on a RANKED completion (0 for friendly). Idempotent on
+  // duel_id (R-10). Winner +Δ / loser −Δ, magnitude scales with rating gap.
+  int32 elo_delta_winner = 16;
+  int32 elo_delta_loser = 17;
+
+  // Traceability to the Duel Referee agent run (ADR-169).
+  string referee_run_id = 18;
+}
+
+// -----------------------------------------------------------------------------
+// DuelExpired — chora.sharing.duel.expired.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a Duel times out (invite TTL hit before ACCEPTED, OR play
+// TTL hit before both completed). Wager returned to challenger. Terminal.
+message DuelExpired {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string duel_id = 2;
+  string challenger_gcid = 3;
+  string opponent_gcid = 4;
+  string wager_skin_id = 5;
+
+  // Which TTL fired: "INVITE_TTL" (no acceptance) or "MATCH_TTL" (no completion).
+  string expiry_kind = 6;
+
+  google.protobuf.Timestamp expired_at = 7;
+}

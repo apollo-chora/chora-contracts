@@ -1,0 +1,180 @@
+// =============================================================================
+// chora.identity.v1 — Tenant CSV mass-import (ImportJob) events
+// =============================================================================
+//
+// Source-of-truth: ADR-221 (tenant + user CSV mass-import, ImportJob in
+// chora_identity) + ADR-222 (synthetic principals + saga teardown)
+// + docs/TENANT-MASS-IMPORT-CR-2026-07-02.md §5.3-§5.5.
+//
+// Owning domain : Identity (chora_identity database)
+// Owning team   : Team 3 (Platform)
+// Topic prefix  : chora.identity.tenant_import.*
+//
+// The ImportJob aggregate onboards tenant(s) + their whole multi-role user
+// roster from ONE Excel/GSheets-edited CSV (fleet-capable), and mass-mints
+// synthetic principals for demo/load-testing. These events bracket the
+// EXECUTION phase (post-confirm; the mandatory dry-run emits nothing):
+//
+//   started.v1   — after the operator confirms, BEFORE the first write.
+//                  (The IMDA-D1 accountability record is the SEPARATE
+//                  governance.audit.tenant_import_executed.v1, also
+//                  emitted before writes — ADR-221 D8.)
+//   completed.v1 — terminal state reached (completed |
+//                  completed_with_errors | failed | cancelled) with the
+//                  fully-reconciled per-outcome counts (AC-1: input rows =
+//                  sum of outcomes; nothing silently dropped).
+//
+// Per-row grants/creates REUSE existing events (identity
+// tenancy_membership.granted.v1, tenancy tenant lifecycle events) — this
+// file adds NO per-row event (10k rows must not mean 10k bespoke events).
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.identity.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/identity/v1;identityv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// ImportRunMode — WHO is importing and whether tenants may be created
+// (ADR-221 D3 modes matrix).
+// -----------------------------------------------------------------------------
+enum ImportRunMode {
+  IMPORT_RUN_MODE_UNSPECIFIED = 0;
+  // Platform operator, fleet onboarding: tenant blocks are created as
+  // chora-master children via tenancy CreateSubTenant (ADR-217).
+  IMPORT_RUN_MODE_OPERATOR_CREATE_NEW = 1;
+  // Platform operator, existing tenants only: an unknown tenant_slug is a
+  // block error (the slug-typo guard) — never an implicit create.
+  IMPORT_RUN_MODE_OPERATOR_EXISTING_ONLY = 2;
+  // Tenant admin importing into their OWN tenant (adminGate; tenant columns
+  // forbidden; 2k-row cap M-12).
+  IMPORT_RUN_MODE_TENANT_ADMIN = 3;
+  // P7 sync/update mode (diff-preview, guarded removals).
+  IMPORT_RUN_MODE_SYNC = 4;
+}
+
+// -----------------------------------------------------------------------------
+// ImportMaterializationMode — HOW user rows become principals (ADR-221 D3,
+// ADR-222 D1/D2).
+// -----------------------------------------------------------------------------
+enum ImportMaterializationMode {
+  IMPORT_MATERIALIZATION_MODE_UNSPECIFIED = 0;
+  // Default: unknown emails become pending_invites (ADR-194 seam); the
+  // person materializes at first login.
+  IMPORT_MATERIALIZATION_MODE_COLD_INVITE = 1;
+  // Demo/load: users rows minted directly with
+  // federated_subject = 'synthetic:<uuidv7>'; NO GCIP account, never emails.
+  IMPORT_MATERIALIZATION_MODE_SYNTHETIC = 2;
+  // Synthetic + GCIP password accounts for live-login demo personas —
+  // ONLY inside is_synthetic tenants under the ADR-222 D2 guardrail bundle.
+  IMPORT_MATERIALIZATION_MODE_SYNTHETIC_LOGIN = 3;
+}
+
+// -----------------------------------------------------------------------------
+// ImportJobState — terminal states carried on completed.v1 (ADR-221 D4).
+// -----------------------------------------------------------------------------
+enum ImportJobState {
+  IMPORT_JOB_STATE_UNSPECIFIED = 0;
+  IMPORT_JOB_STATE_COMPLETED = 1;             // every row landed a success outcome
+  IMPORT_JOB_STATE_COMPLETED_WITH_ERRORS = 2; // good rows committed; bad rows in the error CSV
+  IMPORT_JOB_STATE_FAILED = 3;                // structural/system failure — see error report
+  IMPORT_JOB_STATE_CANCELLED = 4;             // operator cancel honoured at a chunk boundary
+}
+
+// -----------------------------------------------------------------------------
+// ImportOutcomeCounts — the per-row outcome ledger, aggregated. Sums to the
+// executed row count (AC-1/AC-2 reconciliation: input = outcomes, always).
+// -----------------------------------------------------------------------------
+message ImportOutcomeCounts {
+  int32 created_tenants = 1; // tenant blocks created (create-new mode)
+  int32 invited = 2;         // pending_invites upserts (cold_invite)
+  int32 granted = 3;         // UpsertMembership on an existing GCID (new roles)
+  int32 merged = 4;          // additive role-union onto an existing membership (GQ-8)
+  int32 minted = 5;          // synthetic users rows minted (ADR-222 D1)
+  int32 skipped = 6;         // no-op rows (idempotent re-upload, AC-3)
+  int32 errored = 7;         // rows in the downloadable error CSV (GQ-7)
+}
+
+// -----------------------------------------------------------------------------
+// TenantImportStarted — chora.identity.tenant_import.started.v1
+// -----------------------------------------------------------------------------
+//
+// Published (outbox) when a confirmed ImportJob begins execution, BEFORE the
+// first tenant block / user row is written. Consumers: Observability (O+ job
+// telemetry), Notifications (P3 operator progress notice — horizon).
+//
+// Envelope semantics: envelope.tenant_id = the job's home scope (the target
+// tenant for tenant-admin runs; chora-master for operator runs);
+// envelope.gcid = the confirming actor.
+message TenantImportStarted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — ImportJob aggregate identifier (chora_identity.import_jobs).
+  string import_job_id = 2;
+
+  ImportRunMode run_mode = 3;
+
+  ImportMaterializationMode materialization_mode = 4;
+
+  // GCID of the operator / tenant admin who confirmed execution.
+  string actor_gcid = 5;
+
+  // UUIDv7 batch handle registered in import_batch_members — the unit of
+  // synthetic-fleet lifecycle + teardown (ADR-222 D3). Set for every job;
+  // teardown is only honoured for synthetic batches.
+  string import_batch_id = 6;
+
+  // Data rows accepted for execution (post-validation good rows).
+  int32 total_rows = 7;
+
+  // Distinct tenant blocks in the file (create-new: blocks to create;
+  // existing-only/tenant-admin: blocks resolved).
+  int32 tenant_count = 8;
+
+  // Job-level invite-email toggle as confirmed (GQ-4; per-row send_invite
+  // overrides apply row-by-row; synthetic modes never email).
+  bool send_invites = 9;
+
+  google.protobuf.Timestamp started_at = 10;
+}
+
+// -----------------------------------------------------------------------------
+// TenantImportCompleted — chora.identity.tenant_import.completed.v1
+// -----------------------------------------------------------------------------
+//
+// Published (outbox) when the job reaches a terminal state. counts sums to
+// the executed rows — the machine-readable half of the per-row result report
+// (IMDA-D2 transparency artifact, ADR-221 D8).
+message TenantImportCompleted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string import_job_id = 2;
+
+  ImportRunMode run_mode = 3;
+
+  ImportMaterializationMode materialization_mode = 4;
+
+  // GCID of the actor who confirmed execution (cancelled_by for CANCELLED
+  // is carried in the job row, not here — one actor slot, the confirmer).
+  string actor_gcid = 5;
+
+  string import_batch_id = 6;
+
+  ImportJobState final_state = 7;
+
+  ImportOutcomeCounts counts = 8;
+
+  // Data rows executed (== started.total_rows unless cancelled mid-run).
+  int32 total_rows = 9;
+
+  // Wall-clock execution duration, milliseconds (chunked async run, D4).
+  int64 duration_ms = 10;
+
+  google.protobuf.Timestamp completed_at = 11;
+}

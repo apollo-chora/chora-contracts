@@ -1,0 +1,62 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Payments — UserSubscriptionPaymentCaptured
+  version: 1.0.0
+  description: |
+    Stripe `invoice.paid` — covers BOTH the initial subscription
+    invoice AND every renewal invoice. chora-identity advances the
+    UserSubscription FSM activate / renew + credits per-period mana per
+    ADR-142 + ADR-149.
+
+    - Domain: Payments (`chora_payments` DB)
+    - Topic: `chora.payments.user_subscription.payment_captured.v1`
+    - Source proto: `proto/events/payments/user_subscription.proto`
+       message `chora.payments.v1.UserSubscriptionPaymentCaptured`
+    - Aggregate: UserSubscription
+    - Per ADR-164 (chora-payments service + 13th DB).
+    - IMDA: envelope.chora_imda_dimension = "accountability"
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  userSubscriptionPaymentCaptured:
+    address: chora.payments.user_subscription.payment_captured.v1
+    messages:
+      userSubscriptionPaymentCaptured:
+        $ref: '#/components/messages/UserSubscriptionPaymentCaptured'
+
+operations:
+  publishUserSubscriptionPaymentCaptured:
+    action: send
+    channel:
+      $ref: '#/channels/userSubscriptionPaymentCaptured'
+    messages:
+      - $ref: '#/channels/userSubscriptionPaymentCaptured/messages/userSubscriptionPaymentCaptured'
+
+  consumeUserSubscriptionPaymentCaptured:
+    action: receive
+    channel:
+      $ref: '#/channels/userSubscriptionPaymentCaptured'
+    messages:
+      - $ref: '#/channels/userSubscriptionPaymentCaptured/messages/userSubscriptionPaymentCaptured'
+
+components:
+  messages:
+    UserSubscriptionPaymentCaptured:
+      name: UserSubscriptionPaymentCaptured
+      title: Stripe paid the initial OR renewal invoice for a subscription
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/payments/user_subscription.proto#/chora.payments.v1.UserSubscriptionPaymentCaptured'

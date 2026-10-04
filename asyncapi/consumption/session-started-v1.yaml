@@ -1,0 +1,75 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Content Consumption — SessionStarted
+  version: 1.0.0
+  description: |
+    Published when a learner starts an `AtomicSession` (one playback of one
+    atom by one learner).
+
+    - Domain: Content Consumption (`chora_consumption` DB)
+    - Aggregate root: `AtomicSession`
+    - Topic: `chora.consumption.session.started.v1`
+    - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
+    - Source proto: `proto/events/consumption/session.proto`
+       message `chora.consumption.v1.SessionStarted`
+
+    Embeds the mandatory `chora.common.v1.EventEnvelope` as field 1.
+
+    Note: `atom_id` and `atom_revision_id` are cross-domain UUID references
+    sourced from `chora_creation` — NO FK constraints across DBs (cross-DB
+    queries forbidden per `.claude/rules/ddd-enforcement.md`).
+  contact:
+    name: Chora Platform Team (Team 3) + Team 1 (Content)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+    description: Google Cloud Pub/Sub (chora-489812 platform host)
+
+channels:
+  sessionStarted:
+    address: chora.consumption.session.started.v1
+    description: Single-event topic for SessionStarted.
+    messages:
+      sessionStarted:
+        $ref: '#/components/messages/SessionStarted'
+
+operations:
+  publishSessionStarted:
+    action: send
+    channel:
+      $ref: '#/channels/sessionStarted'
+    summary: Publish a SessionStarted event
+    messages:
+      - $ref: '#/channels/sessionStarted/messages/sessionStarted'
+
+  consumeSessionStarted:
+    action: receive
+    channel:
+      $ref: '#/channels/sessionStarted'
+    summary: Subscribe to SessionStarted events
+    description: |
+      Primary consumers:
+      - Sharing — presence / activity feed
+      - Observability — engagement funnel start
+      - AI Kernel — Companion persona context warm-up
+    messages:
+      - $ref: '#/channels/sessionStarted/messages/sessionStarted'
+
+components:
+  messages:
+    SessionStarted:
+      name: SessionStarted
+      title: Session Started
+      summary: A learner started an AtomicSession
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/consumption/session.proto#/chora.consumption.v1.SessionStarted'

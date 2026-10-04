@@ -1,0 +1,74 @@
+// =============================================================================
+// GENERATED — DO NOT EDIT.
+// Source : events/sharing/duel.proto message DuelCompleted
+// Tool   : chora-contracts/internal/protoflatten
+// Why    : GCP Pub/Sub Schema Registry rejects (a) schemas with `import`
+//          statements and (b) schemas with more than one top-level message.
+//          This flat copy contains exactly ONE top-level message;
+//          EventEnvelope + Timestamp + transitive deps are nested inside.
+// Path C : see chora-contracts/CHANGELOG.md and m10-data-plane main.tf.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.sharing.v1;
+
+message DuelCompleted {
+  // Inlined chora.common.v1.EventEnvelope (nested for self-contained schema).
+  message Envelope {
+    string event_id = 1;
+    string idempotency_key = 2;
+    string tenant_id = 3;
+    string gcid = 4;
+    Timestamp occurred_at = 5;
+    Timestamp published_at = 6;
+    string traceparent = 7;
+    string tracestate = 8;
+    string source_project = 9;
+    string source_service = 10;
+    int32 schema_version = 11;
+    string correlation_id = 12;
+    string causation_id = 13;
+    string chora_imda_dimension = 14;
+    string imda_lifecycle_stage = 15;
+  }
+
+  // Inlined google.protobuf.Timestamp (nested; wire-compatible).
+  message Timestamp {
+    int64 seconds = 1;
+    int32 nanos = 2;
+  }
+
+  // Inlined enum dep: DuelMode
+  enum DuelMode {
+    DUEL_MODE_UNSPECIFIED = 0;
+    DUEL_MODE_TOPIC_AI = 1;
+    DUEL_MODE_POOL = 2;
+  }
+
+  // Inlined enum dep: DuelScope
+  enum DuelScope {
+    DUEL_SCOPE_UNSPECIFIED = 0;
+    DUEL_SCOPE_FRIENDLY = 1;
+    DUEL_SCOPE_RANKED = 2;
+  }
+
+  Envelope envelope = 1;
+  string duel_id = 2;
+  string challenger_gcid = 3;
+  string opponent_gcid = 4;
+  repeated string atom_ids = 5;
+  string winner_gcid = 6;
+  float score_challenger = 7;
+  float score_opponent = 8;
+  string wager_skin_id = 9;
+  Timestamp completed_at = 10;
+  string loser_gcid = 11;
+  DuelMode mode = 12;
+  DuelScope scope = 13;
+  int32 max_combo_challenger = 14;
+  int32 max_combo_opponent = 15;
+  int32 elo_delta_winner = 16;
+  int32 elo_delta_loser = 17;
+  string referee_run_id = 18;
+}

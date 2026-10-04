@@ -1,0 +1,341 @@
+// =============================================================================
+// chora.delivery.v1 — Course/Class domain events (training delivery lifecycle)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 1 D1+D2,
+// Tier 2 D7+D8 + .claude/rules/ddd-enforcement.md (Aggregate Invariants)
+// + .claude/skills/domain-content-delivery/SKILL.md
+// + memory project_chora_topology.md, project_chora_data_plane.md.
+//
+// Owning domain  : Content Delivery (chora_delivery database)
+// Owning team    : Team 2 (Delivery)
+// Topic prefix   : chora.delivery.course.*
+// Surface (admin): R+ Rhythm+ (Surface-4)
+//
+// Course (synonym Class) is the aggregate root for the "logistics + ceremony"
+// layer — a planned curriculum bundle, optionally a scheduled instance.
+// Aligned with Course/Class aggregate from domain-content-delivery skill.
+//
+// Cross-domain references (no FK):
+//   - instructor_gcid : Identity (UUID, no FK)
+//   - atom_path_id    : Consumption LearningPath (UUID, no FK)
+//
+// Per ADR-129/130/131 collapse mandate, this proto absorbs what was previously
+// `chora.training.session.*` and `chora.classroom.*` lifecycle events.
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.delivery.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/delivery/v1;deliveryv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// Shared enums (re-used across course events)
+// -----------------------------------------------------------------------------
+
+// Modality — how the course is delivered. Drives roster + booking
+// requirements (rooms vs Zoom links vs async-only).
+enum Modality {
+  MODALITY_UNSPECIFIED = 0;
+  MODALITY_IN_PERSON = 1;
+  MODALITY_ONLINE_SYNC = 2;
+  MODALITY_ONLINE_ASYNC = 3;
+  MODALITY_BLENDED = 4;
+}
+
+// -----------------------------------------------------------------------------
+// CourseCreated — chora.delivery.course.created.v1
+// -----------------------------------------------------------------------------
+//
+// Published when an admin / instructor scaffolds a new Course in DRAFT.
+// At this point no Booking exists; rostering is pending.
+// Consumers: Search index, Marketplace listing, Notifications (announce).
+message CourseCreated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 identifier of the newly created Course.
+  string course_id = 2;
+
+  // Display title for the course (1..256 chars, plain text).
+  string title = 3;
+
+  // GCID (UUIDv7) of the lead instructor. Empty if unassigned at creation.
+  string instructor_gcid = 4;
+
+  // UUID of the LearningPath in Consumption supplying atom assignments.
+  // Cross-domain reference — no FK constraint per ddd-enforcement #3.
+  string atom_path_id = 5;
+
+  // Delivery modality.
+  Modality modality = 6;
+
+  // Scheduled start (planned). Timestamp may be revised before publish.
+  google.protobuf.Timestamp starts_at = 7;
+
+  // Scheduled end (planned). Must be > starts_at when both present.
+  google.protobuf.Timestamp ends_at = 8;
+
+  // Maximum learner capacity (0 = unlimited / async).
+  int32 capacity = 9;
+
+  google.protobuf.Timestamp created_at = 10;
+}
+
+// -----------------------------------------------------------------------------
+// CourseScheduled — chora.delivery.course.scheduled.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a Course transitions DRAFT -> SCHEDULED. Schedule is locked,
+// resources may be booked, and Bookings can be opened to learners.
+// Consumers: Notifications (calendar invites), Consumption (eligibility).
+message CourseScheduled {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string course_id = 2;
+
+  string title = 3;
+
+  string instructor_gcid = 4;
+
+  string atom_path_id = 5;
+
+  Modality modality = 6;
+
+  google.protobuf.Timestamp starts_at = 7;
+
+  google.protobuf.Timestamp ends_at = 8;
+
+  int32 capacity = 9;
+
+  // GCID of the actor who scheduled the course (admin / instructor).
+  string scheduled_by_gcid = 10;
+
+  google.protobuf.Timestamp scheduled_at = 11;
+}
+
+// -----------------------------------------------------------------------------
+// CourseCompleted — chora.delivery.course.completed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a Course finishes (all sessions delivered, attendance
+// closed). Triggers downstream certification flow + post-course surveys.
+// Consumers: Certification issuer, Survey distributor, Sharing (XP),
+// Notifications (completion emails).
+message CourseCompleted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string course_id = 2;
+
+  string title = 3;
+
+  string instructor_gcid = 4;
+
+  string atom_path_id = 5;
+
+  Modality modality = 6;
+
+  google.protobuf.Timestamp starts_at = 7;
+
+  google.protobuf.Timestamp ends_at = 8;
+
+  int32 capacity = 9;
+
+  google.protobuf.Timestamp completed_at = 10;
+}
+
+// -----------------------------------------------------------------------------
+// CourseCancelled — chora.delivery.course.cancelled.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a Course is cancelled before completion. Triggers booking
+// cancellations (cascade), refunds (Tenancy), and learner notifications.
+// Soft-state per ddd-enforcement #5 — record preserved with cancelled_at.
+message CourseCancelled {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string course_id = 2;
+
+  string title = 3;
+
+  string instructor_gcid = 4;
+
+  string atom_path_id = 5;
+
+  Modality modality = 6;
+
+  google.protobuf.Timestamp starts_at = 7;
+
+  google.protobuf.Timestamp ends_at = 8;
+
+  int32 capacity = 9;
+
+  // GCID of the actor who cancelled (admin / instructor).
+  string cancelled_by_gcid = 10;
+
+  // Optional human-readable reason (free text; max 512 chars).
+  string reason = 11;
+
+  google.protobuf.Timestamp cancelled_at = 12;
+}
+
+// -----------------------------------------------------------------------------
+// CourseReleased — chora.delivery.course.released.v1  (CJ#2)
+// -----------------------------------------------------------------------------
+//
+// Published when a training-admin releases an AWAITING_REVIEW course to
+// PUBLISHED (state-FSM terminus for the CJ#2 authoring loop). At release
+// the commercial fields (price, SkillsFuture eligibility, scheduled open
+// date, instructor roster) are finalised + locked.
+//
+// Consumers:
+//   - chora-consumption  : catalog cache invalidation
+//   - chora-observability: governance dashboard timeline (IMDA D1 audit)
+//   - chora-notifications: announce to subscribed learners (optional)
+//
+// Per CJ#2 directive row at
+// `docs/m13/e2e-fe-coord-directive-2026-05-16.md` §3 + spec at
+// `docs/TODO-DEVELOPMENT.md` "Customer Journey #2".
+message CourseReleased {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 identifier of the Course being released.
+  string course_id = 2;
+
+  // Display title for the course (1..256 chars, plain text).
+  string title = 3;
+
+  // GCID of the original authoring instructor (Course.author_gcid).
+  string author_gcid = 4;
+
+  // Price in SGD cents. Zero is allowed (free course).
+  int64 price_sgd_cents = 5;
+
+  // SkillsFuture Singapore funding eligibility.
+  bool sf_eligible = 6;
+
+  // Optional scheduled open date — when enrolment becomes available.
+  // Empty / unset → open immediately at released_at.
+  google.protobuf.Timestamp scheduled_open_at = 7;
+
+  // Roster of authorised instructors (UUIDv7 GCIDs, no FK per
+  // ddd-enforcement #3). At least one is required at release time.
+  repeated string instructor_gcids = 8;
+
+  // Test-set anchors that compose the course content (UUIDv7,
+  // cross-aggregate ref into chora_delivery.test_sets).
+  repeated string test_set_ids = 9;
+
+  google.protobuf.Timestamp released_at = 10;
+}
+
+// -----------------------------------------------------------------------------
+// CourseContentComposed — chora.delivery.course.content_composed.v1
+// -----------------------------------------------------------------------------
+//
+// Published whenever a Course's heterogeneous curriculum changes (item added /
+// removed / reordered, or course released). Carries the FULL, ordered item
+// list so downstream consumers project it idempotently (replace-by-course).
+//
+// A Course is a COLLECTION of content items — it references atoms / assessments
+// / classrooms by id and external media by URL; it NEVER owns atom content
+// (atom-centric, ddd-enforcement Aggregate Invariant #1/#3). Self-contained:
+// consumers (chora-consumption open-course LearningPath bootstrap) need no
+// cross-DB read — every field needed to render the item is in the event.
+//
+// NOTE: this topic is JSON-encoded on the wire (no Schema Registry BINARY
+// mode), consistent with the sibling chora.delivery.enrollment.created.v1 in
+// the same course-journey flow. This proto is the canonical schema + the
+// migration anchor should the topic later move to BINARY.
+//
+// Consumers: chora-consumption (CourseContentComposedSubscriber → course
+// content projection + LearningPath bootstrap).
+enum ContentKind {
+  CONTENT_KIND_UNSPECIFIED = 0;
+  CONTENT_KIND_ATOM = 1;
+  CONTENT_KIND_VIDEO = 2;
+  CONTENT_KIND_YOUTUBE = 3;
+  CONTENT_KIND_DOCUMENT = 4;
+  CONTENT_KIND_LIVE_CLASSROOM = 5;
+  CONTENT_KIND_ASSESSMENT = 6;
+}
+
+// CourseContentItem is one ordered, typed entry in a course curriculum.
+message CourseContentItem {
+  // UUIDv7 of this curriculum membership row.
+  string item_id = 1;
+
+  ContentKind kind = 2;
+
+  // Cross-aggregate reference. For ATOM/ASSESSMENT/LIVE_CLASSROOM this is a
+  // UUID (atom_id / test_set_id / classroom_id, no FK). For VIDEO/YOUTUBE/
+  // DOCUMENT this is an http(s) URL.
+  string ref = 3;
+
+  // Display title (1..200 chars, plain text).
+  string title = 4;
+
+  // Zero-based position in the curriculum order.
+  int32 position = 5;
+}
+
+message CourseContentComposed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 of the Course whose content was composed.
+  string course_id = 2;
+
+  // The full ordered curriculum at the time of composition. Consumers
+  // replace-by-course (idempotent projection).
+  repeated CourseContentItem items = 3;
+
+  google.protobuf.Timestamp composed_at = 4;
+}
+
+// -----------------------------------------------------------------------------
+// CoursePublished — chora.delivery.course.published.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a Course's visibility flips INTO `public` (the discovery
+// surface). Distinct from CourseReleased (the CJ#2 AWAITING_REVIEW → PUBLISHED
+// state-FSM terminus, which finalises commercial fields): this event is the
+// visibility transition that lets chora-sharing list the course on the public
+// discovery feed and lets chora-observability capture the D1 + D2 IMDA
+// evidence row (accountability + transparency).
+//
+// Producer: services/chora-delivery/internal/adapter/events/publisher.go
+// InMemoryPublisher.PublishCoursePublished.
+//
+// Consumers:
+//   - chora-sharing      : public discovery feed
+//   - chora-observability: IMDA D1 (accountability) + D2 (transparency) evidence
+//
+// Contract authored by the 2026-07-01 event-fabric audit (Class D — the
+// producer emitted to an unprovisioned topic; this proto + the Schema Registry
+// binding + the protomarshal encoder land the event on a real binary topic).
+message CoursePublished {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 identifier of the Course being published.
+  string course_id = 2;
+
+  // Display title for the course (1..256 chars, plain text).
+  string title = 3;
+
+  // GCID (UUIDv7) of the lead instructor. Cross-domain reference — no FK
+  // per ddd-enforcement #3.
+  string instructor_gcid = 4;
+
+  google.protobuf.Timestamp published_at = 5;
+
+  // IMDA dimensions this event is evidence FOR (canonical labels per ADR-141;
+  // e.g. "accountability", "transparency"). A repeated list on the MESSAGE
+  // because the shared envelope carries only a single chora_imda_dimension
+  // (field 14) — this event claims BOTH D1 + D2.
+  repeated string imda_dimensions = 6;
+}

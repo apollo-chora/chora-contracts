@@ -1,0 +1,348 @@
+openapi: "3.2.0"
+info:
+  title: "Chora Companion Egg Marketplace API"
+  version: "1.0.0"
+  description: |
+    Egg marketplace surface — SKU catalog, IMDA D2 mandatory pre-checkout
+    odds disclosure, and Stripe Checkout session creation for purchasing
+    a Companion egg. Owned by chora-tenancy (the egg SKU + breed
+    distribution + Stripe purchase ledger live in `chora_tenancy`).
+
+    Per ADR-149 §"Egg purchase flow" + the IMDA Model AI Governance
+    Framework D2 (Transparency) dimension: the per-SKU odds must be
+    disclosed BEFORE checkout — the FE Companion Egg Marketplace UI
+    consumes `/odds` on hover / pre-purchase confirm.
+
+    ## BFF envelope contract (E2E-BE-FAM-GROWTH §1, 2026-05-16)
+
+    FE chora-web consumes the three endpoints through chora-gateway
+    `companionbridge`. The gateway wraps responses in `{ data: T }` and
+    reconciles two field-name mismatches between the raw tenancy wire
+    and the FE model:
+
+    - `items` → `skus` (catalog response)
+    - `priceCents` → `priceMicros` (egg SKU field; *1e4 conversion)
+    - `sku` → `eggSku` (odds response)
+
+    Internal mesh callers (chora-consumption Pub/Sub subscriber for
+    `egg_purchase.payment_succeeded.v1` provisioning) bypass the
+    gateway and see the raw shapes below.
+
+    Owning domain : Tenancy (`chora_tenancy` database)
+    Owning team   : Team 3 (Platform)
+    Surface       : A+ (learner marketplace)
+
+    Authentication: Bearer JWT (ChoraSession-minted).
+
+    Source-of-truth:
+      - `docs/architecture/adrs/adr-149-companion-growth-stage-model.md`
+      - `services/chora-tenancy/internal/adapter/http/companion_egg_handlers.go`
+      - `services/chora-gateway/internal/aggregator/companionbridge/companionbridge.go`
+  contact:
+    name: "Chora Team 3 (Platform)"
+  license:
+    name: "Proprietary"
+
+servers:
+  - url: "https://api.chora.site"
+    description: "Production via chora-gateway"
+  - url: "http://localhost:8080"
+    description: "Local development (direct chora-tenancy)"
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: CompanionEggs
+    description: "Egg marketplace — catalog, odds disclosure, Stripe Checkout"
+
+paths:
+  /api/v1/companion-eggs/catalog:
+    get:
+      operationId: getEggCatalog
+      summary: "List purchasable egg SKUs"
+      description: |
+        Returns the per-tenant egg SKU catalog. Includes the trial egg
+        (free, uniform 12.5% odds across 8 breeds), the Standard egg
+        (paid, common-breed weighted), and the Premium egg (paid,
+        rare-breed weighted) plus any tenant-branded SKUs.
+
+        Raw tenancy shape: `{ "items": [...], "total": N }`.
+        BFF-wrapped shape: `{ "data": { "skus": [...] } }`.
+
+        IMDA D2 note: this endpoint surfaces price + name + description
+        only. Detailed numeric odds live behind `/odds/{sku}` — that
+        endpoint MUST be invoked before checkout per the framework
+        Transparency dimension.
+      tags: [CompanionEggs]
+      responses:
+        "200":
+          description: "Catalog"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EggCatalogEnvelope"
+
+  /api/v1/companion-eggs/{sku}/odds:
+    parameters:
+      - in: path
+        name: sku
+        required: true
+        schema:
+          type: string
+          example: "egg.standard.v1"
+        description: "Egg SKU identifier"
+    get:
+      operationId: getEggOdds
+      summary: "Pre-checkout numeric odds disclosure (IMDA D2 mandatory)"
+      description: |
+        Returns the per-breed numeric probability distribution for this
+        SKU. **Required reading** before the FE renders the checkout
+        confirm — per IMDA Model AI Governance Framework Dimension 2
+        (Transparency), the user must see the actual odds (not placeholder
+        / not random / not "approximately X") before any purchase.
+
+        Each entry includes `species`, `rarity`, and `probability`
+        (numeric 0..100, sums to 100 across the array).
+
+        Raw tenancy shape: `{ "sku", "odds", "totalWeight",
+        "distributionUpdatedAt", "choraImdaDimension" }`.
+        BFF-wrapped shape: `{ "data": { "eggSku", "odds",
+        "totalWeight", "distributionUpdatedAt" } }`.
+      tags: [CompanionEggs]
+      responses:
+        "200":
+          description: "Odds disclosure"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EggOddsEnvelope"
+        "404":
+          description: "SKU not found"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/companion-eggs/checkout:
+    post:
+      operationId: createEggCheckoutSession
+      summary: "Create a Stripe Checkout session"
+      description: |
+        Creates a Stripe Checkout session for the chosen SKU. Returns
+        the Stripe-hosted checkout URL + a tenancy purchase id (idempotent
+        on the resolved Stripe session).
+
+        Pre-purchase IMDA D2 odds disclosure must have happened — the FE
+        is responsible for surfacing the odds before this call.
+
+        FE wire (camelCase):
+          request : `{ "sku": "egg.standard.v1" }` (or `{ "eggSku": ... }`)
+          response: `{ "data": { "purchaseId", "stripeCheckoutUrl" } }`
+
+        Raw tenancy wire (snake_case):
+          request : `{ "egg_sku": "egg.standard.v1", "return_url": "..." }`
+          response: `{ "purchase_id", "stripe_checkout_url" }`
+
+        Stripe API egress requirement: the chora-tenancy pod must have
+        outbound HTTPS to `api.stripe.com`. The Stripe API key is loaded
+        from Secret Manager (`STRIPE_SECRET_KEY` env via the
+        `chora-go-common/secrets` helper).
+      tags: [CompanionEggs]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EggCheckoutRequest"
+      responses:
+        "200":
+          description: "Stripe Checkout session created"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EggCheckoutEnvelope"
+        "422":
+          description: "Validation failed (missing / unknown SKU)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: "Stripe API call failed (TLS / egress)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    # -------------------------------------------------------------------
+    # Catalog
+    # -------------------------------------------------------------------
+    EggSku:
+      type: object
+      description: |
+        Single SKU descriptor. BFF reconciliations applied at chora-gateway
+        `companionbridge` per E2E-BE-FAM-GROWTH:
+        - tenancy `priceCents` → FE `priceMicros` (×10_000)
+      required: [sku, displayName, description, priceMicros, currency, purchasable]
+      properties:
+        sku:
+          type: string
+          example: "egg.standard.v1"
+        displayName:
+          type: string
+          example: "Standard Egg"
+        description:
+          type: string
+        priceMicros:
+          type: integer
+          minimum: 0
+          description: |
+            Price in 1/1_000_000 of a major currency unit (e.g.,
+            $9.99 SGD = `9990000`). FE renders by dividing by 1e6.
+        currency:
+          type: string
+          example: "SGD"
+        purchasable:
+          type: boolean
+          description: "Trial egg returns false"
+        brandedTenantName:
+          type: string
+          description: "Tenant brand label when SKU is tenant-branded"
+        defaultFocalAtomSuggestions:
+          type: array
+          items:
+            type: string
+          description: "Suggested focal atom UUIDs"
+        includedInManaTier:
+          type: string
+          enum: [basic, standard, premium]
+          description: "Tenant subsidy eligibility per mana tier"
+
+    EggCatalogResponse:
+      type: object
+      required: [skus]
+      properties:
+        skus:
+          type: array
+          items:
+            $ref: "#/components/schemas/EggSku"
+
+    EggCatalogEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/EggCatalogResponse"
+
+    # -------------------------------------------------------------------
+    # Odds (IMDA D2 mandatory)
+    # -------------------------------------------------------------------
+    BreedOdds:
+      type: object
+      required: [species, rarity, probability]
+      properties:
+        species:
+          type: string
+          enum: [owl, fox, cat, dragon, phoenix, turtle, wolf, raven]
+        rarity:
+          type: string
+          enum: [common, uncommon, rare, legendary]
+        probability:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: |
+            Numeric probability (0..100) of rolling this species when
+            opening this SKU. Sums to 100 across the response array
+            (modulo rounding). IMDA D2 mandates these be real numeric
+            values — never placeholder, never random.
+
+    PreviewEggOddsResponse:
+      type: object
+      required: [eggSku, odds, totalWeight, distributionUpdatedAt]
+      properties:
+        eggSku:
+          type: string
+          example: "egg.standard.v1"
+        odds:
+          type: array
+          items:
+            $ref: "#/components/schemas/BreedOdds"
+        totalWeight:
+          type: integer
+          example: 100
+        distributionUpdatedAt:
+          type: string
+          format: date-time
+          description: "When the tenant operator last updated this SKU's distribution"
+
+    EggOddsEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/PreviewEggOddsResponse"
+
+    # -------------------------------------------------------------------
+    # Checkout
+    # -------------------------------------------------------------------
+    EggCheckoutRequest:
+      type: object
+      required: [sku]
+      properties:
+        sku:
+          type: string
+          example: "egg.standard.v1"
+          description: "Alias of `eggSku`. Either accepted."
+        eggSku:
+          type: string
+          description: "Alias of `sku`. Either accepted."
+        returnUrl:
+          type: string
+          format: uri
+          description: "Optional post-checkout redirect URL"
+
+    EggCheckoutResponse:
+      type: object
+      required: [purchaseId, stripeCheckoutUrl]
+      properties:
+        purchaseId:
+          type: string
+          format: uuid
+          description: "Tenancy idempotent purchase id"
+        stripeCheckoutUrl:
+          type: string
+          format: uri
+          description: "Stripe-hosted Checkout URL"
+
+    EggCheckoutEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/EggCheckoutResponse"
+
+    # -------------------------------------------------------------------
+    # Error envelope
+    # -------------------------------------------------------------------
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              example: "stripe_checkout_failed"
+            message:
+              type: string

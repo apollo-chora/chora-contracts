@@ -1,0 +1,149 @@
+// =============================================================================
+// chora.tenancy.v1 — Billing / Invoice events
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 1 D1
+//   (Tenancy + Billing combined; Stripe is the payment processor)
+// + .claude/skills/monetization-patterns/SKILL.md
+//
+// Owning domain : Tenancy + Billing (chora_tenancy database)
+// Owning team   : Team 3 (Platform)
+// Topic prefix  : chora.tenancy.billing.*
+//
+// Note: Billing lives in the COMBINED chora.tenancy.* namespace —
+// there is NO separate chora.billing.*. Use chora.tenancy.billing.invoice_*
+// for invoice lifecycle events.
+//
+// All amounts are integer-cents (int64) to avoid floating-point drift.
+// Currency is ISO 4217 3-char (e.g., "SGD", "USD").
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.tenancy.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/tenancy/v1;tenancyv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// InvoiceIssued — chora.tenancy.billing.invoice_issued.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a new invoice is issued (typically Stripe invoice.created
+// webhook → InvoiceIssued). Triggers Notifications email-the-billing-contact
+// flow.
+message InvoiceIssued {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — Invoice aggregate root identifier.
+  string invoice_id = 2;
+
+  string tenant_id = 3;
+
+  // Invoice total in integer cents (no floats).
+  int64 amount_cents = 4;
+
+  // ISO 4217 3-char currency (e.g., "SGD").
+  string currency = 5;
+
+  // Stripe payment intent / invoice ID for reconciliation.
+  string stripe_payment_intent_id = 6;
+
+  // Optional related subscription_id (UUIDv7, may be empty for one-off
+  // invoices).
+  string subscription_id = 7;
+
+  // When payment is due.
+  google.protobuf.Timestamp due_at = 8;
+
+  google.protobuf.Timestamp issued_at = 9;
+}
+
+// -----------------------------------------------------------------------------
+// InvoicePaid — chora.tenancy.billing.invoice_paid.v1
+// -----------------------------------------------------------------------------
+//
+// Published when an invoice is paid in full (Stripe invoice.paid webhook).
+// Drives SubscriptionRenewed for recurring invoices.
+message InvoicePaid {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string invoice_id = 2;
+  string tenant_id = 3;
+
+  int64 amount_cents = 4;
+  string currency = 5;
+
+  string stripe_payment_intent_id = 6;
+  string subscription_id = 7;
+
+  google.protobuf.Timestamp paid_at = 8;
+}
+
+// -----------------------------------------------------------------------------
+// InvoiceFailed — chora.tenancy.billing.invoice_failed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when an invoice payment attempt fails. Triggers dunning flow
+// (Notifications retry email). May lead to TenantSuspended after dunning
+// exhaustion.
+message InvoiceFailed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string invoice_id = 2;
+  string tenant_id = 3;
+
+  int64 amount_cents = 4;
+  string currency = 5;
+
+  string stripe_payment_intent_id = 6;
+  string subscription_id = 7;
+
+  // Stripe failure reason code (e.g., "card_declined", "insufficient_funds",
+  // "expired_card", "authentication_required").
+  string failure_reason = 8;
+
+  // Attempt number (1 = first failure, 2 = second, etc.).
+  int32 attempt_number = 9;
+
+  google.protobuf.Timestamp failed_at = 10;
+}
+
+// -----------------------------------------------------------------------------
+// RefundIssued — chora.tenancy.billing.refund_issued.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a refund is issued against a previously-paid invoice
+// (full or partial). Stripe refund.created webhook drives this.
+message RefundIssued {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — Refund record identifier.
+  string refund_id = 2;
+
+  // The original invoice being refunded.
+  string invoice_id = 3;
+
+  string tenant_id = 4;
+
+  // Refund amount in integer cents (may be partial, must be <=
+  // original invoice amount_cents).
+  int64 amount_cents = 5;
+
+  string currency = 6;
+
+  // Stripe refund ID (provider correlation).
+  string stripe_refund_id = 7;
+
+  // Free-text reason (max 512 chars).
+  string reason = 8;
+
+  // GCID of the admin / support agent who issued the refund.
+  string issued_by_gcid = 9;
+
+  google.protobuf.Timestamp issued_at = 10;
+}

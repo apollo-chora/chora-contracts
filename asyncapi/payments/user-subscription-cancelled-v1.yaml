@@ -1,0 +1,62 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Payments — UserSubscriptionCancelled
+  version: 1.0.0
+  description: |
+    Stripe `customer.subscription.deleted` — chora-identity
+    transitions UserSubscription to CANCELLED + revokes ongoing role
+    grants. `at_period_end` distinguishes immediate vs end-of-period
+    effective cancellation.
+
+    - Domain: Payments (`chora_payments` DB)
+    - Topic: `chora.payments.user_subscription.cancelled.v1`
+    - Source proto: `proto/events/payments/user_subscription.proto`
+       message `chora.payments.v1.UserSubscriptionCancelled`
+    - Aggregate: UserSubscription
+    - Per ADR-164 (chora-payments service + 13th DB).
+    - IMDA: envelope.chora_imda_dimension = "accountability"
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  userSubscriptionCancelled:
+    address: chora.payments.user_subscription.cancelled.v1
+    messages:
+      userSubscriptionCancelled:
+        $ref: '#/components/messages/UserSubscriptionCancelled'
+
+operations:
+  publishUserSubscriptionCancelled:
+    action: send
+    channel:
+      $ref: '#/channels/userSubscriptionCancelled'
+    messages:
+      - $ref: '#/channels/userSubscriptionCancelled/messages/userSubscriptionCancelled'
+
+  consumeUserSubscriptionCancelled:
+    action: receive
+    channel:
+      $ref: '#/channels/userSubscriptionCancelled'
+    messages:
+      - $ref: '#/channels/userSubscriptionCancelled/messages/userSubscriptionCancelled'
+
+components:
+  messages:
+    UserSubscriptionCancelled:
+      name: UserSubscriptionCancelled
+      title: Stripe Subscription cancelled (immediate or end-of-period)
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/payments/user_subscription.proto#/chora.payments.v1.UserSubscriptionCancelled'

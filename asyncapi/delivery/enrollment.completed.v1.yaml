@@ -1,0 +1,64 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Delivery — EnrollmentCompleted
+  version: 1.0.0
+  description: |
+    A learner's enrollment in a Course/Class reached the COMPLETED terminal
+    state — the per-learner "I finished this course" fact, DISTINCT from the
+    class-lifecycle chora.delivery.course.completed.v1, from
+    chora.delivery.certification.issued.v1 (a credential), and from
+    chora.consumption.learning_path.completed.v1 (a self-paced atom path).
+
+    - Domain: Content Delivery (`chora_delivery` DB)
+    - Topic: `chora.delivery.enrollment.completed.v1`
+    - Source proto: `proto/events/delivery/enrollment.proto`
+       message `chora.delivery.v1.EnrollmentCompleted`
+  contact:
+    name: Chora Delivery Team (Team 2)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  enrollmentCompleted:
+    address: chora.delivery.enrollment.completed.v1
+    messages:
+      enrollmentCompleted:
+        $ref: '#/components/messages/EnrollmentCompleted'
+
+operations:
+  publishEnrollmentCompleted:
+    action: send
+    channel:
+      $ref: '#/channels/enrollmentCompleted'
+    messages:
+      - $ref: '#/channels/enrollmentCompleted/messages/enrollmentCompleted'
+
+  consumeEnrollmentCompleted:
+    action: receive
+    channel:
+      $ref: '#/channels/enrollmentCompleted'
+    description: |
+      Consumers:
+        - chora-consumption (Companion Global LearnerProfile read-model, ADR-200
+          — per-learner course-completion fact + verified-EXP tier S, ADR-203)
+    messages:
+      - $ref: '#/channels/enrollmentCompleted/messages/enrollmentCompleted'
+
+components:
+  messages:
+    EnrollmentCompleted:
+      name: EnrollmentCompleted
+      title: Learner enrollment reached terminal Completed
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/delivery/enrollment.proto#/chora.delivery.v1.EnrollmentCompleted'

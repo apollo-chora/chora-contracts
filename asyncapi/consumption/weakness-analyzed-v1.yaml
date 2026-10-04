@@ -1,0 +1,87 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Content Consumption — WeaknessAnalyzed
+  version: 1.0.0
+  description: |
+    Published by the ai-kernel Growth-Edge analyser crew on SUCCESSFUL
+    multimodal analysis of an uploaded document. chora-consumption consumes it
+    and upserts the extracted Growth Edges (source = "explicit") into the
+    `learner_weakness` aggregate (embedding dedup + nearest-topic resolve). An
+    empty edges list is valid (nothing weak detected / unreadable — never
+    fabricate, ADR-205 D3).
+
+    - Domain: Content Consumption (`chora_consumption` DB)
+    - Aggregate root: `learner_weakness` (per-GCID Growth Edges)
+    - Topic: `chora.consumption.weakness.analyzed.v1`
+    - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
+      (registered schema `chora-consumption-weakness-analyzed-v1`)
+    - Source proto: `proto/events/consumption/weakness.proto`
+       message `chora.consumption.v1.WeaknessAnalyzed`
+
+    The message shape is UNCHANGED by the ADR-205 graduation (additive proto
+    work landed only on the request-side WeaknessDocUploaded). `model_used` +
+    token counts feed D2 transparency (decision_explanation, WS-3) and the
+    canonical TokenUsageLedger. The learner NEVER sees the raw descriptor — the
+    A+ surface reframes each edge as a positive "Growth Edge".
+
+    This doc back-fills the human companion (AP-02) for a topic that predated
+    the AsyncAPI catalogue (the topic + registered schema were created
+    gcloud-OOB; see m10-data-plane main.tf).
+  contact:
+    name: Team 1 (Content) + Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+    description: Google Cloud Pub/Sub (chora-489812 platform host)
+
+channels:
+  weaknessAnalyzed:
+    address: chora.consumption.weakness.analyzed.v1
+    description: Single-event topic for WeaknessAnalyzed.
+    messages:
+      weaknessAnalyzed:
+        $ref: '#/components/messages/WeaknessAnalyzed'
+
+operations:
+  publishWeaknessAnalyzed:
+    action: send
+    channel:
+      $ref: '#/channels/weaknessAnalyzed'
+    summary: Publish a WeaknessAnalyzed event
+    description: |
+      Emitted by the ai-kernel Growth-Edge analyser crew (chora-ai-kernel-
+      orchestrator) via the outbox once the diagnosis is reviewed + synthesized.
+    messages:
+      - $ref: '#/channels/weaknessAnalyzed/messages/weaknessAnalyzed'
+
+  consumeWeaknessAnalyzed:
+    action: receive
+    channel:
+      $ref: '#/channels/weaknessAnalyzed'
+    summary: Subscribe to WeaknessAnalyzed events
+    description: |
+      Consumers:
+      - chora-consumption — upsert the LearnerWeakness aggregate (dedup +
+        topic-resolve each edge).
+      - chora-observability — D1 accountability + token-cost evidence.
+    messages:
+      - $ref: '#/channels/weaknessAnalyzed/messages/weaknessAnalyzed'
+
+components:
+  messages:
+    WeaknessAnalyzed:
+      name: WeaknessAnalyzed
+      title: Weakness Analyzed (Growth Edges extracted)
+      summary: The analyser crew distilled an upload into Growth Edges
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/consumption/weakness.proto#/chora.consumption.v1.WeaknessAnalyzed'

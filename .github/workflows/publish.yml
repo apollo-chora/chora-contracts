@@ -1,0 +1,26 @@
+name: Publish to GitHub Packages
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: uv build
+      - name: Publish
+        run: uv publish --index-url https://ghcr.io/5007-Capstone/
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

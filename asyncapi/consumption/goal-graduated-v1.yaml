@@ -1,0 +1,83 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Content Consumption — GoalGraduated
+  version: 1.0.0
+  description: |
+    Published when a learner-owned Goal (`goal`) transitions active→achieved —
+    every concept in its `concept_set` is now mastered (a verified-mastery
+    graduation, ADR-204 §9). The Goal-level analogue of
+    `chora.consumption.weakness.grown.v1` (ADR-196), one tier up the aggregate
+    hierarchy: an edge grows → a Goal's progress moves → at 100% it graduates.
+
+    - Domain: Content Consumption (`chora_consumption` DB)
+    - Aggregate root: `goal` (learner-owned, ADR-204 §2)
+    - Topic: `chora.consumption.goal.graduated.v1`
+    - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
+    - Source proto: `proto/events/consumption/goal.proto`
+       message `chora.consumption.v1.GoalGraduated`
+
+    Emitted once per real transition (idempotent via the envelope
+    idempotency_key = goal_id:graduated_at); a re-graduation after a fresh
+    weakness re-opened a concept is a new event. Curiosity / empty-concept-set
+    Goals never auto-graduate (total_concepts == 0). Embeds the mandatory
+    `chora.common.v1.EventEnvelope` as field 1.
+  contact:
+    name: Team 1 (Content) + Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+    description: Google Cloud Pub/Sub (chora-489812 platform host)
+
+channels:
+  goalGraduated:
+    address: chora.consumption.goal.graduated.v1
+    description: Single-event topic for GoalGraduated.
+    messages:
+      goalGraduated:
+        $ref: '#/components/messages/GoalGraduated'
+
+operations:
+  publishGoalGraduated:
+    action: send
+    channel:
+      $ref: '#/channels/goalGraduated'
+    summary: Publish a GoalGraduated event
+    description: |
+      Emitted by chora-consumption from the goal-graduation subscriber the moment
+      an active Goal's mastered-concept share reaches 100% (every concept in the
+      set is a grown Growth Edge).
+    messages:
+      - $ref: '#/channels/goalGraduated/messages/goalGraduated'
+
+  consumeGoalGraduated:
+    action: receive
+    channel:
+      $ref: '#/channels/goalGraduated'
+    summary: Subscribe to GoalGraduated events
+    description: |
+      Primary consumers (loosely-coupled, attach later):
+      - Sharing — award the Three-Currency Economy (XP / Coins / Reputation)
+      - Consumption (Companion) — companion celebration / XP
+      - Observability — engagement / D1 evidence
+      The A+ FE celebrates graduation by reading status='achieved' directly.
+    messages:
+      - $ref: '#/channels/goalGraduated/messages/goalGraduated'
+
+components:
+  messages:
+    GoalGraduated:
+      name: GoalGraduated
+      title: Goal Graduated (all concepts mastered)
+      summary: A learner-owned Goal reached achieved (verified mastery)
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/consumption/goal.proto#/chora.consumption.v1.GoalGraduated'

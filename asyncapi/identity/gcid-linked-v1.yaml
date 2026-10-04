@@ -1,0 +1,62 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Identity — GcidLinked
+  version: 1.0.0
+  description: |
+    Published when an existing GCID is linked to an additional IdP credential
+    (e.g., learner adds Singpass to a passkey-only GCID). Distinct from
+    GcidMerged — no GCID is retired.
+
+    - Domain: Identity (`chora_identity` DB)
+    - Topic: `chora.identity.gcid.linked.v1`
+    - Source proto: `proto/events/identity/gcid.proto`
+       message `chora.identity.v1.GcidLinked`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  gcidLinked:
+    address: chora.identity.gcid.linked.v1
+    messages:
+      gcidLinked:
+        $ref: '#/components/messages/GcidLinked'
+
+operations:
+  publishGcidLinked:
+    action: send
+    channel:
+      $ref: '#/channels/gcidLinked'
+    messages:
+      - $ref: '#/channels/gcidLinked/messages/gcidLinked'
+
+  consumeGcidLinked:
+    action: receive
+    channel:
+      $ref: '#/channels/gcidLinked'
+    description: |
+      Consumers: Audit log, Notifications (security advisory),
+      Observability (federation funnel).
+    messages:
+      - $ref: '#/channels/gcidLinked/messages/gcidLinked'
+
+components:
+  messages:
+    GcidLinked:
+      name: GcidLinked
+      title: GCID Linked
+      summary: An existing GCID gained an additional IdP link
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/identity/gcid.proto#/chora.identity.v1.GcidLinked'

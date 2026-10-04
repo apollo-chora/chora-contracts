@@ -1,0 +1,144 @@
+// =============================================================================
+// chora.delivery.v1 — Exam administration events (proctored cert exams)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 2 D7+D8
+// + .claude/rules/ddd-enforcement.md
+// + .claude/skills/domain-content-delivery/SKILL.md (ProctoredExam aggregate
+//   with proctoring hooks — RLS includes proctor_role predicate).
+//
+// Owning domain  : Content Delivery (chora_delivery database)
+// Owning team    : Team 2 (Delivery)
+// Topic prefix   : chora.delivery.exam.*
+//
+// ProctoredExam represents a high-stakes / cert-bearing exam with optional
+// proctoring (none / AI / human-live / human-recorded).
+//
+// Per ADR-129/130/131 collapse mandate, this proto absorbs what was
+// previously the standalone `chora.examadmin.*` topics.
+//
+// Cross-domain references (no FK):
+//   - candidate_gcid : Identity (UUID, no FK)
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.delivery.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/delivery/v1;deliveryv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// ProctorMethod — proctoring strategy. Drives camera / chat / recording
+// requirements + ExamIncidentLog flagging behaviour.
+enum ProctorMethod {
+  PROCTOR_METHOD_UNSPECIFIED = 0;
+  PROCTOR_METHOD_NONE = 1;
+  PROCTOR_METHOD_AUTO_AI = 2;
+  PROCTOR_METHOD_HUMAN_LIVE = 3;
+  PROCTOR_METHOD_HUMAN_RECORDED = 4;
+}
+
+// PassFail — final exam disposition.
+enum PassFail {
+  PASS_FAIL_UNSPECIFIED = 0;
+  PASS_FAIL_PASS = 1;
+  PASS_FAIL_FAIL = 2;
+}
+
+// -----------------------------------------------------------------------------
+// ExamScheduled — chora.delivery.exam.scheduled.v1
+// -----------------------------------------------------------------------------
+//
+// Published when an exam slot is scheduled for a candidate. Drives
+// Notifications (calendar invite) + proctor allocation.
+message ExamScheduled {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 identifier of the ProctoredExam.
+  string exam_id = 2;
+
+  // UUID of the Course the exam is bound to (same DB).
+  string course_id = 3;
+
+  // GCID of the exam candidate. Cross-domain — no FK.
+  string candidate_gcid = 4;
+
+  // Scheduled exam start time.
+  google.protobuf.Timestamp scheduled_for = 5;
+
+  ProctorMethod proctor_method = 6;
+}
+
+// -----------------------------------------------------------------------------
+// ExamAdministered — chora.delivery.exam.administered.v1
+// -----------------------------------------------------------------------------
+//
+// Published when the candidate begins the exam (proctoring active, items
+// served). Marks the start of incident-log ingestion for that session.
+message ExamAdministered {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string exam_id = 2;
+
+  string course_id = 3;
+
+  string candidate_gcid = 4;
+
+  google.protobuf.Timestamp scheduled_for = 5;
+
+  ProctorMethod proctor_method = 6;
+
+  google.protobuf.Timestamp administered_at = 7;
+}
+
+// -----------------------------------------------------------------------------
+// ExamProctored — chora.delivery.exam.proctored.v1
+// -----------------------------------------------------------------------------
+//
+// Published when proctoring concludes (candidate submits or session ends).
+// Carries no fine-grained incident detail — those live in ExamIncidentLog
+// inside chora_delivery (RLS-scoped to assigned proctor).
+message ExamProctored {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string exam_id = 2;
+
+  string course_id = 3;
+
+  string candidate_gcid = 4;
+
+  google.protobuf.Timestamp scheduled_for = 5;
+
+  ProctorMethod proctor_method = 6;
+
+  google.protobuf.Timestamp proctored_at = 7;
+}
+
+// -----------------------------------------------------------------------------
+// ExamGraded — chora.delivery.exam.graded.v1
+// -----------------------------------------------------------------------------
+//
+// Published when the exam is graded (auto / human). Drives Certification
+// issuance flow (on PASS_FAIL_PASS) + Consumption path completion.
+message ExamGraded {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string exam_id = 2;
+
+  string course_id = 3;
+
+  string candidate_gcid = 4;
+
+  google.protobuf.Timestamp scheduled_for = 5;
+
+  ProctorMethod proctor_method = 6;
+
+  // Numeric score (0..100). Pass-mark threshold tenant-configurable.
+  int32 score = 7;
+
+  PassFail pass_fail = 8;
+
+  google.protobuf.Timestamp graded_at = 9;
+}

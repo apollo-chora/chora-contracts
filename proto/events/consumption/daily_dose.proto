@@ -1,0 +1,111 @@
+// =============================================================================
+// Chora Content Consumption — DailyDose events (Phyllis MVP — Comic Ch6 P14)
+// =============================================================================
+//
+// Aggregate root: Companion (composition decision) + AtomSeed projection.
+// Owning domain : Content Consumption (chora_consumption DB).
+// Topic prefix  : chora.consumption.daily_dose.*
+//
+// The Daily Dose is the 5-atom curated bundle a learner sees when they
+// open the Comic Ch6 P14 "Your Daily Dose is ready!" nudge. Composition is
+// deterministic on TopicRetention scores (40% Ebbinghaus + 30% curiosity +
+// 30% weakness in the spec; the MVP uses a simpler 2/1/2 mix per the Phyllis
+// MVP spec §5.4).
+//
+// DailyDoseServed records the exact 5 atom_ids served on each call so that
+// downstream consumers (Notifications banner; Observability funnel) can
+// reason about engagement without re-running composition.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.consumption.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/consumption/v1;consumptionv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// DoseReason tags WHY each atom landed in the Daily Dose. Surfaced to UI for
+// per-card label rendering ("Review", "New", "Curiosity").
+enum DoseReason {
+  DOSE_REASON_UNSPECIFIED = 0;
+  DOSE_REASON_EBBINGHAUS_REVIEW = 1; // decay > 0.4 — due for review
+  DOSE_REASON_FRESH = 2;             // never reviewed
+  DOSE_REASON_CURIOSITY = 3;         // related-topic exploration
+}
+
+// DailyDoseEntry is one card in the served dose.
+message DailyDoseEntry {
+  string atom_id = 1;
+  string topic = 2;
+  string title = 3;
+  DoseReason dose_reason = 4;
+}
+
+// DailyDoseServed — emitted on GET /companion/daily-dose.
+//
+// Topic: chora.consumption.daily_dose.served.v1
+// Consumers:
+//   - Notifications (in-app banner trigger per `ux_engagement.md` §1)
+//   - Observability (dose-acceptance funnel)
+//   - AI Kernel (Companion persona context warm-up for the next interaction)
+//
+// Comic anchor (Ch6 P14 P4): "Your Daily Dose is ready! 5 atoms... your
+// memory's fading on a few topics — a quick 5-minute quiz will fix that!"
+message DailyDoseServed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string learner_gcid = 2;
+
+  // The 5 entries served (canonical 2-Ebbinghaus + 1-Fresh + 2-Curiosity mix).
+  // May be < 5 only on a brand-new learner with no atom catalogue available.
+  repeated DailyDoseEntry entries = 3;
+
+  // Total entries served (length of `entries`; convenience for subscribers).
+  int32 size = 4;
+
+  // Comic Ch6 P14 nudge text returned to the UI (kept here for ledger
+  // purposes — not the only place it lives).
+  string message = 5;
+
+  google.protobuf.Timestamp served_at = 6;
+}
+
+// DailyDoseClicked — emitted by the content_recommender reasoning engine
+// when a learner clicks / opens a Daily Dose entry. Provides the upstream
+// signal for the engagement funnel (Served → Clicked → Completed → Reaction).
+//
+// Topic: chora.consumption.daily_dose.clicked.v1
+// Consumers:
+//   - chora-consumption (write click-through telemetry; refresh the per-
+//     user KG hexagon fog if the click is a curiosity-driven entry)
+//   - chora-observability (engagement funnel + dose-completion-rate
+//     dashboards; D1 IMDA accountability ledger for content_recommender
+//     decisions per ADR-141)
+message DailyDoseClicked {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 of the served Daily Dose (correlates back to DailyDoseServed via
+  // envelope.correlation_id chain; this field is the dose primary key for
+  // direct subscriber filtering).
+  string dose_id = 2;
+
+  // UUIDv7 of the LearningAtom the learner clicked. Mirrors
+  // DailyDoseEntry.atom_id for the chosen entry.
+  string atom_id = 3;
+
+  // The learner who clicked. Same as envelope.gcid; duplicated for filter-
+  // friendly subscribers.
+  string learner_gcid = 4;
+
+  google.protobuf.Timestamp clicked_at = 5;
+
+  // Topic tag of the chosen entry (mirrors DailyDoseEntry.topic). Examples:
+  //   "agile", "scrum", "fractions", "world_war_2". Free-form per atom_seeds.
+  string entry_topic = 6;
+
+  // Zero-indexed position of the clicked entry within the dose (0..size-1).
+  // Useful for surfacing positional bias telemetry in the engagement funnel.
+  int32 click_index = 7;
+}

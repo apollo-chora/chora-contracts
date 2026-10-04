@@ -1,0 +1,88 @@
+asyncapi: "3.0.0"
+info:
+  title: "chora.delivery.rostering.finalized.v1"
+  version: "1.0.0"
+  description: |
+    Published when an admin locks a roster. Carries the full learner snapshot
+    so downstream consumers have a canonical attendance baseline.
+    Companion to `proto/events/delivery/rostering.proto` message `RosterFinalized`.
+
+    Per ADR-129/130/131 collapse mandate, supersedes legacy
+    `chora.training.roster.published`.
+  contact: { name: "Chora Platform Team" }
+  license: { name: "Proprietary" }
+
+defaultContentType: application/x-protobuf
+
+servers:
+  local: { host: "localhost:8085", protocol: googlepubsub, description: "Pub/Sub Emulator" }
+  production: { host: "pubsub.googleapis.com", protocol: googlepubsub, description: "Google Cloud Pub/Sub" }
+
+channels:
+  rosterFinalized:
+    address: chora.delivery.rostering.finalized.v1
+    description: |
+      Carries RosterFinalized Protobuf payload.
+
+      Downstream consumers:
+        - chora-notifications      : kickoff packets
+        - chora-delivery (attendance) : attendance baseline
+        - chora-delivery (signage) : classroom signage rendering
+    messages:
+      rosterFinalized:
+        $ref: "#/components/messages/RosterFinalized"
+
+operations:
+  publishRosterFinalized:
+    action: send
+    channel: { $ref: "#/channels/rosterFinalized" }
+    summary: "Publish RosterFinalized"
+    messages: [ { $ref: "#/channels/rosterFinalized/messages/rosterFinalized" } ]
+  consumeRosterFinalized:
+    action: receive
+    channel: { $ref: "#/channels/rosterFinalized" }
+    summary: "Consume RosterFinalized"
+    messages: [ { $ref: "#/channels/rosterFinalized/messages/rosterFinalized" } ]
+
+components:
+  messages:
+    RosterFinalized:
+      name: RosterFinalized
+      title: "Roster Finalized"
+      summary: "A roster was locked by an admin."
+      contentType: application/x-protobuf
+      payload:
+        type: object
+        description: "Mirrors chora.delivery.v1.RosterFinalized."
+        properties:
+          envelope: { $ref: "#/components/schemas/EventEnvelope" }
+          roster_id: { type: string, format: uuid }
+          course_id: { type: string, format: uuid }
+          learner_gcids:
+            type: array
+            items: { type: string }
+          assignment_type: { $ref: "#/components/schemas/AssignmentType" }
+          finalized_by_gcid: { type: string }
+          finalized_at: { type: string, format: date-time }
+  schemas:
+    EventEnvelope:
+      type: object
+      description: "Mirrors chora.common.v1.EventEnvelope."
+      required: [event_id, idempotency_key, tenant_id, occurred_at, published_at, traceparent, source_project, source_service, schema_version]
+      properties:
+        event_id: { type: string, format: uuid }
+        idempotency_key: { type: string }
+        tenant_id: { type: string }
+        gcid: { type: string }
+        occurred_at: { type: string, format: date-time }
+        published_at: { type: string, format: date-time }
+        traceparent: { type: string }
+        tracestate: { type: string }
+        source_project: { type: string }
+        source_service: { type: string }
+        schema_version: { type: integer }
+        correlation_id: { type: string }
+        causation_id: { type: string }
+    AssignmentType:
+      type: string
+      enum: [ASSIGNMENT_TYPE_UNSPECIFIED, ASSIGNMENT_TYPE_MANUAL, ASSIGNMENT_TYPE_BULK_IMPORT, ASSIGNMENT_TYPE_AUTO_ALLOCATED]

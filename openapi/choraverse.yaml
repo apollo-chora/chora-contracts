@@ -1,0 +1,421 @@
+openapi: "3.2.0"
+info:
+  title: Chora Choraverse API
+  version: "0.1.0"
+  description: |
+    Gamification + economy REST API for the Choraverse domain.
+
+    Choraverse is the in-game economy + gamification layer for Chora,
+    backing Comic Ch7 P14-P16 (trading cards, crafting workshop, boss
+    challenges, skin gallery, fog-of-war discovery panels).
+
+    Surfaces:
+      A+ Reader      — fog-of-war discovery; card collection display
+      C+ Connect+    — trading card show-and-tell (later phase)
+      O+             — operator dashboards for boss + economy tuning
+
+    Auth: Identity Platform JWT (Bearer). All routes are tenant-scoped
+    via the `X-Tenant-Id` + `X-Gcid` headers.
+
+    Owning team    : Team 1 (Content) — companion to chora-sharing
+    Owning service : services/chora-choraverse (Go 1.26+)
+    Database       : chora_choraverse (M12+)
+    Topic prefix   : chora.choraverse.*
+
+    Per CHO-745-749 (M14 future work). This contract exists BEFORE
+    Postgres + Pub/Sub wiring (AP-01: contracts before implementation).
+
+  contact:
+    name: Chora Platform Team — Content Track
+  license:
+    name: Proprietary
+
+servers:
+  - url: https://api.chora.io
+    description: Production
+  - url: http://localhost:8080
+    description: Local dev
+
+components:
+  parameters:
+    TenantHeader:
+      in: header
+      name: X-Tenant-Id
+      required: true
+      schema:
+        type: string
+      description: Tenant identifier; required on every protected route.
+    GCIDHeader:
+      in: header
+      name: X-Gcid
+      required: true
+      schema:
+        type: string
+      description: Global Chora ID of the actor (UUIDv7 opaque).
+    TraceparentHeader:
+      in: header
+      name: Traceparent
+      required: false
+      schema:
+        type: string
+      description: W3C Trace Context — propagated across Pub/Sub.
+
+  schemas:
+    Card:
+      type: object
+      required: [id, tenant_id, atom_id, set_name, title, rarity, owner_gcid]
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string }
+        atom_id: { type: string, format: uuid }
+        set_name: { type: string, example: "Founding Agilists" }
+        title: { type: string, example: "Sprint Master" }
+        rarity:
+          type: string
+          enum: [COMMON, RARE, EPIC, LEGENDARY]
+        owner_gcid: { type: string }
+
+    CardDropRequest:
+      type: object
+      required: [atom_id, set_name, title]
+      properties:
+        atom_id: { type: string, format: uuid }
+        set_name: { type: string }
+        title: { type: string }
+
+    CraftRequest:
+      type: object
+      required: [card_ids]
+      properties:
+        card_ids:
+          type: array
+          minItems: 3
+          maxItems: 3
+          items: { type: string, format: uuid }
+          description: |
+            Exactly 3 cards. Must share rarity + set + tenant.
+            Output rarity is one tier higher.
+
+    Boss:
+      type: object
+      required: [id, tenant_id, gcid, atom_id, boss_name, status, xp_reward, xp_awarded]
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string }
+        gcid: { type: string }
+        atom_id: { type: string, format: uuid }
+        boss_name: { type: string }
+        status:
+          type: string
+          enum: [OFFERED, ENGAGED, IN_BATTLE, VICTORIOUS, DEFEATED]
+        xp_reward: { type: integer, minimum: 0 }
+        xp_awarded: { type: integer, minimum: 0 }
+
+    BossOfferRequest:
+      type: object
+      required: [atom_id, boss_name, xp_reward]
+      properties:
+        atom_id: { type: string, format: uuid }
+        boss_name: { type: string }
+        xp_reward: { type: integer, minimum: 0 }
+
+    BossStatusUpdate:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ENGAGED, IN_BATTLE]
+
+    BossResolveRequest:
+      type: object
+      required: [victorious]
+      properties:
+        victorious: { type: boolean }
+
+    SkinPurchaseRequest:
+      type: object
+      required: [skin_id]
+      properties:
+        skin_id: { type: string, format: uuid }
+
+    SkinPurchaseReceipt:
+      type: object
+      properties:
+        purchase_id: { type: string, format: uuid }
+        skin_id: { type: string, format: uuid }
+        price_coins: { type: integer, minimum: 0 }
+
+    FogRequest:
+      type: object
+      required: [panel_id]
+      properties:
+        panel_id: { type: string }
+        panel_ids:
+          type: array
+          items: { type: string }
+          description: |
+            Optional — supplied on first /api/fog/discover call to seed the
+            map for this learner. Subsequent calls can omit.
+
+    FogResponse:
+      type: object
+      properties:
+        panel_id: { type: string }
+        status:
+          type: string
+          enum: [HIDDEN, DISCOVERED, UNLOCKED]
+        counts:
+          type: object
+          properties:
+            Hidden: { type: integer }
+            Discovered: { type: integer }
+            Unlocked: { type: integer }
+
+    Wallet:
+      type: object
+      required: [tenant_id, gcid, xp, star_credit, coins]
+      properties:
+        tenant_id: { type: string }
+        gcid: { type: string }
+        xp: { type: integer, minimum: 0 }
+        star_credit: { type: integer, minimum: 0 }
+        coins: { type: integer, minimum: 0 }
+
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+
+paths:
+  /healthz:
+    get:
+      summary: Liveness probe
+      responses:
+        "200":
+          description: OK
+
+  /readyz:
+    get:
+      summary: Readiness probe
+      responses:
+        "200":
+          description: Ready
+
+  /api/cards/drop:
+    post:
+      summary: Mint a new card (rolls rarity by drop table)
+      parameters:
+        - $ref: "#/components/parameters/TenantHeader"
+        - $ref: "#/components/parameters/GCIDHeader"
+        - $ref: "#/components/parameters/TraceparentHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CardDropRequest" }
+      responses:
+        "201":
+          description: Card minted; emits chora.choraverse.card.dropped.v1
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Card" }
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/cards:
+    get:
+      summary: List cards owned by the actor (X-Gcid)
+      parameters:
+        - $ref: "#/components/parameters/TenantHeader"
+        - $ref: "#/components/parameters/GCIDHeader"
+      responses:
+        "200":
+          description: Card list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cards:
+                    type: array
+                    items: { $ref: "#/components/schemas/Card" }
+
+  /api/cards/{id}:
+    get:
+      summary: Get card by id
+      parameters:
+        - $ref: "#/components/parameters/TenantHeader"
+        - $ref: "#/components/parameters/GCIDHeader"
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Card
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Card" }
+        "404":
+          description: Not found
+
+  /api/craft:
+    post:
+      summary: Combine 3 cards into 1 of higher rarity
+      parameters:
+        - $ref: "#/components/parameters/TenantHeader"
+        - $ref: "#/components/parameters/GCIDHeader"
+        - $ref: "#/components/parameters/TraceparentHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CraftRequest" }
+      responses:
+        "201":
+          description: Crafted; emits chora.choraverse.craft.completed.v1
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Card" }
+        "422":
+          description: No promotion exists (e.g., 3x Legendary)
+
+  /api/boss:
+    post:
+      summary: Offer a Boss Challenge
+      parameters:
+        - $ref: "#/components/parameters/TenantHeader"
+        - $ref: "#/components/parameters/GCIDHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BossOfferRequest" }
+      responses:
+        "201":
+          description: Boss in OFFERED status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Boss" }
+
+  /api/boss/{id}/status:
+    patch:
+      summary: Advance state machine (OFFERED -> ENGAGED -> IN_BATTLE)
+      parameters:
+        - $ref: "#/components/parameters/TenantHeader"
+        - $ref: "#/components/parameters/GCIDHeader"
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BossStatusUpdate" }
+      responses:
+        "200":
+          description: Boss after transition
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Boss" }
+        "422":
+          description: Illegal transition
+
+  /api/boss/{id}/resolve:
+    post:
+      summary: Resolve IN_BATTLE -> VICTORIOUS or DEFEATED
+      parameters:
+        - $ref: "#/components/parameters/TenantHeader"
+        - $ref: "#/components/parameters/GCIDHeader"
+        - $ref: "#/components/parameters/TraceparentHeader"
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BossResolveRequest" }
+      responses:
+        "200":
+          description: Resolved; emits chora.choraverse.boss_challenge.completed.v1
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Boss" }
+
+  /api/skins/purchase:
+    post:
+      summary: Buy a skin from the gallery (debits Coins)
+      parameters:
+        - $ref: "#/components/parameters/TenantHeader"
+        - $ref: "#/components/parameters/GCIDHeader"
+        - $ref: "#/components/parameters/TraceparentHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SkinPurchaseRequest" }
+      responses:
+        "201":
+          description: Purchase committed; emits chora.choraverse.skin.purchased.v1
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SkinPurchaseReceipt" }
+        "422":
+          description: Insufficient funds
+
+  /api/fog/discover:
+    post:
+      summary: Reveal a panel (HIDDEN -> DISCOVERED)
+      parameters:
+        - $ref: "#/components/parameters/TenantHeader"
+        - $ref: "#/components/parameters/GCIDHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FogRequest" }
+      responses:
+        "200":
+          description: Panel discovered
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FogResponse" }
+
+  /api/fog/unlock:
+    post:
+      summary: Unlock a panel (DISCOVERED -> UNLOCKED)
+      parameters:
+        - $ref: "#/components/parameters/TenantHeader"
+        - $ref: "#/components/parameters/GCIDHeader"
+        - $ref: "#/components/parameters/TraceparentHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FogRequest" }
+      responses:
+        "200":
+          description: Panel unlocked; emits chora.choraverse.panel.unlocked.v1
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FogResponse" }
+
+  /api/economy/balance:
+    get:
+      summary: Read the actor's wallet (XP / StarCredit / Coins)
+      parameters:
+        - $ref: "#/components/parameters/TenantHeader"
+        - $ref: "#/components/parameters/GCIDHeader"
+      responses:
+        "200":
+          description: Wallet
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Wallet" }

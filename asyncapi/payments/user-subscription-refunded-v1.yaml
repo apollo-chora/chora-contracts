@@ -1,0 +1,61 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Payments — UserSubscriptionRefunded
+  version: 1.0.0
+  description: |
+    Stripe `charge.refunded` on a subscription invoice (rare —
+    usually a prorated partial refund on cancellation). chora-identity
+    revokes the proportional mana / role grant.
+
+    - Domain: Payments (`chora_payments` DB)
+    - Topic: `chora.payments.user_subscription.refunded.v1`
+    - Source proto: `proto/events/payments/user_subscription.proto`
+       message `chora.payments.v1.UserSubscriptionRefunded`
+    - Aggregate: UserSubscription
+    - Per ADR-164 (chora-payments service + 13th DB).
+    - IMDA: envelope.chora_imda_dimension = "accountability"
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  userSubscriptionRefunded:
+    address: chora.payments.user_subscription.refunded.v1
+    messages:
+      userSubscriptionRefunded:
+        $ref: '#/components/messages/UserSubscriptionRefunded'
+
+operations:
+  publishUserSubscriptionRefunded:
+    action: send
+    channel:
+      $ref: '#/channels/userSubscriptionRefunded'
+    messages:
+      - $ref: '#/channels/userSubscriptionRefunded/messages/userSubscriptionRefunded'
+
+  consumeUserSubscriptionRefunded:
+    action: receive
+    channel:
+      $ref: '#/channels/userSubscriptionRefunded'
+    messages:
+      - $ref: '#/channels/userSubscriptionRefunded/messages/userSubscriptionRefunded'
+
+components:
+  messages:
+    UserSubscriptionRefunded:
+      name: UserSubscriptionRefunded
+      title: Stripe refund issued for a subscription invoice
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/payments/user_subscription.proto#/chora.payments.v1.UserSubscriptionRefunded'

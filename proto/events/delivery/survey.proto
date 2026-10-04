@@ -1,0 +1,95 @@
+// =============================================================================
+// chora.delivery.v1 — Survey events (course feedback + cross-course surveys)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 2 D7+D8
+// + .claude/rules/ddd-enforcement.md.
+//
+// Owning domain  : Content Delivery (chora_delivery database)
+// Owning team    : Team 2 (Delivery)
+// Topic prefix   : chora.delivery.survey.*
+//
+// Surveys gather feedback at end-of-course (course_id set) or as ad-hoc
+// cross-course questionnaires (course_id unset / empty). The full
+// answer payload lives in chora_delivery; the event carries a summary.
+//
+// Per ADR-129/130/131 collapse mandate, this proto absorbs what was
+// previously the standalone `chora.survey.*` topics.
+//
+// Cross-domain references (no FK):
+//   - respondent_gcid : Identity (UUID, no FK)
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.delivery.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/delivery/v1;deliveryv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// SurveyDistributed — chora.delivery.survey.distributed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a survey is distributed to a respondent population.
+// Drives Notifications (invite emails) + analytics ingestion.
+message SurveyDistributed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 identifier of the Survey.
+  string survey_id = 2;
+
+  // Optional UUID of the parent Course. Empty for cross-course surveys.
+  string course_id = 3;
+
+  // GCID of the actor distributing the survey (admin / instructor).
+  string distributed_by_gcid = 4;
+
+  google.protobuf.Timestamp distributed_at = 5;
+}
+
+// -----------------------------------------------------------------------------
+// SurveyResponseSubmitted — chora.delivery.survey.response_submitted.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a respondent submits a response. The summary string is
+// a denormalised one-line representation (e.g., "rating=5,nps=9") for
+// downstream consumers; the full structured response lives inside
+// chora_delivery and is fetched via the Survey API when needed.
+message SurveyResponseSubmitted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string survey_id = 2;
+
+  // Optional course_id (matches the SurveyDistributed event).
+  string course_id = 3;
+
+  // GCID of the respondent. Cross-domain — no FK.
+  string respondent_gcid = 4;
+
+  // Compact textual summary of the response (max 1024 chars).
+  string response_summary = 5;
+
+  google.protobuf.Timestamp submitted_at = 6;
+}
+
+// -----------------------------------------------------------------------------
+// SurveyClosed — chora.delivery.survey.closed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a survey is closed (no further responses accepted).
+// Drives Analytics (final aggregation) + Notifications (results-ready).
+message SurveyClosed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string survey_id = 2;
+
+  string course_id = 3;
+
+  // GCID of the actor who closed the survey.
+  string closed_by_gcid = 4;
+
+  google.protobuf.Timestamp closed_at = 5;
+}

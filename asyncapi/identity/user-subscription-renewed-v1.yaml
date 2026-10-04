@@ -1,0 +1,62 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Identity — UserSubscriptionRenewed
+  version: 1.0.0
+  description: |
+    Published on successful per-user subscription renewal (Stripe webhook
+    invoice.paid). Carries new period boundaries; triggers a downstream
+    UserManaCredited event for the monthly drip grant.
+
+    - Domain: Identity (`chora_identity` DB)
+    - Topic: `chora.identity.user_subscription.renewed.v1`
+    - Source proto: `proto/events/identity/user_subscription.proto`
+       message `chora.identity.v1.UserSubscriptionRenewed`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  userSubscriptionRenewed:
+    address: chora.identity.user_subscription.renewed.v1
+    messages:
+      userSubscriptionRenewed:
+        $ref: '#/components/messages/UserSubscriptionRenewed'
+
+operations:
+  publishUserSubscriptionRenewed:
+    action: send
+    channel:
+      $ref: '#/channels/userSubscriptionRenewed'
+    messages:
+      - $ref: '#/channels/userSubscriptionRenewed/messages/userSubscriptionRenewed'
+
+  consumeUserSubscriptionRenewed:
+    action: receive
+    channel:
+      $ref: '#/channels/userSubscriptionRenewed'
+    description: |
+      Consumers: Identity (UserManaCredited drip emission), Notifications
+      (renewal receipt), Observability (retention KPI).
+    messages:
+      - $ref: '#/channels/userSubscriptionRenewed/messages/userSubscriptionRenewed'
+
+components:
+  messages:
+    UserSubscriptionRenewed:
+      name: UserSubscriptionRenewed
+      title: User Subscription Renewed
+      summary: A per-user subscription has renewed successfully
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/identity/user_subscription.proto#/chora.identity.v1.UserSubscriptionRenewed'

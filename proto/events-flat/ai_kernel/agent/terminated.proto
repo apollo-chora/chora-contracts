@@ -1,0 +1,91 @@
+// =============================================================================
+// GENERATED — DO NOT EDIT.
+// Source : events/ai_kernel/agent.proto message AgentTerminated
+// Tool   : chora-contracts/internal/protoflatten
+// Why    : GCP Pub/Sub Schema Registry rejects (a) schemas with `import`
+//          statements and (b) schemas with more than one top-level message.
+//          This flat copy contains exactly ONE top-level message;
+//          EventEnvelope + Timestamp + transitive deps are nested inside.
+// Path C : see chora-contracts/CHANGELOG.md and m10-data-plane main.tf.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.ai_kernel.v1;
+
+message AgentTerminated {
+  // Inlined chora.common.v1.EventEnvelope (nested for self-contained schema).
+  message Envelope {
+    string event_id = 1;
+    string idempotency_key = 2;
+    string tenant_id = 3;
+    string gcid = 4;
+    Timestamp occurred_at = 5;
+    Timestamp published_at = 6;
+    string traceparent = 7;
+    string tracestate = 8;
+    string source_project = 9;
+    string source_service = 10;
+    int32 schema_version = 11;
+    string correlation_id = 12;
+    string causation_id = 13;
+    string chora_imda_dimension = 14;
+    string imda_lifecycle_stage = 15;
+  }
+
+  // Inlined google.protobuf.Timestamp (nested; wire-compatible).
+  message Timestamp {
+    int64 seconds = 1;
+    int32 nanos = 2;
+  }
+
+  // Inlined dep: AgentTerminationContext
+  message AgentTerminationContext {
+    string last_state_node = 1;
+    string last_tool_name = 2;
+    string last_error_message = 3;
+    int32 iteration_count = 4;
+    map<string, string> partial_state = 5;
+    string current_span_id = 6;
+  }
+
+  // Inlined dep: PartialStateEntry
+  message PartialStateEntry {
+    string key = 1;
+    string value = 2;
+  }
+
+  // Inlined enum dep: AgentExecutionRuntime
+  enum AgentExecutionRuntime {
+    AGENT_EXECUTION_RUNTIME_UNSPECIFIED = 0;
+    AGENT_EXECUTION_RUNTIME_LANGGRAPH_PYTHON = 1;
+    AGENT_EXECUTION_RUNTIME_ADK_GO = 2;
+    AGENT_EXECUTION_RUNTIME_ADK_PYTHON = 3;
+    AGENT_EXECUTION_RUNTIME_GO_EXECUTOR = 4;
+  }
+
+  // Inlined enum dep: AgentTerminationCode
+  enum AgentTerminationCode {
+    AGENT_TERMINATION_CODE_UNSPECIFIED = 0;
+    AGENT_TERMINATION_CODE_SUCCESS = 1;
+    AGENT_TERMINATION_CODE_MAX_ITERATIONS = 2;
+    AGENT_TERMINATION_CODE_TOOL_FAILED = 3;
+    AGENT_TERMINATION_CODE_LLM_ERROR = 4;
+    AGENT_TERMINATION_CODE_TIMEOUT = 5;
+    AGENT_TERMINATION_CODE_GUARDRAIL_REJECTED = 6;
+    AGENT_TERMINATION_CODE_RUNTIME_ERROR = 7;
+    AGENT_TERMINATION_CODE_RUNTIME_TERMINATED = 8;
+    AGENT_TERMINATION_CODE_UNKNOWN = 9;
+  }
+
+  Envelope envelope = 1;
+  string agent_id = 2;
+  string agent_agid = 3;
+  string execution_id = 4;
+  AgentExecutionRuntime runtime = 5;
+  AgentTerminationCode termination_code = 6;
+  string crew_id = 7;
+  string crew_pattern = 8;
+  AgentTerminationContext context = 9;
+  Timestamp terminated_at = 10;
+}

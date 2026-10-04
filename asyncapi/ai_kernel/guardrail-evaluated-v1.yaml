@@ -1,0 +1,61 @@
+asyncapi: 3.0.0
+info:
+  title: Chora AI Kernel — GuardrailEvaluated
+  version: 1.0.0
+  description: |
+    Published for EVERY tier evaluation (PASS or otherwise). HIGH-VOLUME —
+    one event per (invocation × tier × direction).
+
+    - Domain: AI Kernel (`chora_ai_kernel` DB)
+    - Topic: `chora.ai_kernel.guardrail.evaluated.v1`
+    - Source proto: `proto/events/ai_kernel/guardrail.proto`
+       message `chora.ai_kernel.v1.GuardrailEvaluated`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  guardrailEvaluated:
+    address: chora.ai_kernel.guardrail.evaluated.v1
+    messages:
+      guardrailEvaluated:
+        $ref: '#/components/messages/GuardrailEvaluated'
+
+operations:
+  publishGuardrailEvaluated:
+    action: send
+    channel:
+      $ref: '#/channels/guardrailEvaluated'
+    messages:
+      - $ref: '#/channels/guardrailEvaluated/messages/guardrailEvaluated'
+
+  consumeGuardrailEvaluated:
+    action: receive
+    channel:
+      $ref: '#/channels/guardrailEvaluated'
+    description: |
+      Consumers: BigQuery (guardrail eval ledger), O+ guardrail dashboard,
+      IMDA D4 Safety + Security evidence pipeline.
+    messages:
+      - $ref: '#/channels/guardrailEvaluated/messages/guardrailEvaluated'
+
+components:
+  messages:
+    GuardrailEvaluated:
+      name: GuardrailEvaluated
+      title: Guardrail Evaluated
+      summary: A guardrail tier evaluation has completed
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/ai_kernel/guardrail.proto#/chora.ai_kernel.v1.GuardrailEvaluated'

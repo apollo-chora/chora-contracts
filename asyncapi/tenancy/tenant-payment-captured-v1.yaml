@@ -1,0 +1,66 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Tenancy — TenantPaymentCaptured
+  version: 1.0.0
+  description: |
+    A Stripe PaymentIntent has been captured against the tenant's customer
+    (one-time or recurring). Lower-level than billing.invoice_paid.v1 —
+    this is the Charge / PaymentIntent atomic event.
+
+    - Domain: Tenancy + Billing (`chora_tenancy` DB)
+    - Topic: `chora.tenancy.tenant.payment_captured.v1`
+    - Source proto: `proto/events/tenancy/tenant.proto`
+       message `chora.tenancy.v1.TenantPaymentCaptured`
+    - IMDA: tag envelope.chora_imda_dimension = "accountability"
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  tenantPaymentCaptured:
+    address: chora.tenancy.tenant.payment_captured.v1
+    messages:
+      tenantPaymentCaptured:
+        $ref: '#/components/messages/TenantPaymentCaptured'
+
+operations:
+  publishTenantPaymentCaptured:
+    action: send
+    channel:
+      $ref: '#/channels/tenantPaymentCaptured'
+    messages:
+      - $ref: '#/channels/tenantPaymentCaptured/messages/tenantPaymentCaptured'
+
+  consumeTenantPaymentCaptured:
+    action: receive
+    channel:
+      $ref: '#/channels/tenantPaymentCaptured'
+    description: |
+      Consumers:
+        - chora-tenancy (advance addon-activation pending state)
+        - chora-delivery (advance Application Paid -> Enrolled)
+        - chora-notifications (receipt email)
+        - chora-observability (revenue audit ledger)
+        - chora-governance (compliance audit — IMDA D1 evidence)
+    messages:
+      - $ref: '#/channels/tenantPaymentCaptured/messages/tenantPaymentCaptured'
+
+components:
+  messages:
+    TenantPaymentCaptured:
+      name: TenantPaymentCaptured
+      title: Stripe PaymentIntent captured for a tenant
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/tenancy/tenant.proto#/chora.tenancy.v1.TenantPaymentCaptured'

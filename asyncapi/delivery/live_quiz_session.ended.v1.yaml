@@ -1,0 +1,78 @@
+asyncapi: "3.0.0"
+info:
+  title: "chora.delivery.live_quiz_session.ended.v1"
+  version: "1.0.0"
+  description: |
+    Published when an instructor transitions a LiveQuizSession LIVE → CLOSED
+    (ADR-168). Final results are frozen.
+    Companion to `proto/events/delivery/live_quiz_session.proto` message
+    `LiveQuizSessionEnded`.
+  contact: { name: "Chora Platform Team" }
+  license: { name: "Proprietary" }
+
+defaultContentType: application/x-protobuf
+
+servers:
+  local: { host: "localhost:8085", protocol: googlepubsub, description: "Pub/Sub Emulator" }
+  production: { host: "pubsub.googleapis.com", protocol: googlepubsub, description: "Google Cloud Pub/Sub" }
+
+channels:
+  liveQuizSessionEnded:
+    address: chora.delivery.live_quiz_session.ended.v1
+    description: |
+      Carries LiveQuizSessionEnded Protobuf payload.
+
+      Downstream consumers:
+        - chora-observability : settle per-session rollups
+        - chora-notifications : final-results-ready notification
+    messages:
+      liveQuizSessionEnded:
+        $ref: "#/components/messages/LiveQuizSessionEnded"
+
+operations:
+  publishLiveQuizSessionEnded:
+    action: send
+    channel: { $ref: "#/channels/liveQuizSessionEnded" }
+    summary: "Publish LiveQuizSessionEnded"
+    messages: [ { $ref: "#/channels/liveQuizSessionEnded/messages/liveQuizSessionEnded" } ]
+  consumeLiveQuizSessionEnded:
+    action: receive
+    channel: { $ref: "#/channels/liveQuizSessionEnded" }
+    summary: "Consume LiveQuizSessionEnded"
+    messages: [ { $ref: "#/channels/liveQuizSessionEnded/messages/liveQuizSessionEnded" } ]
+
+components:
+  messages:
+    LiveQuizSessionEnded:
+      name: LiveQuizSessionEnded
+      title: "Live Quiz Session Ended"
+      summary: "An instructor closed a live classroom quiz session (LIVE → CLOSED)."
+      contentType: application/x-protobuf
+      payload:
+        type: object
+        description: "Mirrors chora.delivery.v1.LiveQuizSessionEnded."
+        properties:
+          envelope: { $ref: "#/components/schemas/EventEnvelope" }
+          session_id: { type: string, format: uuid }
+          live_quiz_id: { type: string, format: uuid }
+          total_responses: { type: integer }
+          ended_at: { type: string, format: date-time }
+  schemas:
+    EventEnvelope:
+      type: object
+      description: "Mirrors chora.common.v1.EventEnvelope."
+      required: [event_id, idempotency_key, tenant_id, occurred_at, published_at, traceparent, source_project, source_service, schema_version]
+      properties:
+        event_id: { type: string, format: uuid }
+        idempotency_key: { type: string }
+        tenant_id: { type: string }
+        gcid: { type: string }
+        occurred_at: { type: string, format: date-time }
+        published_at: { type: string, format: date-time }
+        traceparent: { type: string }
+        tracestate: { type: string }
+        source_project: { type: string }
+        source_service: { type: string }
+        schema_version: { type: integer }
+        correlation_id: { type: string }
+        causation_id: { type: string }

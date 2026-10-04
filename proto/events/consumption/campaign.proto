@@ -1,0 +1,301 @@
+// =============================================================================
+// Chora Content Consumption — Companion Campaign events (ADR-227 / ADR-228)
+// =============================================================================
+//
+// The Campaign (ADR-227) is the fog-of-war conquest layer projected over the
+// learner-sovereign concept graph: the goal-bound Companion is assigned a
+// focus node (D11), the daily dose becomes its march (D12), rungs clear up
+// the 6-level Bloom ladder (D6) at most one per day (D7), winning a node is
+// a permanent ratchet (D9) that unlocks the free LLM reveal of its children
+// (D2), and an empty frontier lets the learner seal the goal (D3). These
+// five events are the verified stream that everything downstream rides —
+// XP, reveals, governance evidence. NO self-declared event exists here:
+// every emission follows server-graded work or a system-verified state
+// transition (ADR-227 D10; ADR-203 L16).
+//
+// EMITTER: chora-consumption only (ladder/seal domain services WS-C1,
+// focus assignment WS-C1, reveal trigger WS-C4) — always via the
+// transactional outbox in the same tx as the state write.
+//
+// BINDING (ADR-227 Verification addendum #6): every campaign event CARRIES
+// `goal_id` so chora-identity routes XP via ExpRuleResolver.ResolveForGoal
+// (per-goal companion attribution) instead of the legacy globally-resolved
+// "active companion" fallback. ADR-228 D1/D2 ride this: goal-attributed XP
+// warms the egg bound to that goal.
+//
+// Aggregate root : campaign_node_progress (chora_consumption; ADR-227 D16)
+// Owning domain  : Content Consumption (chora_consumption)
+// Owning team    : Team 1 (Content)
+// Topic prefix   : chora.consumption.campaign.*
+// Surface        : A+ (goal map campaign HUD, seal ceremony, reveals)
+//
+// Subscribers (loosely-coupled, attach later):
+//   - chora-identity      — XP award rows (rung/win/seal; ADR-227 D10 table;
+//                           WS-C5) via ResolveForGoal + daily caps.
+//   - chora-consumption   — free-on-win reveal trigger (WS-C4, idempotent on
+//                           the node_won envelope.event_id); Companion
+//                           resonance reconcile on focus moves (addendum #5).
+//   - chora-observability — IMDA D1 accountability (provable XP lineage) +
+//                           D2 transparency (reveal/assignment disclosure).
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.consumption.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/consumption/v1;consumptionv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// CampaignRung — the 6-rung ladder (ADR-227 D6)
+// -----------------------------------------------------------------------------
+//
+// Values are LADDER POSITIONS in the ADR-227 D6 campaign order, spoken in the
+// atom-domain ORIGINAL-Bloom vocabulary (Verification addendum #4):
+//
+//   1 knowledge -> 2 comprehension -> 3 application -> 4 analysis ->
+//   5 evaluation -> 6 synthesis   (rung 6 = synthesis, the revised-Bloom
+//                                  "create" summit the owner intended)
+//
+// DELIBERATELY NOT numerically aligned with chora.creation.v1.CognitiveLevel
+// (original-Bloom sequence: SYNTHESIS=5, EVALUATION=6). The campaign ladder
+// re-orders the top two; WS-C1's rung-order constant owns the mapping and the
+// FE maps labels to revised-Bloom copy (remember..create). Extend additively;
+// never renumber.
+enum CampaignRung {
+  CAMPAIGN_RUNG_UNSPECIFIED   = 0;
+  CAMPAIGN_RUNG_KNOWLEDGE     = 1;
+  CAMPAIGN_RUNG_COMPREHENSION = 2;
+  CAMPAIGN_RUNG_APPLICATION   = 3;
+  CAMPAIGN_RUNG_ANALYSIS      = 4;
+  CAMPAIGN_RUNG_EVALUATION    = 5;
+  CAMPAIGN_RUNG_SYNTHESIS     = 6;
+}
+
+// -----------------------------------------------------------------------------
+// CampaignFocusAssigned — chora.consumption.campaign.focus_assigned.v1
+// -----------------------------------------------------------------------------
+//
+// Emitted when the learner assigns (or moves) the goal's single campaign
+// focus node — Goal.FocusConceptID (ADR-227 D11). The learner assigns; the
+// Companion only proposes (Learner-Ownership). Setting focus also retargets
+// the bound Companion's resonant concept (addendum #5 reconciliation) — one
+// learner-facing affordance, so no separate resonance event exists.
+// Idempotency: envelope.idempotency_key = goal_id:concept_id:assigned_at.
+//
+// Topic: chora.consumption.campaign.focus_assigned.v1
+// Consumers: chora-consumption (resonance reconcile), chora-observability
+//            (IMDA D2 assignment disclosure).
+message CampaignFocusAssigned {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // The goal whose focus moved (goal aggregate id; UUIDv7).
+  string goal_id = 2;
+
+  // Tenant context (also envelope.tenant_id; duplicated for sharded filters).
+  string tenant_id = 3;
+
+  // The learner who owns the goal + campaign (also envelope.gcid).
+  string learner_gcid = 4;
+
+  // The newly-focused concept node (concept_nodes.id).
+  string concept_id = 5;
+
+  // Stable slug of the focused node (concept_nodes.concept_key).
+  string concept_key = 6;
+
+  // The previously-focused node; empty on first assignment.
+  string previous_concept_id = 7;
+
+  // The goal-bound Companion at assignment time (may be empty — ladder
+  // progress is base data; assignment without a bond is still recorded).
+  //
+  // WIRE-FROZEN NAME (ADR-254 line 139, ADR-246 D2). This v1 event is
+  // BINARY-bound to a registered Pub/Sub schema, and the registry treats the
+  // field NAME at a fixed tag as part of the frozen wire: it REFUSES a same-tag
+  // rename at commit ("has the same tag (8) but different name"). The binary
+  // wire keys on the tag and is unaffected, but the registry is the authority
+  // that decides, so `familiar_id` stays until a coordinated v2 cut. Domain
+  // vocabulary remains Companion; the adapter maps this wire name onto it.
+  string familiar_id = 8;
+
+  google.protobuf.Timestamp assigned_at = 9;
+}
+
+// -----------------------------------------------------------------------------
+// CampaignRungCleared — chora.consumption.campaign.rung_cleared.v1
+// -----------------------------------------------------------------------------
+//
+// Emitted when server-graded work clears a rung of a node's ladder — either
+// a first clear that ADVANCES rungs_cleared (gated to one per calendar day
+// per node, ADR-227 D7) or a D8 defence/refresher re-clear at an
+// already-cleared rung (is_refresher=true; reduced XP per the D10 table).
+// Cleared rungs are never lost; there is no negative counterpart event.
+// Idempotency: envelope.idempotency_key =
+// goal_id:concept_id:rung:cleared_at (refreshers get a fresh cleared_at).
+//
+// Topic: chora.consumption.campaign.rung_cleared.v1
+// Consumers: chora-identity (small flat XP, daily-capped; ResolveForGoal),
+//            chora-observability (D1 verified-work evidence).
+message CampaignRungCleared {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // The goal this march belongs to (XP attribution; addendum #6).
+  string goal_id = 2;
+
+  // Tenant context (also envelope.tenant_id; duplicated for sharded filters).
+  string tenant_id = 3;
+
+  // The learner climbing the ladder (also envelope.gcid).
+  string learner_gcid = 4;
+
+  // The concept node whose rung cleared (concept_nodes.id).
+  string concept_id = 5;
+
+  // Stable slug of the node — the topic_retention/weakness key vocabulary
+  // (campaign grading plants retention rows keyed by this; addendum #2).
+  string concept_key = 6;
+
+  // Which rung cleared (ladder position; see CampaignRung ordering note).
+  CampaignRung rung = 7;
+
+  // False = first clear (ladder advanced). True = D8 refresher/defence
+  // re-clear at the highest cleared rung (reduced XP; no advancement).
+  bool is_refresher = 8;
+
+  // Server-graded correct answers that cleared it (CAMPAIGN_RUNG_CLEAR_CORRECT,
+  // default 2, tunable) — carried as D10 verified-work evidence.
+  int32 correct_answers = 9;
+
+  google.protobuf.Timestamp cleared_at = 10;
+}
+
+// -----------------------------------------------------------------------------
+// CampaignNodeWon — chora.consumption.campaign.node_won.v1
+// -----------------------------------------------------------------------------
+//
+// Emitted exactly once per (learner, node) when rung 6 clears: the node is
+// won FOREVER (ADR-227 D9 permanent ratchet — no siege, no rung loss, no
+// later negative event). Downstream this is the trigger for the free
+// fog-of-war reveal of the node's children (D2; WS-C4 consumes idempotently
+// on THIS event's envelope.event_id) and the medium XP bonus (D10).
+// Idempotency: envelope.idempotency_key = goal_id:concept_id:won_at; the
+// won-ratchet also makes re-emission structurally impossible.
+//
+// Topic: chora.consumption.campaign.node_won.v1
+// Consumers: chora-consumption (free-on-win reveal trigger, WS-C4),
+//            chora-identity (win bonus XP, daily-capped ~3/day),
+//            chora-observability (D1 evidence).
+message CampaignNodeWon {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // The goal this conquest belongs to (XP attribution; addendum #6).
+  string goal_id = 2;
+
+  // Tenant context (also envelope.tenant_id; duplicated for sharded filters).
+  string tenant_id = 3;
+
+  // The learner who won the node (also envelope.gcid).
+  string learner_gcid = 4;
+
+  // The won concept node (concept_nodes.id).
+  string concept_id = 5;
+
+  // Stable slug of the won node (concept_nodes.concept_key).
+  string concept_key = 6;
+
+  google.protobuf.Timestamp won_at = 7;
+}
+
+// -----------------------------------------------------------------------------
+// CampaignNodeRevealed — chora.consumption.campaign.node_revealed.v1
+// -----------------------------------------------------------------------------
+//
+// Emitted after the free-on-win reveal actually fired: the fog orchestrator
+// emitted concept suggestions for the won node's children (ADR-227 D2 via
+// the concept_suggestions pipeline — addendum #1; NOT the retiring
+// kg_hexagon cache). The reveal is mana-exempt, bounded (<=6 proposals per
+// node won — LLM cost capped by verified work) and PERMANENT. Carries the
+// triggering node_won envelope.event_id as the idempotency anchor + audit
+// chain. Reveal-path emissions MUST NOT double-fire the legacy
+// kg.hexagon_expanded.v1 hex_expand XP source (addendum #6 guard, WS-C5).
+// Idempotency: envelope.idempotency_key = won_event_id (one reveal per win).
+//
+// Topic: chora.consumption.campaign.node_revealed.v1
+// Consumers: chora-observability (IMDA D2 reveal disclosure + LLM-cost
+//            bounding evidence); A+ map refresh rides existing suggestion
+//            surfaces, not this topic.
+message CampaignNodeRevealed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // The goal whose map grew (addendum #6).
+  string goal_id = 2;
+
+  // Tenant context (also envelope.tenant_id; duplicated for sharded filters).
+  string tenant_id = 3;
+
+  // The learner whose sovereign map this is (also envelope.gcid).
+  string learner_gcid = 4;
+
+  // The won node whose children were revealed (focal node of the
+  // concept_suggestion.requested.v1 that this reveal drove).
+  string focal_concept_id = 5;
+
+  // Stable slug of the focal node (concept_nodes.concept_key).
+  string focal_concept_key = 6;
+
+  // How many child proposals the fog orchestrator emitted (0..6).
+  int32 suggestion_count = 7;
+
+  // envelope.event_id of the CampaignNodeWon that earned this reveal —
+  // the idempotency anchor (one free reveal per win, D2).
+  string won_event_id = 8;
+
+  google.protobuf.Timestamp revealed_at = 9;
+}
+
+// -----------------------------------------------------------------------------
+// CampaignGoalSealed — chora.consumption.campaign.goal_sealed.v1
+// -----------------------------------------------------------------------------
+//
+// Emitted when the learner SEALS the goal (ADR-227 D3): a sovereign
+// declaration allowed only while the frontier is system-verified empty
+// (every claimed node won). The same tx sets goals.personal_completed_at
+// (ADR-213 personal axis — never the credentialed axis). Tier-S XP rides
+// this event BECAUSE of the verified frontier-clear — the bare learner
+// declaration alone never awards (D10). A re-seal after genuine expansion
+// (>= N newly-won nodes, tunable) sets is_reseal=true (weekly-capped XP).
+// Idempotency: envelope.idempotency_key = goal_id:sealed_at.
+//
+// Topic: chora.consumption.campaign.goal_sealed.v1
+// Consumers: chora-identity (tier-S XP, ~1/week cap; ResolveForGoal),
+//            chora-observability (D1 evidence: seal gated on frontier-clear).
+message CampaignGoalSealed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // The sealed goal (goal aggregate id; UUIDv7).
+  string goal_id = 2;
+
+  // Tenant context (also envelope.tenant_id; duplicated for sharded filters).
+  string tenant_id = 3;
+
+  // The learner who sealed (also envelope.gcid).
+  string learner_gcid = 4;
+
+  // The goal's root concept node (ADR-214 anchor; root is immutable, D14).
+  string root_concept_id = 5;
+
+  // Stable slug of the root node (concept_nodes.concept_key).
+  string root_concept_key = 6;
+
+  // Won claimed nodes in the goal subtree at seal time (> 0).
+  int32 nodes_won = 7;
+
+  // False = first seal. True = re-seal after >= N newly-won nodes
+  // (weekly-capped tier-S re-award, D3).
+  bool is_reseal = 8;
+
+  google.protobuf.Timestamp sealed_at = 9;
+}

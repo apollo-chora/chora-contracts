@@ -1,0 +1,325 @@
+// =============================================================================
+// Chora Content Sharing — Post events
+// =============================================================================
+//
+// Aggregate root: Post (social posts authored by learners).
+// Owning domain : Content Sharing (chora_sharing DB).
+// Owning team   : Team 1 (Content)
+// Topic prefix  : chora.sharing.post.*
+// Surface       : C+ Connect+ (Surface-3) — "curiosity meets connection"
+//
+// Source-of-truth:
+//   - docs/architecture-review-inputs-2026-05-07.md Tier 1 D1 + Tier 2 D8
+//   - .claude/skills/domain-content-sharing/SKILL.md
+//   - .claude/rules/ddd-enforcement.md
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// Tenant scope, GCID, trace context, schema version live in the envelope —
+// payload fields are domain data only.
+//
+// Cross-domain references: media_ids are UUIDs sourced from chora_creation;
+// parent_post_id stays within chora_sharing. NO FK constraints across DBs.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.sharing.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/sharing/v1;sharingv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// PostVisibility — controls audience reach for a Post.
+// -----------------------------------------------------------------------------
+//
+// PUBLIC          — visible to all platform learners (still tenant-scoped at
+//                   the platform boundary; cross-tenant feed is opt-in).
+// FOLLOWERS_ONLY  — visible only to GCIDs in the author's follower graph.
+// TENANT_ONLY     — visible to all GCIDs holding TenantMembership in the
+//                   author's tenant. Default for enterprise tenants.
+// GROUP_ONLY      — visible only to a specified ChoraCircle / study group.
+enum PostVisibility {
+  POST_VISIBILITY_UNSPECIFIED = 0;
+  POST_VISIBILITY_PUBLIC = 1;
+  POST_VISIBILITY_FOLLOWERS_ONLY = 2;
+  POST_VISIBILITY_TENANT_ONLY = 3;
+  POST_VISIBILITY_GROUP_ONLY = 4;
+}
+
+// -----------------------------------------------------------------------------
+// PostCreated — chora.sharing.post.created.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a learner authors a new Post. Consumers: Notifications
+// (mention / follower fan-out), Meilisearch indexer, Observability,
+// AI Kernel (content-moderation pre-flight via Governance Gatekeeper).
+message PostCreated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 identifier of the newly created Post.
+  string post_id = 2;
+
+  // Author's GCID (UUIDv7). Cross-tenant portable.
+  string author_gcid = 3;
+
+  // Body text (plain UTF-8; max 4 KiB at v1; richer markup deferred to v2).
+  string body = 4;
+
+  // Attached MediaAsset IDs (cross-domain UUIDs from chora_creation).
+  // Empty list means a text-only post.
+  repeated string media_ids = 5;
+
+  // Audience scope — drives feed-fan-out + moderation policy selection.
+  PostVisibility visibility = 6;
+
+  // Optional FK to a parent Post when this is a reply / thread response.
+  // Empty string for top-level posts. Always within chora_sharing.
+  string parent_post_id = 7;
+
+  // Optional group_id when visibility = GROUP_ONLY (UUIDv7).
+  // Empty for non-group posts.
+  string group_id = 8;
+
+  // When the post was created in the producer's domain DB.
+  google.protobuf.Timestamp created_at = 9;
+}
+
+// -----------------------------------------------------------------------------
+// PostUpdated — chora.sharing.post.updated.v1
+// -----------------------------------------------------------------------------
+//
+// Published when an existing Post body / media / visibility is edited by
+// the author. Audit log retains pre-edit state via post_history table.
+// Consumers: Notifications (notify thread participants), Meilisearch.
+message PostUpdated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string post_id = 2;
+  string author_gcid = 3;
+
+  // Updated body — full new value (not a diff).
+  string body = 4;
+
+  // Updated media list (full replacement; not delta).
+  repeated string media_ids = 5;
+
+  PostVisibility visibility = 6;
+
+  string parent_post_id = 7;
+  string group_id = 8;
+
+  // Names of fields modified — allows cheap consumer filtering.
+  // Values: "body", "media_ids", "visibility".
+  repeated string changed_fields = 9;
+
+  google.protobuf.Timestamp updated_at = 10;
+}
+
+// -----------------------------------------------------------------------------
+// PostDeleted — chora.sharing.post.deleted.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a Post is soft-deleted (deleted_at set). Per
+// ddd-enforcement aggregate invariant #5, this is NEVER a hard delete.
+// Consumers must remove the post from active feed queries (default
+// `WHERE deleted_at IS NULL` filter) but preserve audit + reaction history.
+message PostDeleted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string post_id = 2;
+  string author_gcid = 3;
+
+  // GCID of the actor who deleted the post — may be the author OR an
+  // admin / moderator acting via an entitled role.
+  string deleted_by_gcid = 4;
+
+  // Optional reason — free text; max 512 chars.
+  string reason = 5;
+
+  google.protobuf.Timestamp deleted_at = 6;
+}
+
+// -----------------------------------------------------------------------------
+// PostFlagged — chora.sharing.post.flagged.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a Post is reported by a learner OR auto-flagged by the
+// Governance Gatekeeper guardrail pipeline. Triggers the moderation queue
+// in O+ Observability+ surface. Does NOT remove the post — moderator action
+// (PostDeleted) does.
+message PostFlagged {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string post_id = 2;
+  string author_gcid = 3;
+
+  // GCID of the reporter, OR empty when flagged by an automated guardrail.
+  // For agent-emitted flags the originating AGID lives in envelope.gcid
+  // (per envelope semantics) and this field stays empty.
+  string flagged_by_gcid = 4;
+
+  // Reason taxonomy — UPPER_SNAKE_CASE; aligned with ContentPolicyViolationLog.
+  // Examples: "HARASSMENT", "SPAM", "PII_LEAK", "HATE_SPEECH",
+  //           "OFF_TOPIC", "MISINFORMATION", "GUARDRAIL_AUTO".
+  string flag_reason = 5;
+
+  // Optional free-text detail (max 1024 chars).
+  string flag_detail = 6;
+
+  google.protobuf.Timestamp flagged_at = 7;
+}
+
+// -----------------------------------------------------------------------------
+// PostApproved — chora.sharing.post.approved.v1
+// -----------------------------------------------------------------------------
+//
+// Published when the content_moderation reasoning engine determines a
+// learner-posted item PASSES the moderation policy (no policy violation,
+// no Cloud Model Armor block, no PII leak). The post becomes visible to
+// its audience per visibility scope.
+//
+// Topic: chora.sharing.post.approved.v1
+// Consumers: chora-sharing (mark post visible in feed projections),
+//            chora-observability (D1 IMDA accountability evidence — every
+//            auto-moderation outcome is auditable per ADR-141).
+//
+// Distinct from PostFlagged (which kicks off moderation) — this event marks
+// the terminal-PASS branch of the moderation pipeline.
+message PostApproved {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 of the moderated Post.
+  string post_id = 2;
+
+  // Decision tag — always "approved" for this message; kept explicit so
+  // downstream auditors that subscribe to a union of moderation events can
+  // discriminate without joining against the topic name.
+  string moderation_decision = 3;
+
+  // AGID (distinct from GCID per ddd-enforcement aggregate-invariant #10)
+  // of the content_moderation engine instance that emitted the verdict.
+  // Duplicates envelope.gcid for filter-friendly subscribers.
+  string approved_by_agent_id = 4;
+
+  // When the moderation pipeline reached its PASS decision (producer clock).
+  google.protobuf.Timestamp approved_at = 5;
+
+  // GCID of the post's author — denormalised here so feed-fan-out subscribers
+  // don't need a synchronous read against chora_sharing.
+  string post_author_gcid = 6;
+
+  // Optional tag list snapshot at decision time (analytics).
+  repeated string post_tags = 7;
+
+  // Cloud Model Armor verdict summary — short tag set, NEVER raw template
+  // names or detected PII. Examples: "pass", "pass:redacted_low_risk".
+  // Mirrors the cloud-model-armor-guardrails skill output envelope.
+  string model_armor_verdict = 8;
+}
+
+// -----------------------------------------------------------------------------
+// PostRefused — chora.sharing.post.refused.v1
+// -----------------------------------------------------------------------------
+//
+// Published when the content_moderation reasoning engine REJECTS a learner-
+// posted item — the post is NOT made visible to its audience and the author
+// is notified (via chora-notifications) with a non-leaky user_facing_message.
+//
+// Topic: chora.sharing.post.refused.v1
+// Consumers: chora-sharing (suppress post from feed projections; mark state
+//            as REFUSED for audit), chora-notifications (notify author with
+//            user_facing_message), chora-observability (D3 IMDA safety-and-
+//            robustness evidence — guardrail-blocked content is auditable).
+//
+// MANDATORY model_armor_verdict per BE-agent handoff §2 row 2 (the verdict
+// is the gating evidence for D3 IMDA Safety & Robustness audits).
+message PostRefused {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 of the refused Post.
+  string post_id = 2;
+
+  // Refusal reason taxonomy — snake_case. Examples:
+  //   "policy_violation" | "model_armor_blocked" | "user_safety" |
+  //   "pii_leak" | "spam_classifier" | "off_topic"
+  // Distinct from PostFlagged.flag_reason (which is the inbound flag taxonomy
+  // — these are the moderation pipeline's outbound decision taxonomy).
+  string refused_reason = 3;
+
+  // AGID of the content_moderation engine instance.
+  string refused_by_agent_id = 4;
+
+  // When the moderation pipeline reached its REJECT decision.
+  google.protobuf.Timestamp refused_at = 5;
+
+  // GCID of the post's author — denormalised for notification fan-out without
+  // a cross-DB read.
+  string post_author_gcid = 6;
+
+  // MANDATORY — Cloud Model Armor verdict tag describing which template / rule
+  // tripped. Short tag set; NEVER the raw template name or detected PII.
+  // Examples: "armor:harassment_block", "armor:pii_high_risk_block",
+  //           "armor:jailbreak_attempt", "armor:hate_speech_block".
+  // Empty string is INVALID for this event — at minimum carry "armor:unspecified"
+  // when the upstream verdict is missing (so D3 IMDA evidence is never absent).
+  string model_armor_verdict = 7;
+
+  // Short, non-leaky message the chora-web C+ surface renders to the author.
+  // Examples: "Your post couldn't be published — it appears to violate our
+  // community standards. Please review and try again."
+  // NEVER includes detected PII or the raw guardrail trace.
+  string user_facing_message = 8;
+
+  // Whether the FE should surface a "revise" affordance instead of a hard
+  // reject. False when the refusal is terminal (e.g., model_armor_blocked
+  // for severe content); true when the refusal is recoverable (e.g.,
+  // off_topic / spam_classifier soft signals).
+  bool can_be_revised = 9;
+}
+
+// -----------------------------------------------------------------------------
+// PostNeedsRevision — chora.sharing.post.needs_revision.v1
+// -----------------------------------------------------------------------------
+//
+// Published when the content_moderation reasoning engine determines a Post
+// is borderline — neither a clean PASS nor a hard REJECT — and the author
+// should revise specific sections. Soft-moderation outcome between the
+// PostApproved + PostRefused poles.
+//
+// Topic: chora.sharing.post.needs_revision.v1
+// Consumers: chora-sharing (keep post in DRAFT / REVISION_REQUESTED state;
+//            do NOT publish to feeds), chora-notifications (notify author
+//            with suggested_revisions + flagged_sections so the FE can
+//            highlight specific spans).
+message PostNeedsRevision {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 of the Post requiring revision.
+  string post_id = 2;
+
+  // Human-readable suggestion text (safe to surface in UI). Maximum 2 KiB.
+  // Examples: "Consider rephrasing the second paragraph to remove potentially
+  // harmful generalisations about <group>."
+  string suggested_revisions = 3;
+
+  // Section identifiers within the post body that triggered the revision
+  // request. Values are application-defined paths into the post structure;
+  // examples: "title", "body[paragraph_2]", "media[0].caption".
+  repeated string flagged_sections = 4;
+
+  // AGID of the content_moderation engine instance.
+  string flagged_by_agent_id = 5;
+
+  // When the moderation pipeline produced the revision request.
+  google.protobuf.Timestamp flagged_at = 6;
+
+  // GCID of the post's author — denormalised for notification fan-out.
+  string post_author_gcid = 7;
+
+  // Cloud Model Armor verdict tag for the borderline call. Examples:
+  //   "armor:soft_signal_off_topic" | "armor:tone_warning" |
+  //   "armor:partial_pii_redacted"
+  string model_armor_verdict = 8;
+}

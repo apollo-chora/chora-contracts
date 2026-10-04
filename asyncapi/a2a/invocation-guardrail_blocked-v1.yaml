@@ -1,0 +1,68 @@
+asyncapi: "3.0.0"
+info:
+  title: "Chora Agent-to-Agent — invocation.guardrail_blocked.v1"
+  version: "1.0.0"
+  description: |
+    Published when the Guardrail Service blocks an inbound or outbound
+    payload during an A2A invocation. Subscribers fan-out to: O+
+    governance feed, ContentPolicyViolationLog (immutable),
+    partner-trust scoring service.
+
+    Distinct from invocation.failed.v1 — that handles reliability errors;
+    this handles policy enforcement.
+
+    Owning team   : Team 3 (Platform)
+    Owning domain : Agent-to-Agent (chora_a2a database)
+    Reference     : ADR-132 §8
+  contact:
+    name: "Chora Platform Team — Platform Track"
+  license:
+    name: "Proprietary"
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  production:
+    host: "pubsub.googleapis.com"
+    protocol: googlepubsub
+    description: "Google Cloud Pub/Sub (production)"
+  emulator:
+    host: "localhost:8085"
+    protocol: googlepubsub
+    description: "Cloud Pub/Sub Emulator (local dev)"
+
+channels:
+  invocationGuardrailBlocked:
+    address: "chora.a2a.invocation.guardrail_blocked.v1"
+    messages:
+      invocationGuardrailBlocked:
+        $ref: "#/components/messages/InvocationGuardrailBlocked"
+
+operations:
+  publishInvocationGuardrailBlocked:
+    action: send
+    channel:
+      $ref: "#/channels/invocationGuardrailBlocked"
+    summary: "Publish an A2A guardrail block event"
+    description: |
+      Producer: chora-a2a-gateway (Guardrail Service hook).
+      Consumers: O+ governance feed,
+                 ContentPolicyViolationLog (immutable audit),
+                 partner-trust scoring service,
+                 Notifications (alert platform_ops on threshold breach).
+    messages:
+      - $ref: "#/channels/invocationGuardrailBlocked/messages/invocationGuardrailBlocked"
+
+components:
+  messages:
+    InvocationGuardrailBlocked:
+      name: "InvocationGuardrailBlocked"
+      title: "A2A Invocation Guardrail Blocked"
+      summary: "Guardrail Service blocked an A2A invocation payload"
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf;version=3
+      payload:
+        schemaFormat: "application/vnd.google.protobuf;version=3"
+        schema:
+          protoFile: "proto/events/a2a/invocation.proto"
+          messageName: "chora.a2a.v1.InvocationGuardrailBlocked"

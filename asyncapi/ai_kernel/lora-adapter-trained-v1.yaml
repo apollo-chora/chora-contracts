@@ -1,0 +1,61 @@
+asyncapi: 3.0.0
+info:
+  title: Chora AI Kernel — LoraAdapterTrained
+  version: 1.0.0
+  description: |
+    Published when LoRA training completes (Vertex AI Custom Training job
+    terminates successfully). Carries eval metrics for go/no-go review.
+
+    - Domain: AI Kernel (`chora_ai_kernel` DB)
+    - Topic: `chora.ai_kernel.lora.adapter_trained.v1`
+    - Source proto: `proto/events/ai_kernel/lora.proto`
+       message `chora.ai_kernel.v1.LoraAdapterTrained`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  loraAdapterTrained:
+    address: chora.ai_kernel.lora.adapter_trained.v1
+    messages:
+      loraAdapterTrained:
+        $ref: '#/components/messages/LoraAdapterTrained'
+
+operations:
+  publishLoraAdapterTrained:
+    action: send
+    channel:
+      $ref: '#/channels/loraAdapterTrained'
+    messages:
+      - $ref: '#/channels/loraAdapterTrained/messages/loraAdapterTrained'
+
+  consumeLoraAdapterTrained:
+    action: receive
+    channel:
+      $ref: '#/channels/loraAdapterTrained'
+    description: |
+      Consumers: O+ ModelOps view, Notifications (deployment-ready
+      advisory to tenant admin), MLflow registry sync.
+    messages:
+      - $ref: '#/channels/loraAdapterTrained/messages/loraAdapterTrained'
+
+components:
+  messages:
+    LoraAdapterTrained:
+      name: LoraAdapterTrained
+      title: LoRA Adapter Trained
+      summary: A LoRA adapter training run has completed
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/ai_kernel/lora.proto#/chora.ai_kernel.v1.LoraAdapterTrained'

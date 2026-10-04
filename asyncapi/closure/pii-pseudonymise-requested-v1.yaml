@@ -1,0 +1,91 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Closure — Per-Domain Pseudonymise Requested (fan-out family)
+  version: 1.0.0
+  description: |
+    Per-domain pseudonymisation REQUEST fan-out from the Closure
+    Orchestrator when a saga's grace period expires (or operator
+    fast-close collapses it). One topic per participating domain:
+
+      `chora.{domain}.pii.pseudonymise.requested.v1`
+      for domain ∈ {creation, consumption, delivery, sharing, a2a,
+                    identity, tenancy, governance, observability,
+                    notifications}
+
+    Each domain's `closure_subscriber.go` consumes its own topic, applies
+    its `PII_Closure_Map.yaml` duty and acks back on
+    `chora.{domain}.account.pseudonymised.v1`
+    (see `account-pseudonymised-v1.yaml`).
+
+    Naming note (CHO-1719 reconciliation): this inbound family keeps its
+    historic `pii.pseudonymise.requested` name — it is consistent across
+    code + Terraform module IAM + subscriptions, so renaming it would be
+    pure blast radius. Only the ACK family was reconciled.
+
+    - Publisher : chora-closure-orchestrator (pseudonymise_fanout node)
+    - Consumers : all 10 domain services (closure subscribers)
+    - Payload   : JSON `{saga_id, gcid, tenant_id}` (domain routed by topic)
+    - IMDA: tag envelope.chora_imda_dimension = "accountability"
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/json
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  piiPseudonymiseRequested:
+    address: "chora.{domain}.pii.pseudonymise.requested.v1"
+    parameters:
+      domain:
+        description: Participating closure domain
+        enum:
+          - creation
+          - consumption
+          - delivery
+          - sharing
+          - a2a
+          - identity
+          - tenancy
+          - governance
+          - observability
+          - notifications
+    messages:
+      piiPseudonymiseRequested:
+        $ref: '#/components/messages/PiiPseudonymiseRequested'
+
+operations:
+  publishPiiPseudonymiseRequested:
+    action: send
+    channel:
+      $ref: '#/channels/piiPseudonymiseRequested'
+    summary: Closure Orchestrator fans out the per-domain duty
+  consumePiiPseudonymiseRequested:
+    action: receive
+    channel:
+      $ref: '#/channels/piiPseudonymiseRequested'
+    summary: Domain closure subscriber applies its PII_Closure_Map
+
+components:
+  messages:
+    PiiPseudonymiseRequested:
+      name: PiiPseudonymiseRequested
+      title: Per-domain pseudonymisation request
+      payload:
+        type: object
+        required: [saga_id, gcid, tenant_id]
+        properties:
+          saga_id:
+            type: string
+            format: uuid
+          gcid:
+            type: string
+            format: uuid
+          tenant_id:
+            type: string
+            format: uuid

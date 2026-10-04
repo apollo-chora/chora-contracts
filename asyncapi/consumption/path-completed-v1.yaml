@@ -1,0 +1,71 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Content Consumption — PathCompleted
+  version: 1.0.0
+  description: |
+    Published when a learner finishes an entire `LearningPath`.
+
+    - Domain: Content Consumption (`chora_consumption` DB)
+    - Aggregate root: `LearningPath`
+    - Topic: `chora.consumption.path.completed.v1`
+    - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
+    - Source proto: `proto/events/consumption/learning_path.proto`
+       message `chora.consumption.v1.PathCompleted`
+
+    Embeds the mandatory `chora.common.v1.EventEnvelope` as field 1.
+  contact:
+    name: Chora Platform Team (Team 3) + Team 1 (Content)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+    description: Google Cloud Pub/Sub (chora-489812 platform host)
+
+channels:
+  pathCompleted:
+    address: chora.consumption.path.completed.v1
+    description: Single-event topic for PathCompleted.
+    messages:
+      pathCompleted:
+        $ref: '#/components/messages/PathCompleted'
+
+operations:
+  publishPathCompleted:
+    action: send
+    channel:
+      $ref: '#/channels/pathCompleted'
+    summary: Publish a PathCompleted event
+    messages:
+      - $ref: '#/channels/pathCompleted/messages/pathCompleted'
+
+  consumePathCompleted:
+    action: receive
+    channel:
+      $ref: '#/channels/pathCompleted'
+    summary: Subscribe to PathCompleted events
+    description: |
+      Primary consumers:
+      - Delivery — Certification issuance trigger
+      - Sharing — completion brag post + leaderboard bump
+      - Notifications — congratulations message
+      - Observability — completion-rate metrics
+    messages:
+      - $ref: '#/channels/pathCompleted/messages/pathCompleted'
+
+components:
+  messages:
+    PathCompleted:
+      name: PathCompleted
+      title: Path Completed
+      summary: A learner completed a LearningPath
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/consumption/learning_path.proto#/chora.consumption.v1.PathCompleted'

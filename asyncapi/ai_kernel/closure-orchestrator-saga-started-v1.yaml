@@ -1,0 +1,68 @@
+asyncapi: 3.0.0
+info:
+  title: Chora AI Kernel — ClosureSagaStarted [DEPRECATED v2.0]
+  version: 1.0.0
+  description: |
+    **DEPRECATED v2.0** — Replaced by `chora.closure.requested.v1`. See
+    `asyncapi/closure/requested-v1.yaml`. Producers MUST migrate to the new
+    topic. This spec remains for one release.
+
+    Original purpose: published when the Closure Orchestrator initiates a
+    new federated closure saga (typically in response to
+    chora.identity.account.lifecycle_changed ACTIVE -> CLOSING).
+
+    - Domain: AI Kernel (`chora_ai_kernel` DB)
+    - Topic (deprecated): `chora.ai_kernel.closure_orchestrator.saga_started.v1`
+    - Canonical replacement: `chora.closure.requested.v1`
+    - Source proto: `proto/events/ai_kernel/closure_orchestrator.proto`
+       message `chora.ai_kernel.v1.ClosureSagaStarted`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  closureSagaStarted:
+    address: chora.ai_kernel.closure_orchestrator.saga_started.v1
+    messages:
+      closureSagaStarted:
+        $ref: '#/components/messages/ClosureSagaStarted'
+
+operations:
+  publishClosureSagaStarted:
+    action: send
+    channel:
+      $ref: '#/channels/closureSagaStarted'
+    messages:
+      - $ref: '#/channels/closureSagaStarted/messages/closureSagaStarted'
+
+  consumeClosureSagaStarted:
+    action: receive
+    channel:
+      $ref: '#/channels/closureSagaStarted'
+    description: |
+      Consumers: ALL participating domains (each receives the saga_started
+      and prepares per-domain closure step), Governance (saga visibility),
+      Audit log.
+    messages:
+      - $ref: '#/channels/closureSagaStarted/messages/closureSagaStarted'
+
+components:
+  messages:
+    ClosureSagaStarted:
+      name: ClosureSagaStarted
+      title: Closure Saga Started
+      summary: A federated closure saga has been initiated
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/ai_kernel/closure_orchestrator.proto#/chora.ai_kernel.v1.ClosureSagaStarted'

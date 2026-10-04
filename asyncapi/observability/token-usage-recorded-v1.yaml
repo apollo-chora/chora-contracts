@@ -1,0 +1,100 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Observability — TokenUsageRecorded
+  version: 1.2.0
+  description: |
+    Canonical billing-grade ledger event emitted at the Model Gateway via
+    transactional outbox. BigQuery streaming + pre-aggregations consume
+    it for cost dashboards + tenant invoicing.
+
+    Note: gcid field carries either learner GCID OR agent AGID
+    (per envelope semantics). Disambiguate via chora_identity lookup.
+
+    - Domain: Observability (`chora_observability` DB)
+    - Topic: `chora.observability.token_usage.recorded.v1`
+    - Source proto: `proto/events/observability/token_usage.proto`
+       message `chora.observability.v1.TokenUsageRecorded`
+
+    v1.1.0 — 2026-05-24, ADR-163. Additive proto v1 extension for the
+    M15 Model Gateway (asia-southeast1, GKE Autopilot). New optional
+    fields on `TokenUsageRecorded`:
+      - `vendor` (string) — resolved vendor identifier (e.g.
+        "vertex_ai_gemini", "openai_byoa")
+      - `fallback_chain` (repeated string) — adapter dispatch chain;
+        length 1 on happy-path
+      - `model_armor_verdict_pre` (enum ModelArmorVerdict) — Cloud
+        Model Armor PRE outcome
+      - `model_armor_verdict_post` (enum ModelArmorVerdict) — Cloud
+        Model Armor POST outcome
+      - `gateway_version` (string) — gateway build identifier
+        (e.g. "chora-model-gateway:58b28eb")
+    The legacy `TokenUsageLedgerOutboxWriter` in
+    chora-ai-kernel-orchestrator becomes a no-op once Phase 3 cutover
+    completes; the gateway is the sole producer thereafter. Pre-gateway
+    producers MAY omit the new fields; consumers MUST treat the zero
+    value as "unknown".
+
+    v1.2.0 — 2026-06-29, ADR-205 (Contextual Transaction History). Additive
+    proto v1 extension so the `transaction_ledger` projection (chora_tenancy)
+    can fold this event into `mana_spend_daily` rollups + per-call
+    `transaction_ledger_detail` rows without a cross-domain lookup. New
+    optional fields on `TokenUsageRecorded`:
+      - `mana_units` (int64) — mana charged for this call (the umbrella
+        currency debit the gateway metered); 0 = unknown
+      - `action_code` (string) — stable mana action code (e.g.
+        "question_generation"), mirroring
+        `chora.identity.v1.UserManaDebited.action_code`
+    Pre-ADR-205 producers MAY omit them; consumers MUST treat the zero value
+    as "unknown" and fall back to `chora.identity.user_mana.debited.v1`
+    (correlate via `request_id == invocation_id`).
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  tokenUsageRecorded:
+    address: chora.observability.token_usage.recorded.v1
+    messages:
+      tokenUsageRecorded:
+        $ref: '#/components/messages/TokenUsageRecorded'
+
+operations:
+  publishTokenUsageRecorded:
+    action: send
+    channel:
+      $ref: '#/channels/tokenUsageRecorded'
+    messages:
+      - $ref: '#/channels/tokenUsageRecorded/messages/tokenUsageRecorded'
+
+  consumeTokenUsageRecorded:
+    action: receive
+    channel:
+      $ref: '#/channels/tokenUsageRecorded'
+    description: |
+      Consumers: BigQuery (cost ledger), Tenancy (metered billing
+      AddonUsageRecorded translation; ADR-205 transaction_ledger projection —
+      folds into mana_spend_daily + transaction_ledger_detail), Looker Studio
+      dashboards, O+ cost watchdog (anomaly detection).
+    messages:
+      - $ref: '#/channels/tokenUsageRecorded/messages/tokenUsageRecorded'
+
+components:
+  messages:
+    TokenUsageRecorded:
+      name: TokenUsageRecorded
+      title: Token Usage Recorded
+      summary: Canonical billing-grade token + cost ledger entry
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/observability/token_usage.proto#/chora.observability.v1.TokenUsageRecorded'

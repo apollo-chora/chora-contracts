@@ -1,0 +1,595 @@
+openapi: 3.2.0
+info:
+  title: Chora Content Consumption — Learner REST API
+  version: 1.1.0
+  description: |
+    Learner-facing REST surface for the **Content Consumption** domain
+    (`chora_consumption` DB). Distinct from `consumption-admin.yaml`
+    (admin/instructor/tenant-admin surface for R+/O+).
+
+    Domain: Content Consumption — `LearningPath`, `AtomicSession`,
+    `Companion` (RPG companion entity), `KnowledgeGraph`.
+
+    Surface: A+ (Surface-1) — learner playback + Discovery mode (curiosity
+    traversal). Tablet-first per Tier 4 D16.
+
+    Note: rich graph queries land in GraphQL (`graphql/consumption.graphql`).
+    This file covers state-changing commands + simple reads via REST.
+
+    Aligned with Architecture Review locked 2026-05-07 — Tier 1 D1
+    (5 core Content {verb} domains), Tier 2 D7 (REST for commands), Tier
+    4 D16 (integrative UI — role-driven feature visibility, not toggle).
+  contact:
+    name: Chora Platform Team
+  license:
+    name: Proprietary
+
+servers:
+  - url: https://api.chora.site/consumption/v1
+    description: Production (chora-content project)
+  - url: http://localhost:8080
+    description: Local dev
+
+tags:
+  - name: learning-paths
+    description: LearningPath learner CRUD + enrollment + progress
+  - name: sessions
+    description: AtomicSession state-machine endpoints (started/in_progress/completed/abandoned)
+  - name: knowledge-graph
+    description: Knowledge graph BFS discover + per-learner heatmap
+
+security:
+  - bearerAuth: []
+
+paths:
+  /learning-paths:
+    post:
+      tags: [learning-paths]
+      operationId: createLearningPath
+      summary: Create a curated LearningPath
+      description: |
+        Creates a LearningPath with title + atom_ids + owner GCID inferred
+        from the authenticated principal (header `gcid`). Returns the new
+        path UUIDv7. Empty `atom_ids` is rejected (a path without atoms
+        is meaningless per ddd-aggregate).
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/GCIDHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateLearningPathRequest'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LearningPath' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /learning-paths/{path_id}/enrollments:
+    parameters:
+      - $ref: '#/components/parameters/PathId'
+    post:
+      tags: [learning-paths]
+      operationId: enrollLearner
+      summary: Enroll the authenticated learner in a path
+      description: |
+        Creates an Enrollment for the authenticated learner (gcid header)
+        in the named path. Emits
+        `chora.consumption.learning_path.enrollment.created.v1` event.
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/GCIDHeader'
+      responses:
+        '201':
+          description: Enrolled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Enrollment' }
+        '404':
+          description: Path not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /learning-paths/{path_id}/progress:
+    parameters:
+      - $ref: '#/components/parameters/PathId'
+    get:
+      tags: [learning-paths]
+      operationId: getProgress
+      summary: Per-learner progress through a LearningPath
+      description: |
+        Returns the percent-complete for `gcid` against the path's atoms.
+        Atoms in the learner's CompletedAtomIDs that are NOT in the path
+        are ignored (don't inflate the percent).
+      parameters:
+        - name: gcid
+          in: query
+          required: true
+          schema: { type: string, format: uuid }
+          description: Learner GCID (UUIDv7) — typically self
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/GCIDHeader'
+      responses:
+        '200':
+          description: Progress detail
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProgressResponse' }
+        '404':
+          description: Path or enrollment not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /sessions:
+    post:
+      tags: [sessions]
+      operationId: startSession
+      summary: Start an AtomicSession (status=started)
+      description: |
+        Creates a new session in STARTED state and emits
+        `chora.consumption.atom_session.started.v1`.
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/GCIDHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartSessionRequest'
+      responses:
+        '201':
+          description: Started
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Session' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /sessions/{session_id}:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    get:
+      tags: [sessions]
+      operationId: getSession
+      summary: Fetch an AtomicSession by ID
+      responses:
+        '200':
+          description: Session detail
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Session' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /sessions/{session_id}/answer:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    patch:
+      tags: [sessions]
+      operationId: submitAnswer
+      summary: Submit an answer (transitions started→in_progress|completed)
+      description: |
+        Transitions the session per the answer outcome:
+
+          started      → in_progress (incorrect)
+          started      → completed   (correct)
+          in_progress  → in_progress (incorrect; hints_used++ if hint_used)
+          in_progress  → completed   (correct)
+
+        Hints are capped at 3 per session — 4th hint usage returns 409
+        Conflict. Submitting after `completed` or `abandoned` returns 409.
+
+        On COMPLETED transition emits
+        `chora.consumption.atom_session.completed.v1` with payload field
+        `source_action="ext"` (distinguishes from Companion SM-2 path).
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/GCIDHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AnswerRequest'
+      responses:
+        '200':
+          description: Answer accepted; session updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Session' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /sessions/{session_id}:abandon:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    post:
+      tags: [sessions]
+      operationId: abandonSession
+      summary: Abandon a session (terminal transition)
+      description: |
+        Transitions to ABANDONED state. Idempotent only via 24hr-timeout
+        handler — explicit re-abandon after terminal returns 409.
+        Emits `chora.consumption.atom_session.abandoned.v1`.
+
+        URL uses Google's REST custom-method convention `:abandon` for
+        non-CRUD actions.
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/GCIDHeader'
+      responses:
+        '200':
+          description: Abandoned
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Session' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /knowledge-graph/discover:
+    get:
+      tags: [knowledge-graph]
+      operationId: discoverKG
+      summary: BFS adjacency from a seed topic
+      description: |
+        Reads the chora-creation knowledge-graph snapshot via an internal
+        adapter and returns BFS adjacency from `topic` up to `depth`
+        (max 5). Cycles are guarded. depth=0 returns the seed only.
+      parameters:
+        - name: topic
+          in: query
+          required: true
+          schema: { type: string }
+          description: Seed topic to start traversal
+        - name: depth
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 5
+            default: 1
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/GCIDHeader'
+      responses:
+        '200':
+          description: Discovery result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DiscoverResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '503':
+          description: Knowledge-graph adapter not configured
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /me/knowledge-graph/heatmap:
+    get:
+      tags: [knowledge-graph]
+      operationId: getHeatmap
+      summary: Per-learner topic retention heatmap (RAG tiers)
+      description: |
+        Returns the authenticated learner's per-topic retention summary
+        as RAG (red / amber / green) tiers. retention >= 0.70 → GREEN;
+        0.40 <= retention < 0.70 → AMBER; < 0.40 → RED.
+
+        Powered by the SM-2 spaced-repetition projection in
+        chora_consumption (cross-DB reads forbidden — local projection
+        only).
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/GCIDHeader'
+      responses:
+        '200':
+          description: Heatmap
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HeatmapResponse' }
+
+  /v1/me/atom-sessions/{session_id}/answers:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    post:
+      tags: [sessions]
+      operationId: submitMeAnswer
+      summary: Submit an MCQ answer for server-side grading (A+ learner self-service)
+      description: |
+        Learner self-service ("`/v1/me`") submission of an MCQ answer for the
+        named AtomicSession. The server grades authoritatively — the legacy
+        caller-supplied `correct: bool` (see `PATCH /sessions/{session_id}/answer`
+        + `AnswerRequest`) is NOT trusted on this path.
+
+        **Grading is by `selected_option_id` (option identity), not by
+        positional index.** The handler resolves the chosen MCQ option by its
+        `option_id` against the answer key in the local `atom_index` projection
+        and compares by identity, so re-ordering of options between authoring
+        and delivery can never change the grade. The answer key is read from
+        chora-consumption's own projection only (cross-DB reads to
+        `chora_creation` are forbidden per ddd-enforcement).
+
+        `answer_id` is the client-supplied idempotency key: replaying the same
+        `answer_id` returns the prior result with `duplicate: true` and emits
+        no event / triggers no side-effect (atomic guarantee).
+
+        On a transition to `completed` the handler emits
+        `chora.consumption.atom_session.completed.v1` (payload
+        `source_action="v1_me_api"`) and runs in-process fan-out
+        (LearningPath advance + TopicRetention review + IMDA D1 evidence),
+        reflected in `paths_advanced` / `paths_completed` / `imda_evidence_id`.
+
+        State conflicts (submit after `completed`/`abandoned`, or 4th hint use —
+        hints capped at 3) return 409. Cross-tenant / cross-learner access
+        returns 404 (RLS leak guard).
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/GCIDHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MeSubmitAnswerRequest'
+      responses:
+        '200':
+          description: Answer accepted (or idempotent replay); session updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MeSubmitAnswerResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    TenantHeader:
+      name: X-Tenant-Id
+      in: header
+      required: true
+      schema: { type: string, format: uuid }
+      description: Tenant scope (UUIDv7)
+    GCIDHeader:
+      name: gcid
+      in: header
+      required: true
+      schema: { type: string, format: uuid }
+      description: Learner GCID (UUIDv7) — derived from JWT in production
+    PathId:
+      name: path_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    SessionId:
+      name: session_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: Missing or invalid credentials
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflict:
+      description: |
+        State machine conflict. Causes:
+          - Submit after completed/abandoned (terminal transition)
+          - Abandon after completed (terminal transition)
+          - 4th hint use (hints capped at 3)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: INVALID_TRANSITION
+        message: { type: string }
+
+    CreateLearningPathRequest:
+      type: object
+      required: [title, atom_ids]
+      properties:
+        title: { type: string, minLength: 1, maxLength: 200 }
+        atom_ids:
+          type: array
+          minItems: 1
+          items: { type: string, format: uuid }
+
+    LearningPath:
+      type: object
+      required: [path_id, tenant_id, owner_gcid, title, atom_ids]
+      properties:
+        path_id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        owner_gcid: { type: string, format: uuid }
+        title: { type: string }
+        atom_ids:
+          type: array
+          items: { type: string, format: uuid }
+
+    Enrollment:
+      type: object
+      required: [enrollment_id, tenant_id, path_id, learner_gcid]
+      properties:
+        enrollment_id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        path_id: { type: string, format: uuid }
+        learner_gcid: { type: string, format: uuid }
+
+    ProgressResponse:
+      type: object
+      required: [path_id, learner_gcid, percent_complete, completed_atoms, total_atoms]
+      properties:
+        path_id: { type: string, format: uuid }
+        learner_gcid: { type: string, format: uuid }
+        percent_complete:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+        completed_atoms: { type: integer, minimum: 0 }
+        total_atoms: { type: integer, minimum: 0 }
+
+    StartSessionRequest:
+      type: object
+      required: [atom_id]
+      properties:
+        atom_id: { type: string, format: uuid }
+
+    AnswerRequest:
+      type: object
+      required: [answer, correct]
+      properties:
+        answer: { type: string }
+        correct: { type: boolean }
+        hint_used: { type: boolean, default: false }
+
+    MeSubmitAnswerRequest:
+      type: object
+      required: [answer_id, selected_option_id]
+      description: |
+        Learner MCQ answer for server-side grading on the `/v1/me` path.
+        Grading compares `selected_option_id` by IDENTITY against the answer
+        key in the local atom_index projection — NOT by positional index — so
+        option re-ordering between authoring and delivery cannot change the
+        grade.
+      properties:
+        answer_id:
+          type: string
+          description: |
+            Client-supplied idempotency key. Replaying the same value returns
+            the prior result with `duplicate: true` and emits no event /
+            side-effect.
+        selected_option_id:
+          type: string
+          format: uuid
+          description: |
+            The `option_id` (UUID) of the MCQ option the learner chose. This
+            is the identity the server grades against (not a positional index).
+        hint_used:
+          type: boolean
+          default: false
+          description: Whether a hint was consumed for this attempt (hints capped at 3 per session).
+
+    MeSubmitAnswerResponse:
+      type: object
+      required: [session_id, status, is_correct, duplicate, hints_used, answer_count, paths_advanced, paths_completed]
+      description: |
+        Graded result of a `/v1/me` MCQ submission. `is_correct` is the
+        server's authoritative grade; `status` is the resulting AtomicSession
+        lifecycle state.
+      properties:
+        session_id: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/SessionStatus' }
+        is_correct:
+          type: boolean
+          description: Server-side authoritative grade (true when selected_option_id matches the answer key).
+        duplicate:
+          type: boolean
+          description: True when this was an idempotent replay of a prior answer_id (no event / side-effect ran).
+        hints_used: { type: integer, minimum: 0, maximum: 3 }
+        answer_count: { type: integer, minimum: 0 }
+        paths_advanced:
+          type: integer
+          minimum: 0
+          description: Number of LearningPaths advanced by this completion (in-process fan-out; 0 unless status=completed).
+        paths_completed:
+          type: integer
+          minimum: 0
+          description: Number of LearningPaths completed by this answer (in-process fan-out; 0 unless status=completed).
+        imda_evidence_id:
+          type: string
+          description: IMDA D1 governance-evidence record id emitted on completion. Absent when no evidence was emitted.
+
+    SessionStatus:
+      type: string
+      enum: [started, in_progress, completed, abandoned]
+      description: |
+        Lifecycle states. Transitions:
+
+          started     → in_progress (incorrect)
+          started     → completed (correct)
+          in_progress → in_progress (incorrect)
+          in_progress → completed (correct)
+          {non-terminal} → abandoned (Abandon | 24hr timeout)
+
+    Session:
+      type: object
+      required: [session_id, tenant_id, learner_gcid, atom_id, status, started_at]
+      properties:
+        session_id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        learner_gcid: { type: string, format: uuid }
+        atom_id: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/SessionStatus' }
+        hints_used: { type: integer, minimum: 0, maximum: 3 }
+        answer_count: { type: integer, minimum: 0 }
+        started_at: { type: string, format: date-time }
+        completed_at: { type: string, format: date-time, nullable: true }
+        abandoned_at: { type: string, format: date-time, nullable: true }
+
+    DiscoverResponse:
+      type: object
+      required: [seed, depth, topics]
+      properties:
+        seed: { type: string }
+        depth: { type: integer, minimum: 0, maximum: 5 }
+        topics:
+          type: array
+          items: { type: string }
+
+    HeatmapTier:
+      type: string
+      enum: [GREEN, AMBER, RED]
+      description: |
+        RAG retention bucket. GREEN = retention ≥ 0.70; AMBER = 0.40 ≤
+        retention < 0.70; RED = retention < 0.40.
+
+    HeatmapCell:
+      type: object
+      required: [topic, retention, tier]
+      properties:
+        topic: { type: string }
+        retention:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+        tier: { $ref: '#/components/schemas/HeatmapTier' }
+
+    HeatmapResponse:
+      type: object
+      required: [gcid, cells]
+      properties:
+        gcid: { type: string, format: uuid }
+        cells:
+          type: array
+          items: { $ref: '#/components/schemas/HeatmapCell' }

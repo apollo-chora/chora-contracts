@@ -1,0 +1,123 @@
+// =============================================================================
+// Chora EventEnvelope — mandatory wrapper for ALL Pub/Sub events
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 2 D8
+// + .claude/rules/ddd-enforcement.md ("Event envelope mandatory fields")
+// + memory project_chora_data_plane.md
+//
+// EVERY domain event published to Pub/Sub MUST embed this envelope.
+// Schema Registry validates payloads at publish time (Protobuf binary).
+//
+// Topic taxonomy: chora.{domain}.{aggregate}.{event_type}.v{N}
+//   - domain ∈ {creation, consumption, delivery, sharing, a2a,
+//               identity, tenancy, governance, observability,
+//               notifications, ai_kernel}
+//   - aggregate, event_type: snake_case
+//   - event_type past tense (created/updated/published/completed/...)
+//   - major version v{N} starts at v1; breaking change → new topic
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.common.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1;commonv1";
+
+import "google/protobuf/timestamp.proto";
+
+// EventEnvelope wraps every domain event published to Pub/Sub.
+// Concrete event payloads embed this as the first field.
+message EventEnvelope {
+  // UUIDv7 — globally unique; sortable by time
+  string event_id = 1;
+
+  // Producer-supplied dedup key. Subscribers MUST be idempotent on this.
+  // Often equals event_id but MAY be aggregate_id+version for replay safety.
+  string idempotency_key = 2;
+
+  // Tenant scope. Required for ALL events (multi-tenant isolation).
+  // Use literal "platform" for cross-tenant platform-level events.
+  string tenant_id = 3;
+
+  // Global Chora ID (UUIDv7) of the actor — learner / admin / agent.
+  // For agent-emitted events, embed the AGID (agent identity, distinct from
+  // user GCID) per ddd-enforcement aggregate-invariant #10.
+  // Empty if no actor (system-emitted events).
+  string gcid = 4;
+
+  // When the domain event semantically occurred (producer clock).
+  google.protobuf.Timestamp occurred_at = 5;
+
+  // When the producer published to Pub/Sub (after txn commit).
+  google.protobuf.Timestamp published_at = 6;
+
+  // W3C Trace Context — REQUIRED for distributed tracing across Pub/Sub.
+  // See docs/architecture-review-inputs-2026-05-07.md Tier 3 D11.
+  string traceparent = 7;
+  string tracestate = 8;
+
+  // Provenance — which GCP project + service emitted this.
+  // source_project ∈ {chora-content, chora-delivery, chora-489812, chora-golden}
+  string source_project = 9;
+  string source_service = 10;
+
+  // Schema major version of the event payload (matches v{N} in topic).
+  // Decoupled from Pub/Sub Schema Registry's schema revisions.
+  int32 schema_version = 11;
+
+  // Optional correlation across saga steps / multi-event flows.
+  string correlation_id = 12;
+
+  // Optional causation: event_id of the event that caused this one.
+  string causation_id = 13;
+
+  // -------------------------------------------------------------------------
+  // chora_imda_dimension — IMDA tagging (v2.0+, additive)
+  // -------------------------------------------------------------------------
+  //
+  // Source-of-truth: ADR-141 IMDA Dimension Labels Reconciliation
+  //   + .claude/skills/imda-governance-4-dimensions/SKILL.md
+  //
+  // Optional IMDA Model AI Governance Framework v2 (canonical labels per
+  // ADR-141, gold standard from o-plus-dashboard reference) dimension that
+  // this event is evidence FOR. Empty when no IMDA evidence is being claimed
+  // by the producer.
+  //
+  // Canonical values (snake_case, lower):
+  //   - "accountability"                 — D1 (AI Verify #8 Data Governance, #9 Accountability)
+  //   - "transparency"                   — D2 (AI Verify #1 Transparency, #2 Explainability)
+  //   - "safety_and_robustness"          — D3 (AI Verify #3-#6 Repeatability, Safety, Security, Robustness)
+  //   - "fairness_and_human_oversight"   — D4 (AI Verify #7 Fairness, #10 Human Agency, #11 Inclusive Growth)
+  //
+  // DEPRECATED v1 aliases (still accepted on input — server normalises via
+  // chora-governance imda.Canonicalise()):
+  //   - "risk_levels"            -> "accountability"
+  //   - "stakeholder_interaction" -> "transparency"
+  //   - "internal_governance"     -> "safety_and_robustness"
+  //   - "operations_management"   -> "fairness_and_human_oversight"
+  //
+  // Consumers SHOULD project this attribute onto OTLP spans as
+  // `chora.imda.dimension` for cross-cutting auditor visibility.
+  string chora_imda_dimension = 14;
+
+  // -------------------------------------------------------------------------
+  // imda_lifecycle_stage — IMDA lifecycle stage tagging (v2.0+, additive)
+  // -------------------------------------------------------------------------
+  //
+  // Optional 4-stage lifecycle classifier per IMDA NorthStar Tier 5 D18 +
+  // .claude/skills/imda-governance-4-dimensions. Distinguishes evidence
+  // emitted at different points in the AI development pipeline.
+  //
+  // Canonical values:
+  //   - "ci_pre_merge"   — pre-merge CI checks (lint, unit, eval suites)
+  //   - "pre_deploy"     — pre-deploy gating (red-team, contract tests)
+  //   - "runtime"        — production runtime evidence (guardrail outcomes,
+  //                        model invocations, HITL checkpoints)
+  //   - "post_deploy"    — post-deploy reconciliation (cost ledger,
+  //                        accuracy drift, billing reconciliation)
+  //
+  // Empty when not applicable (e.g., business-domain events that aren't
+  // IMDA evidence).
+  string imda_lifecycle_stage = 15;
+}

@@ -1,0 +1,62 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Governance — AuditEntryRecorded
+  version: 1.0.0
+  description: |
+    Published whenever any auditable action occurs. HIGH-VOLUME — expect
+    batched ingestion to BigQuery for compliance reporting. Append-only —
+    entries are immutable.
+
+    - Domain: Governance (`chora_governance` DB)
+    - Topic: `chora.governance.audit.recorded.v1`
+    - Source proto: `proto/events/governance/audit.proto`
+       message `chora.governance.v1.AuditEntryRecorded`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  auditRecorded:
+    address: chora.governance.audit.recorded.v1
+    messages:
+      auditRecorded:
+        $ref: '#/components/messages/AuditEntryRecorded'
+
+operations:
+  publishAuditRecorded:
+    action: send
+    channel:
+      $ref: '#/channels/auditRecorded'
+    messages:
+      - $ref: '#/channels/auditRecorded/messages/auditRecorded'
+
+  consumeAuditRecorded:
+    action: receive
+    channel:
+      $ref: '#/channels/auditRecorded'
+    description: |
+      Consumers: BigQuery (audit log warehouse), O+ Auditor view,
+      compliance reporting pipelines.
+    messages:
+      - $ref: '#/channels/auditRecorded/messages/auditRecorded'
+
+components:
+  messages:
+    AuditEntryRecorded:
+      name: AuditEntryRecorded
+      title: Audit Entry Recorded
+      summary: An auditable action has been recorded
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/governance/audit.proto#/chora.governance.v1.AuditEntryRecorded'

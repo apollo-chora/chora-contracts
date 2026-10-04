@@ -1,0 +1,94 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Governance — CrossTenantExamRollupViewed (audit)
+  version: 1.0.0
+  description: |
+    IMDA-D1 accountability record for the SANCTIONED third RLS-bypass
+    surface: the scoped cross-tenant exam rollup (ADR-192, ACCEPTED
+    2026-06-25). Every cross-tenant rollup read MUST publish this event
+    BEFORE the SQL fires (audit-before-SQL, the ADR-165 posture; a publish
+    failure aborts the read). The payload names the exact bounded satellite
+    set in view, which is the load-bearing accountability evidence.
+
+    Envelope discipline: the message embeds chora.common.v1.EventEnvelope as
+    FIELD 1 (canonical pattern). This deliberately does NOT repeat
+    CrossTenantPaymentsViewed's envelope omission: a fresh v1 topic carries
+    no inherited debt. event_id / occurred_at / the "platform" tenant
+    sentinel ride the envelope.
+
+    Read-model note (ADR-192 Alternative D, pre-sanctioned): the bypass-free
+    rollup hub read is a Pub/Sub projection of
+    chora.delivery.exam_result.released.v1 into an owner-keyed read-model
+    (keyed owner_tenant_id, aggregating per-satellite_tenant_id outcome
+    counts). Reads through that projection need NO bypass and do NOT emit
+    this event; only the D1 scoped LIVE read (RLS widening opted in via the
+    chora.exam_rollup_owner GUC) does.
+
+    - Domain: Governance (`chora_governance` DB) — producer: chora-delivery
+    - Topic: `chora.governance.audit.cross_tenant_exam_rollup_viewed.v1`
+    - Source proto: `proto/events/governance/audit.proto`
+       message `chora.governance.v1.CrossTenantExamRollupViewed`
+    - Status: CONTRACT ONLY as of 2026-07-17 (CHO-2231). No publisher,
+      subscriber, topic or Schema Registry registration exists yet; those
+      land with the W5 deploy burst (topics + per-subscription IAM + gateway
+      push route + Istio authz + committed schema revision, the full 5-break
+      checklist).
+  contact:
+    name: Chora Delivery Team (Team 2) with Governance (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  crossTenantExamRollupViewed:
+    address: chora.governance.audit.cross_tenant_exam_rollup_viewed.v1
+    messages:
+      crossTenantExamRollupViewed:
+        $ref: '#/components/messages/CrossTenantExamRollupViewed'
+
+operations:
+  publishCrossTenantExamRollupViewed:
+    action: send
+    channel:
+      $ref: '#/channels/crossTenantExamRollupViewed'
+    description: |
+      chora-delivery publishes exactly one event per cross-tenant rollup
+      read, BEFORE the widened SQL runs (pre-read intent: owner_tenant_id +
+      the resolved live franchise_satellite set are known before the query).
+      Emitted via the delivery outbox helper EmitCrossTenantExamRollupViewed
+      (outbox row tenant_id = "platform" sentinel, idempotency_key =
+      "audit:" + event_id). Audit-publish failure aborts the read
+      (fail-loud-then-audit).
+    messages:
+      - $ref: '#/channels/crossTenantExamRollupViewed/messages/crossTenantExamRollupViewed'
+
+  consumeCrossTenantExamRollupViewed:
+    action: receive
+    channel:
+      $ref: '#/channels/crossTenantExamRollupViewed'
+    description: |
+      Consumers: chora-governance audit ingest (append-only
+      governance_audit_events trail), O+ governance dashboard (IMDA D1
+      accountability evidence: who read whose exam outcomes, and exactly
+      which satellite tenants were in scope).
+    messages:
+      - $ref: '#/channels/crossTenantExamRollupViewed/messages/crossTenantExamRollupViewed'
+
+components:
+  messages:
+    CrossTenantExamRollupViewed:
+      name: CrossTenantExamRollupViewed
+      title: Cross-Tenant Exam Rollup Viewed (pre-read audit)
+      summary: Audit-before-SQL record naming the owner and the exact satellite set in view
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/governance/audit.proto#/chora.governance.v1.CrossTenantExamRollupViewed'

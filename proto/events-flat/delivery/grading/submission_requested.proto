@@ -1,0 +1,74 @@
+// =============================================================================
+// GENERATED — DO NOT EDIT.
+// Source : events/delivery/grading.proto message GradingSubmissionRequested
+// Tool   : chora-contracts/internal/protoflatten
+// Why    : GCP Pub/Sub Schema Registry rejects (a) schemas with `import`
+//          statements and (b) schemas with more than one top-level message.
+//          This flat copy contains exactly ONE top-level message;
+//          EventEnvelope + Timestamp + transitive deps are nested inside.
+// Path C : see chora-contracts/CHANGELOG.md and m10-data-plane main.tf.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.delivery.v1;
+
+message GradingSubmissionRequested {
+  // Inlined chora.common.v1.EventEnvelope (nested for self-contained schema).
+  message Envelope {
+    string event_id = 1;
+    string idempotency_key = 2;
+    string tenant_id = 3;
+    string gcid = 4;
+    Timestamp occurred_at = 5;
+    Timestamp published_at = 6;
+    string traceparent = 7;
+    string tracestate = 8;
+    string source_project = 9;
+    string source_service = 10;
+    int32 schema_version = 11;
+    string correlation_id = 12;
+    string causation_id = 13;
+    string chora_imda_dimension = 14;
+    string imda_lifecycle_stage = 15;
+  }
+
+  // Inlined google.protobuf.Timestamp (nested; wire-compatible).
+  message Timestamp {
+    int64 seconds = 1;
+    int32 nanos = 2;
+  }
+
+  // Inlined dep: SubmissionQuestionContext
+  message SubmissionQuestionContext {
+    string test_set_question_id = 1;
+    string question_id = 2;
+    string question_type = 3;
+    int32 display_order = 4;
+    int32 points_possible = 5;
+    string prompt = 6;
+    string subject = 7;
+    string topic = 8;
+    string oe_response_text = 9;
+    string rubric_json = 10;
+    string model_answer = 11;
+    bool mcq_correct = 12;
+    float mcq_points_earned = 13;
+  }
+
+  Envelope envelope = 1;
+  string grading_job_id = 2;
+  string submission_id = 3;
+  string assessment_id = 4;
+  string test_set_id = 5;
+  string learner_gcid = 6;
+  int32 passing_threshold_percent = 7;
+  string model_tier = 8;
+  bool per_question_feedback_enabled = 9;
+  string subject = 10;
+  repeated SubmissionQuestionContext questions = 11;
+  int32 total_points_possible = 12;
+  float mcq_points_earned = 13;
+  int32 estimated_mana_units = 14;
+  Timestamp requested_at = 15;
+}

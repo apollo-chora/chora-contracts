@@ -1,0 +1,247 @@
+// =============================================================================
+// chora.closure.v1 — Federated Closure Saga lifecycle events (canonical)
+// =============================================================================
+//
+// Source-of-truth: .claude/skills/account-closure-saga/SKILL.md
+// + .claude/rules/ddd-enforcement.md (Account Closure — federated saga)
+// + docs/architecture-review-inputs-2026-05-07.md Tier 3 D11
+//
+// Owning domain  : AI Kernel — Closure Orchestrator service
+//                  (chora_ai_kernel database; saga state mirrored in
+//                  chora_identity per ddd-enforcement)
+// Owning team    : Team 3 (Platform)
+// Topic prefix   : chora.closure.*
+// Surface (admin): O+ Observability+
+//
+// v2.0 RECONCILIATION: Per the M13 Stage 0.2 contracts reconciliation, this
+// proto file SUPERSEDES the legacy chora.ai_kernel.closure_orchestrator.*
+// topic family in proto/events/ai_kernel/closure_orchestrator.proto. Five
+// saga lifecycle events are exposed at the canonical `chora.closure.*`
+// namespace as called for in:
+//   - .claude/skills/account-closure-saga/SKILL.md (saga lifecycle topics)
+//   - docs/m13/phyllis-mvp-2026-05-08.md §10 (closure deferred but path locked)
+//   - docs/m13/audit-platform-fillgaps.md §9.5 (drift resolved here)
+//
+// LEGACY topics from chora.ai_kernel.closure_orchestrator.* are DEPRECATED.
+// Producers MUST emit on the new chora.closure.* topics; consumers SHOULD
+// double-subscribe during migration. The deprecated proto file remains for
+// one release for backwards compatibility.
+//
+// Per-domain pseudonymisation acks live at chora.{domain}.account.pseudonymised.v1
+// (per skill §"Inter-domain coordination") — NOT in this file. Each domain
+// owns that event family.
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.closure.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/closure/v1;closurev1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// ClosureSagaState — saga state machine (mirrors chora.identity AccountState).
+// -----------------------------------------------------------------------------
+//
+// Aligned with .claude/rules/ddd-enforcement.md §"Account Closure":
+//   ACTIVE -> CLOSING (grace) -> SUSPENDED -> PSEUDONYMIZED ->
+//             COLD_ARCHIVED -> CRYPTO_SHREDDED
+enum ClosureSagaState {
+  CLOSURE_SAGA_STATE_UNSPECIFIED = 0;
+  CLOSURE_SAGA_STATE_ACTIVE = 1;
+  CLOSURE_SAGA_STATE_CLOSING = 2;
+  CLOSURE_SAGA_STATE_SUSPENDED = 3;
+  CLOSURE_SAGA_STATE_PSEUDONYMIZED = 4;
+  CLOSURE_SAGA_STATE_COLD_ARCHIVED = 5;
+  CLOSURE_SAGA_STATE_CRYPTO_SHREDDED = 6;
+}
+
+// -----------------------------------------------------------------------------
+// ClosureRequested — chora.closure.requested.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a closure saga is INITIATED (typically in response to a
+// learner-self-initiated closure or admin-initiated closure of a tenant
+// member). Marks the ACTIVE -> CLOSING transition. Triggers grace-period
+// notification fan-out.
+//
+// Consumers:
+//   - chora-notifications (grace-period start email)
+//   - chora-identity (mirror onto its per-account closure.Saga aggregate)
+//   - chora-observability (O+ closure-pipeline projection)
+//   - all 10 domain pseudonymisation subscribers — wait for PSEUDONYMIZED
+//     transition before action.
+message ClosureRequested {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — saga correlation identifier carried across all 5 lifecycle
+  // events + per-domain pseudonymisation acks.
+  string saga_id = 2;
+
+  // GCID being closed (UUIDv7).
+  string gcid = 3;
+
+  // Tenant scope (empty for cross-tenant closures, e.g., learner who left
+  // every tenant).
+  string tenant_id = 4;
+
+  // Grace-window length in days. Skill default: 30. Overridden per
+  // jurisdiction if multi-jurisdiction retention applies.
+  int32 grace_period_days = 5;
+
+  // GCID of the actor who requested closure (self / admin / system).
+  string requested_by_gcid = 6;
+
+  // Free-text reason (max 1024 chars). Audit dimension for compliance.
+  string reason = 7;
+
+  // List of domain names that will receive pseudonymisation requests
+  // (snake_case — e.g., ["creation","consumption","delivery","sharing","a2a",
+  // "tenancy","governance","observability","notifications","ai_kernel"]).
+  repeated string participating_domains = 8;
+
+  google.protobuf.Timestamp requested_at = 9;
+}
+
+// -----------------------------------------------------------------------------
+// ClosureGraceStarted — chora.closure.grace_started.v1
+// -----------------------------------------------------------------------------
+//
+// Published when the grace window begins. Distinct from ClosureRequested
+// (which is the saga-state transition) — this event marks the user-facing
+// grace timer kick-off and the point at which all per-domain pseudonymisation
+// subscribers reset their idempotency keys for this saga_id.
+message ClosureGraceStarted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string saga_id = 2;
+  string gcid = 3;
+  string tenant_id = 4;
+
+  // ISO 8601 instant when the grace window expires (saga advances to
+  // SUSPENDED). Emitted for downstream UI countdown rendering.
+  google.protobuf.Timestamp grace_expires_at = 5;
+
+  google.protobuf.Timestamp started_at = 6;
+}
+
+// -----------------------------------------------------------------------------
+// ClosurePseudonymisePerDomainComplete —
+//   chora.closure.pseudonymise_per_domain_complete.v1
+// -----------------------------------------------------------------------------
+//
+// Published by the Closure Orchestrator when ALL participating domains have
+// emitted their per-domain `chora.{domain}.account.pseudonymised.v1` ack.
+// Marks the SUSPENDED -> PSEUDONYMIZED transition.
+//
+// Distinct from each per-domain ack — this is the AGGREGATED completion
+// signal that downstream cold-archive workers wait on.
+message ClosurePseudonymisePerDomainComplete {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string saga_id = 2;
+  string gcid = 3;
+  string tenant_id = 4;
+
+  // Per-domain record counts (key: domain snake_case; value: rows
+  // pseudonymised). Used for O+ observability dashboards.
+  map<string, int64> domain_record_counts = 5;
+
+  // Snapshot of which domains acked (for audit). Should match
+  // ClosureRequested.participating_domains.
+  repeated string acked_domains = 6;
+
+  google.protobuf.Timestamp completed_at = 7;
+}
+
+// -----------------------------------------------------------------------------
+// ClosureCryptoShredComplete — chora.closure.crypto_shred_complete.v1
+// -----------------------------------------------------------------------------
+//
+// Published when the Closure Orchestrator has executed the terminal
+// crypto-shred via Cloud KMS DEK destruction. Associated user data is
+// permanently unrecoverable.
+//
+// Marks the COLD_ARCHIVED -> CRYPTO_SHREDDED transition. HIGHLY audited —
+// feeds IMDA D1 Accountability evidence chain (envelope.chora_imda_dimension
+// = "accountability"). Per ADR-141, this is the most senior compliance
+// signal in the closure pipeline.
+message ClosureCryptoShredComplete {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string saga_id = 2;
+  string gcid = 3;
+  string tenant_id = 4;
+
+  // Cloud KMS resource name of the deleted DEK.
+  string dek_id = 5;
+
+  // Cloud KMS operation correlation ID for audit traceback.
+  string kms_operation_id = 6;
+
+  // GCID of the platform operator (or "system" for automation).
+  string executed_by_gcid = 7;
+
+  // Multi-jurisdiction retention metadata snapshot at shred time
+  // (per .claude/skills/account-closure-saga/SKILL.md retention rules).
+  // Key: jurisdiction code (e.g., "EU", "SG", "US", "ZA", "BR");
+  // value: number of days the data was retained pre-shred.
+  map<string, int32> retention_days_by_jurisdiction = 8;
+
+  google.protobuf.Timestamp shredded_at = 9;
+}
+
+// -----------------------------------------------------------------------------
+// ClosureClosed — chora.closure.closed.v1
+// -----------------------------------------------------------------------------
+//
+// Terminal saga event. Published immediately after ClosureCryptoShredComplete
+// when the saga aggregate is marked CLOSED in chora_identity. Differs from
+// ClosureCryptoShredComplete in that it carries the FULL saga trail summary
+// for audit replay (ledger of state transitions + actors).
+message ClosureClosed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string saga_id = 2;
+  string gcid = 3;
+  string tenant_id = 4;
+
+  // Final state — always CLOSURE_SAGA_STATE_CRYPTO_SHREDDED.
+  ClosureSagaState final_state = 5;
+
+  // Summary of state transitions (audit reconstruction).
+  // Key: state name (snake_case e.g., "active", "closing", ...);
+  // value: ISO 8601 instant of entry to that state.
+  map<string, string> state_transitions = 6;
+
+  google.protobuf.Timestamp closed_at = 7;
+}
+
+// -----------------------------------------------------------------------------
+// ClosureCancelled — chora.closure.cancelled.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a saga in CLOSING is cancelled (returned to ACTIVE) during
+// the grace window. Cancellation past SUSPENDED is FORBIDDEN — once
+// pseudonymisation begins, it cannot be reverted.
+//
+// Aligns with .claude/skills/account-closure-saga/SKILL.md §"Compensation".
+message ClosureCancelled {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string saga_id = 2;
+  string gcid = 3;
+  string tenant_id = 4;
+
+  // GCID of the actor who cancelled (self / admin / system).
+  string cancelled_by_gcid = 5;
+
+  // Free-text reason (max 1024 chars).
+  string reason = 6;
+
+  google.protobuf.Timestamp cancelled_at = 7;
+}

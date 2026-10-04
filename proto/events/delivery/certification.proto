@@ -1,0 +1,120 @@
+// =============================================================================
+// chora.delivery.v1 — Certification domain events (credential lifecycle)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 2 D7+D8
+// + .claude/rules/ddd-enforcement.md
+// + .claude/skills/domain-content-delivery/SKILL.md (CertIssuance is
+//   immutable audit-grade — revocation uses revoked_at + reason; never
+//   hard-delete).
+//
+// Owning domain  : Content Delivery (chora_delivery database)
+// Owning team    : Team 2 (Delivery)
+// Topic prefix   : chora.delivery.certification.*
+//
+// Certification represents a verifiable credential (completion, competency,
+// accredited, micro-credential) issued on path/exam completion.
+//
+// Cross-domain references (no FK):
+//   - learner_gcid : Identity (UUID, no FK)
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.delivery.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/delivery/v1;deliveryv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// CertType — class of certification, drives downstream rendering +
+// verifiable-credential serialisation.
+enum CertType {
+  CERT_TYPE_UNSPECIFIED = 0;
+  CERT_TYPE_COMPLETION = 1;
+  CERT_TYPE_COMPETENCY = 2;
+  CERT_TYPE_ACCREDITED = 3;
+  CERT_TYPE_MICRO_CREDENTIAL = 4;
+}
+
+// -----------------------------------------------------------------------------
+// CertIssued — chora.delivery.certification.issued.v1
+// -----------------------------------------------------------------------------
+//
+// Published on cert issuance. Drives Sharing (brag post), Notifications
+// (email + verifiable-credential link), Tenancy (verifiable-credential
+// record).
+message CertIssued {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 identifier of the issued Certification.
+  string cert_id = 2;
+
+  // GCID of the learner receiving the cert. Cross-domain — no FK.
+  string learner_gcid = 3;
+
+  // UUID of the Course on which the cert was earned (same DB).
+  string course_id = 4;
+
+  CertType cert_type = 5;
+
+  google.protobuf.Timestamp issued_at = 6;
+
+  // Optional expiry timestamp. Unset (zero) = does not expire.
+  google.protobuf.Timestamp expires_at = 7;
+}
+
+// -----------------------------------------------------------------------------
+// CertRevoked — chora.delivery.certification.revoked.v1
+// -----------------------------------------------------------------------------
+//
+// Published when an issued cert is invalidated (fraud / academic-integrity
+// violation / mistake). Triggers Sharing (remove brag), Notifications.
+// CertIssuance row preserved with revoked_at — never hard-deleted.
+message CertRevoked {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string cert_id = 2;
+
+  string learner_gcid = 3;
+
+  string course_id = 4;
+
+  CertType cert_type = 5;
+
+  // Original issued_at (denormalised for downstream consumers).
+  google.protobuf.Timestamp issued_at = 6;
+
+  // Required human-readable reason for revocation (max 512 chars).
+  string revocation_reason = 7;
+
+  // GCID of the admin / governance actor performing the revocation.
+  string revoked_by_gcid = 8;
+
+  google.protobuf.Timestamp revoked_at = 9;
+}
+
+// -----------------------------------------------------------------------------
+// CertExpiringSoon — chora.delivery.certification.expiring_soon.v1
+// -----------------------------------------------------------------------------
+//
+// Emitted by the cert-expiry reconciliation job when an issued cert is
+// approaching its expires_at horizon (default 30/14/7 days; per-tenant
+// configurable). Drives Notifications (renewal reminder).
+message CertExpiringSoon {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string cert_id = 2;
+
+  string learner_gcid = 3;
+
+  string course_id = 4;
+
+  CertType cert_type = 5;
+
+  google.protobuf.Timestamp issued_at = 6;
+
+  // Required for this event — drives the reminder window.
+  google.protobuf.Timestamp expires_at = 7;
+}

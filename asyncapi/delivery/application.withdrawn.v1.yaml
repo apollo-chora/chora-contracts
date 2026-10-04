@@ -1,0 +1,61 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Delivery — ApplicationWithdrawn
+  version: 1.0.0
+  description: |
+    Applicant withdrew (pre-payment). Terminal — distinct from Rejected
+    (reviewer terminal).
+
+    - Domain: Content Delivery (`chora_delivery` DB)
+    - Topic: `chora.delivery.application.withdrawn.v1`
+    - Source proto: `proto/events/delivery/application.proto`
+       message `chora.delivery.v1.ApplicationWithdrawn`
+  contact:
+    name: Chora Delivery Team (Team 2)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  applicationWithdrawn:
+    address: chora.delivery.application.withdrawn.v1
+    messages:
+      applicationWithdrawn:
+        $ref: '#/components/messages/ApplicationWithdrawn'
+
+operations:
+  publishApplicationWithdrawn:
+    action: send
+    channel:
+      $ref: '#/channels/applicationWithdrawn'
+    messages:
+      - $ref: '#/channels/applicationWithdrawn/messages/applicationWithdrawn'
+
+  consumeApplicationWithdrawn:
+    action: receive
+    channel:
+      $ref: '#/channels/applicationWithdrawn'
+    description: |
+      Consumers:
+        - chora-notifications (withdrawal-confirmed email)
+        - chora-observability (withdrawal-rate KPI)
+    messages:
+      - $ref: '#/channels/applicationWithdrawn/messages/applicationWithdrawn'
+
+components:
+  messages:
+    ApplicationWithdrawn:
+      name: ApplicationWithdrawn
+      title: Course Application withdrawn
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/delivery/application.proto#/chora.delivery.v1.ApplicationWithdrawn'

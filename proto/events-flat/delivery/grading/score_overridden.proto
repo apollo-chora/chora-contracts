@@ -1,0 +1,63 @@
+// =============================================================================
+// GENERATED — DO NOT EDIT.
+// Source : events/delivery/grading.proto message GradingScoreOverridden
+// Tool   : chora-contracts/internal/protoflatten
+// Why    : GCP Pub/Sub Schema Registry rejects (a) schemas with `import`
+//          statements and (b) schemas with more than one top-level message.
+//          This flat copy contains exactly ONE top-level message;
+//          EventEnvelope + Timestamp + transitive deps are nested inside.
+// Path C : see chora-contracts/CHANGELOG.md and m10-data-plane main.tf.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.delivery.v1;
+
+message GradingScoreOverridden {
+  // Inlined chora.common.v1.EventEnvelope (nested for self-contained schema).
+  message Envelope {
+    string event_id = 1;
+    string idempotency_key = 2;
+    string tenant_id = 3;
+    string gcid = 4;
+    Timestamp occurred_at = 5;
+    Timestamp published_at = 6;
+    string traceparent = 7;
+    string tracestate = 8;
+    string source_project = 9;
+    string source_service = 10;
+    int32 schema_version = 11;
+    string correlation_id = 12;
+    string causation_id = 13;
+    string chora_imda_dimension = 14;
+    string imda_lifecycle_stage = 15;
+  }
+
+  // Inlined google.protobuf.Timestamp (nested; wire-compatible).
+  message Timestamp {
+    int64 seconds = 1;
+    int32 nanos = 2;
+  }
+
+  // Inlined enum dep: GradeOverrideField
+  enum GradeOverrideField {
+    GRADE_OVERRIDE_FIELD_UNSPECIFIED = 0;
+    GRADE_OVERRIDE_FIELD_SCORE = 1;
+    GRADE_OVERRIDE_FIELD_COMMENT = 2;
+    GRADE_OVERRIDE_FIELD_MODEL_ANSWER = 3;
+    GRADE_OVERRIDE_FIELD_OVERALL_COMMENT = 4;
+  }
+
+  Envelope envelope = 1;
+  string submission_id = 2;
+  string assessment_id = 3;
+  string answer_id = 4;
+  string test_set_question_id = 5;
+  string question_id = 6;
+  GradeOverrideField field = 7;
+  string old_value = 8;
+  string new_value = 9;
+  string actor_gcid = 10;
+  string reason = 11;
+  Timestamp overridden_at = 12;
+}

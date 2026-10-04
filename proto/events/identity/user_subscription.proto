@@ -1,0 +1,212 @@
+// =============================================================================
+// chora.identity.v1 — Per-user (learner / instructor) subscription events
+// =============================================================================
+//
+// Source-of-truth: docs/architecture/adrs/adr-142-per-user-economy-mana.md
+//   + docs/architecture-review-inputs-2026-05-07.md Tier 1 D1
+//   + chora-contracts/openapi/learner-economy.yaml
+//
+// Owning domain : Identity (chora_identity database)
+// Owning team   : Team 3 (Platform)
+// Topic prefix  : chora.identity.user_subscription.*
+//
+// Per-user Companion subscription is DISTINCT from tenant-level
+// Subscription (chora.tenancy.subscription.*). Per-user subscriptions are
+// 3-tier (Companion Basic / Standard / Premium) and grant monthly mana
+// drips into the user's UserMana balance. Mana persists across cancellation
+// per ADR-142 prepaid-credit semantics.
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.identity.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/identity/v1;identityv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// CompanionTier — 3-tier subscription per ADR-142.
+// -----------------------------------------------------------------------------
+enum CompanionTier {
+  COMPANION_TIER_UNSPECIFIED = 0;
+  COMPANION_TIER_BASIC = 1;
+  COMPANION_TIER_STANDARD = 2;
+  COMPANION_TIER_PREMIUM = 3;
+}
+
+// -----------------------------------------------------------------------------
+// UserSubscriptionStatus — lifecycle states for a per-user subscription.
+// -----------------------------------------------------------------------------
+enum UserSubscriptionStatus {
+  USER_SUBSCRIPTION_STATUS_UNSPECIFIED = 0;
+  USER_SUBSCRIPTION_STATUS_PENDING_ACTIVATION = 1;
+  USER_SUBSCRIPTION_STATUS_ACTIVE = 2;
+  USER_SUBSCRIPTION_STATUS_PAUSED = 3;
+  USER_SUBSCRIPTION_STATUS_CANCELLED = 4;
+  USER_SUBSCRIPTION_STATUS_EXPIRED = 5;
+  USER_SUBSCRIPTION_STATUS_GRACE = 6;
+}
+
+// -----------------------------------------------------------------------------
+// BillingPeriod — monthly or annual cycle. Annual plans drip mana monthly.
+// -----------------------------------------------------------------------------
+enum BillingPeriod {
+  BILLING_PERIOD_UNSPECIFIED = 0;
+  BILLING_PERIOD_MONTHLY = 1;
+  BILLING_PERIOD_ANNUALLY = 2;
+}
+
+// -----------------------------------------------------------------------------
+// UserSubscriptionCreated — chora.identity.user_subscription.created.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a per-user Companion subscription is purchased (Stripe
+// Subscription created + first payment confirmed). Triggers a
+// UserManaCredited event for the onboarding bonus + first monthly drip.
+//
+// DEPRECATED: superseded by chora.payments.user_subscription.created.v1 (Stripe `customer.subscription.created`) + chora.payments.user_subscription.payment_captured.v1 (Stripe `invoice.paid` initial invoice) per ADR-164. Drain by 2026-06-30.
+message UserSubscriptionCreated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — UserSubscription aggregate root.
+  string subscription_id = 2;
+
+  // GCID of the subscriber (owner).
+  string gcid = 3;
+
+  // Tenant context at time of purchase. May be the user's primary tenant
+  // membership; mana is GCID-scoped (cross-tenant) per ADR-142.
+  string tenant_id = 4;
+
+  // Stable plan code (e.g., "companion_basic" / "companion_standard" /
+  // "companion_premium").
+  string plan_code = 5;
+
+  CompanionTier tier = 6;
+
+  UserSubscriptionStatus status = 7;
+
+  BillingPeriod billing_period = 8;
+
+  google.protobuf.Timestamp current_period_start = 9;
+  google.protobuf.Timestamp current_period_end = 10;
+
+  // Stripe subscription ID for cross-system reconciliation.
+  string stripe_subscription_id = 11;
+
+  // Monthly mana grant under this tier (drip amount).
+  int64 mana_monthly_units = 12;
+
+  // One-time onboarding bonus credited at activation.
+  int64 onboarding_bonus_units = 13;
+
+  google.protobuf.Timestamp created_at = 14;
+}
+
+// -----------------------------------------------------------------------------
+// UserSubscriptionRenewed — chora.identity.user_subscription.renewed.v1
+// -----------------------------------------------------------------------------
+//
+// Published on successful renewal (Stripe webhook invoice.paid). Carries
+// the new period boundaries; triggers UserManaCredited (drip) for the
+// monthly grant.
+//
+// DEPRECATED: superseded by chora.payments.user_subscription.renewed.v1 (Stripe `customer.subscription.updated` rollover) + chora.payments.user_subscription.payment_captured.v1 (Stripe `invoice.paid` renewal invoice) per ADR-164. Drain by 2026-06-30.
+message UserSubscriptionRenewed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string subscription_id = 2;
+  string gcid = 3;
+  string tenant_id = 4;
+  string plan_code = 5;
+  CompanionTier tier = 6;
+  BillingPeriod billing_period = 7;
+
+  google.protobuf.Timestamp prior_period_end = 8;
+  google.protobuf.Timestamp current_period_start = 9;
+  google.protobuf.Timestamp current_period_end = 10;
+
+  string stripe_subscription_id = 11;
+
+  // Monthly mana grant credited by this renewal.
+  int64 mana_monthly_units = 12;
+
+  google.protobuf.Timestamp renewed_at = 13;
+}
+
+// -----------------------------------------------------------------------------
+// UserSubscriptionCancelled — chora.identity.user_subscription.cancelled.v1
+// -----------------------------------------------------------------------------
+//
+// Published when the user cancels (or the system cancels for non-payment
+// after dunning). Mana balance is PRESERVED — see ADR-142 prepaid-credit
+// semantics. No UserManaForfeited event exists.
+//
+// DEPRECATED: superseded by chora.payments.user_subscription.cancelled.v1 (Stripe `customer.subscription.deleted`) per ADR-164. Drain by 2026-06-30.
+message UserSubscriptionCancelled {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string subscription_id = 2;
+  string gcid = 3;
+  string tenant_id = 4;
+  string plan_code = 5;
+  CompanionTier tier = 6;
+
+  // Free-text reason (e.g., "user_request", "non_payment", "downgrade",
+  // "account_closure_initiated").
+  string cancellation_reason = 7;
+
+  // GCID of the actor cancelling (user / admin / system).
+  string cancelled_by_gcid = 8;
+
+  // When the cancellation takes effect — typically equal to
+  // current_period_end unless immediate cancellation requested.
+  google.protobuf.Timestamp effective_at = 9;
+
+  google.protobuf.Timestamp cancelled_at = 10;
+}
+
+// -----------------------------------------------------------------------------
+// UserSubscriptionPlanChanged — chora.identity.user_subscription.plan_changed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when the user upgrades or downgrades the plan tier in place.
+// Stripe proration applies per the original request's proration_mode.
+// Mana grants follow the new tier from the next renewal; existing balance
+// is preserved.
+message UserSubscriptionPlanChanged {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string subscription_id = 2;
+  string gcid = 3;
+  string tenant_id = 4;
+
+  // Snapshots for audit.
+  string from_plan_code = 5;
+  string to_plan_code = 6;
+  CompanionTier from_tier = 7;
+  CompanionTier to_tier = 8;
+
+  BillingPeriod from_billing_period = 9;
+  BillingPeriod to_billing_period = 10;
+
+  // Net billing delta in cents for the current period. Positive = upgrade
+  // additional charge; negative = downgrade credit; 0 = no proration.
+  int64 billing_delta_cents = 11;
+
+  // Stripe subscription_schedule ID when the change was scheduled. Empty
+  // when applied immediately.
+  string schedule_id = 12;
+
+  // When the new tier becomes effective.
+  google.protobuf.Timestamp effective_at = 13;
+
+  // GCID of the user / admin who initiated the change.
+  string requested_by_gcid = 14;
+
+  google.protobuf.Timestamp changed_at = 15;
+}

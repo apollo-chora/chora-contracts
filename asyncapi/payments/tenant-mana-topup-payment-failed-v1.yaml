@@ -1,0 +1,60 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Payments — TenantManaTopUpPaymentFailed
+  version: 1.0.0
+  description: |
+    Stripe payment failed — chora-tenancy closes the in-progress
+    top-up; admin sees a failure notification.
+
+    - Domain: Payments (`chora_payments` DB)
+    - Topic: `chora.payments.tenant_mana_topup.payment_failed.v1`
+    - Source proto: `proto/events/payments/tenant_mana_topup.proto`
+       message `chora.payments.v1.TenantManaTopUpPaymentFailed`
+    - Aggregate: TenantManaTopUp
+    - Per ADR-164 (chora-payments service + 13th DB).
+    - IMDA: envelope.chora_imda_dimension = "accountability"
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  tenantManaTopUpPaymentFailed:
+    address: chora.payments.tenant_mana_topup.payment_failed.v1
+    messages:
+      tenantManaTopUpPaymentFailed:
+        $ref: '#/components/messages/TenantManaTopUpPaymentFailed'
+
+operations:
+  publishTenantManaTopUpPaymentFailed:
+    action: send
+    channel:
+      $ref: '#/channels/tenantManaTopUpPaymentFailed'
+    messages:
+      - $ref: '#/channels/tenantManaTopUpPaymentFailed/messages/tenantManaTopUpPaymentFailed'
+
+  consumeTenantManaTopUpPaymentFailed:
+    action: receive
+    channel:
+      $ref: '#/channels/tenantManaTopUpPaymentFailed'
+    messages:
+      - $ref: '#/channels/tenantManaTopUpPaymentFailed/messages/tenantManaTopUpPaymentFailed'
+
+components:
+  messages:
+    TenantManaTopUpPaymentFailed:
+      name: TenantManaTopUpPaymentFailed
+      title: Stripe reported a payment failure for a tenant mana pool top-up
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/payments/tenant_mana_topup.proto#/chora.payments.v1.TenantManaTopUpPaymentFailed'

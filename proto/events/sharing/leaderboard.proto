@@ -1,0 +1,136 @@
+// =============================================================================
+// Chora Content Sharing — Leaderboard events
+// =============================================================================
+//
+// Aggregate root: Leaderboard (ranked roster of GCIDs by an XP / score axis).
+// Owning domain : Content Sharing (chora_sharing DB).
+// Owning team   : Team 1 (Content)
+// Topic prefix  : chora.sharing.leaderboard.*
+// Surface       : C+ Connect+
+//
+// Leaderboards run on a season cadence — entries snapshot at season-roll
+// time and a fresh ranking begins. Rankings are derived from XP events
+// originating in chora_sharing (duels, post engagement, streaks, etc.).
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.sharing.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/sharing/v1;sharingv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// LeaderboardScope — competitive cohort for a given Leaderboard.
+// -----------------------------------------------------------------------------
+//
+// TENANT  — single tenant (workspace) ranking.
+// COURSE  — ranking confined to one Course/Class (cross-domain ref to
+//           chora_delivery — UUID-only, no FK).
+// COHORT  — ranking confined to a learner cohort (e.g., enrolment intake).
+// GLOBAL  — cross-tenant ranking (opt-in tenants only).
+enum LeaderboardScope {
+  LEADERBOARD_SCOPE_UNSPECIFIED = 0;
+  LEADERBOARD_SCOPE_TENANT = 1;
+  LEADERBOARD_SCOPE_COURSE = 2;
+  LEADERBOARD_SCOPE_COHORT = 3;
+  LEADERBOARD_SCOPE_GLOBAL = 4;
+}
+
+// -----------------------------------------------------------------------------
+// LeaderboardEntry — a single ranked slot in a Leaderboard top-N snapshot.
+// -----------------------------------------------------------------------------
+//
+// Embedded inline (NOT a top-level event). Top-N width is consumer-defined;
+// producer publishes 50 entries by default.
+message LeaderboardEntry {
+  // GCID of the ranked learner.
+  string gcid = 1;
+
+  // Score on the leaderboard's XP axis (always >= 0).
+  int64 score = 2;
+
+  // 1-based rank within the snapshot (1 = top spot).
+  int32 rank = 3;
+}
+
+// -----------------------------------------------------------------------------
+// LeaderboardUpdated — chora.sharing.leaderboard.updated.v1
+// -----------------------------------------------------------------------------
+//
+// Published when the top-N snapshot of a Leaderboard changes. Producer
+// debounces — at most one event per leaderboard per minute under normal
+// load. Consumers: C+ feed renderer, Notifications (rank-change nudges),
+// Observability.
+message LeaderboardUpdated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 of the Leaderboard aggregate.
+  string leaderboard_id = 2;
+
+  LeaderboardScope scope = 3;
+
+  // Optional scope qualifier — for COURSE / COHORT scopes this carries the
+  // course_id or cohort_id (UUIDv7). Empty for TENANT / GLOBAL.
+  string scope_id = 4;
+
+  // Active season at the time of update. Resets at season-roll (see
+  // LeaderboardSeasonRolled).
+  string season_id = 5;
+
+  // Top-N entries, rank-ascending. Length capped at 50 by default.
+  repeated LeaderboardEntry top_entries = 6;
+
+  google.protobuf.Timestamp updated_at = 7;
+
+  // ----- Atom Sharing Redesign (additive; optional on the wire — back-compat) -----
+
+  // Denormalised ELO carried on the update (R-10 — sourced from the existing
+  // duel_ratings.rating, baseline 1200/K=32). Carries the winner's ELO for a
+  // duel-completion-triggered update; 0 otherwise.
+  int32 duel_elo = 8;
+
+  // Denormalised completed-atoms count carried on the update (for an
+  // atom-session-completion-triggered update).
+  int32 atoms_completed = 9;
+
+  // GCIDs whose rank changed in this update (for rank-change nudges).
+  repeated RankUp rank_ups = 10;
+}
+
+// RankUp — a single learner's rank change in a LeaderboardUpdated snapshot.
+message RankUp {
+  string gcid = 1;
+  int32 old_rank = 2;
+  int32 new_rank = 3;
+}
+
+// -----------------------------------------------------------------------------
+// LeaderboardSeasonRolled — chora.sharing.leaderboard.season_rolled.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a Leaderboard season ends and a new one begins. The
+// trailing season's final top-N is captured in final_top_entries; the new
+// season's empty ranking starts at new_season_id. Consumers: Sharing (skin
+// award for season winners), Notifications (season-end summary).
+message LeaderboardSeasonRolled {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string leaderboard_id = 2;
+  LeaderboardScope scope = 3;
+  string scope_id = 4;
+
+  // Season that just closed.
+  string previous_season_id = 5;
+
+  // Season that just opened.
+  string new_season_id = 6;
+
+  // Final top-N of the closed season (frozen). Length capped at 50.
+  repeated LeaderboardEntry final_top_entries = 7;
+
+  // When the rollover occurred.
+  google.protobuf.Timestamp rolled_at = 8;
+}

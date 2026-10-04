@@ -1,0 +1,86 @@
+// =============================================================================
+// Chora Content Consumption — AtomSession events (Phyllis MVP — Comic Ch6 P14)
+// =============================================================================
+//
+// Aggregate root: AtomSession — alias of AtomicSession with the Phyllis MVP
+//                 SM-2 spaced-repetition feedback semantics.
+// Owning domain : Content Consumption (chora_consumption DB).
+// Topic prefix  : chora.consumption.atom_session.*
+//
+// AtomSession.Completed is the canonical "I just gave a feedback grade" event
+// used by Companion Daily Dose composition + downstream Sharing XP awards.
+// Distinct from session.completed.v1 (the legacy AtomicSession lifecycle event)
+// because the Phyllis MVP's grade vocabulary (i_remember | not_sure | forgot)
+// is richer than the binary score of the legacy aggregate.
+//
+// Cross-domain references: atom_id is a UUID sourced from chora_creation. NO
+// FK constraints across DBs — validate via locally cached AtomProjection
+// (populated by chora.creation.atom.published.v1 subscription).
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.consumption.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/consumption/v1;consumptionv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// FeedbackGrade — learner's 3-button SM-2 feedback for a Daily Dose card.
+// Mapped to canonical SM-2 quality scores (q=5 / 3 / 0).
+enum FeedbackGrade {
+  FEEDBACK_GRADE_UNSPECIFIED = 0;
+  FEEDBACK_GRADE_I_REMEMBER = 1; // q=5 perfect recall
+  FEEDBACK_GRADE_NOT_SURE = 2;   // q=3 effortful but correct
+  FEEDBACK_GRADE_FORGOT = 3;     // q=0 complete failure (resets interval)
+}
+
+// AtomSessionCompleted — emitted on POST /atoms/{id}/feedback when a learner
+// grades a Daily Dose card.
+//
+// Topic: chora.consumption.atom_session.completed.v1
+// Consumers:
+//   - Sharing (XP / streak / combo award via outbox per data-consistency skill)
+//   - Observability (engagement funnel + retention scoring)
+//   - AI Kernel (RAG memory enrichment for the Companion persona)
+//
+// Idempotency key on this event MUST include the atom_id + gcid + grade to
+// allow safe replay during demo recovery.
+message AtomSessionCompleted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // Cross-domain atom UUID (sourced from chora_creation).
+  string atom_id = 2;
+
+  // Owning learner GCID.
+  string learner_gcid = 3;
+
+  // Grade given by the learner (3-button feedback).
+  FeedbackGrade grade = 4;
+
+  // True iff grade == FEEDBACK_GRADE_I_REMEMBER (convenience for Sharing
+  // streak rules — duplicates the grade enum slightly but avoids an enum
+  // round-trip in subscribers).
+  bool answer_correct = 5;
+
+  // SM-2 state AFTER applying the grade.
+  int32 sm2_repetitions = 6;
+  int32 sm2_interval_days = 7;
+  google.protobuf.Timestamp sm2_next_review_at = 8;
+
+  // XP awarded for this feedback (driven by grade — see consumption service
+  // xpForGrade(): 100 / 50 / 10 for i_remember / not_sure / forgot).
+  int32 xp_earned = 9;
+
+  // Companion level after XP application + whether the grade triggered a
+  // level-up (downstream Sharing reads this to drive the celebration UX).
+  int32 companion_level = 10;
+  bool leveled_up = 11;
+
+  // Trait unlocked at the new level (empty if no trait or no level-up).
+  // Comic Ch6 P14 anchor: "leveled up to 5! New trait: Pattern Recognition".
+  string unlocked_trait = 12;
+
+  google.protobuf.Timestamp completed_at = 13;
+}

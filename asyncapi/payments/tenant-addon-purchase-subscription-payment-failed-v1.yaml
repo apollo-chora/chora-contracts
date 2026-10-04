@@ -1,0 +1,69 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Payments — TenantAddonPurchaseSubscriptionPaymentFailed
+  version: 1.0.0
+  description: |
+    chora-payments observed Stripe `invoice.payment_failed` on a recurring
+    H+ Marketplace tenant-add-on subscription invoice. Stripe smart-retry
+    handles most failures; access is NOT removed at this step (the
+    canonical removal signal is `chora.payments.tenant_addon_purchase.cancelled.v1`,
+    fired after smart-retries exhaust). chora-tenancy marks the entitlement
+    past_due so the FE can render a dunning banner +
+    chora-notifications can email the tenant admin.
+
+    Distinct from `chora.payments.tenant_addon_purchase.payment_failed.v1`
+    (one-shot mode=payment failures during the initial Checkout — no
+    invoice context).
+
+    - Domain: Payments (`chora_payments` DB)
+    - Topic: `chora.payments.tenant_addon_purchase.subscription_payment_failed.v1`
+    - Source proto: `proto/events/payments/tenant_addon_purchase.proto`
+       message `chora.payments.v1.TenantAddonPurchaseSubscriptionPaymentFailed`
+    - Aggregate: TenantAddonPurchase (CHO-1736 H+ Marketplace Subscribe)
+    - CHO-1771 + CHO-1775 — Stripe Subscription lifecycle Phase 2.
+    - IMDA: envelope.chora_imda_dimension = "accountability"
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  tenantAddonPurchaseSubscriptionPaymentFailed:
+    address: chora.payments.tenant_addon_purchase.subscription_payment_failed.v1
+    messages:
+      tenantAddonPurchaseSubscriptionPaymentFailed:
+        $ref: '#/components/messages/TenantAddonPurchaseSubscriptionPaymentFailed'
+
+operations:
+  publishTenantAddonPurchaseSubscriptionPaymentFailed:
+    action: send
+    channel:
+      $ref: '#/channels/tenantAddonPurchaseSubscriptionPaymentFailed'
+    messages:
+      - $ref: '#/channels/tenantAddonPurchaseSubscriptionPaymentFailed/messages/tenantAddonPurchaseSubscriptionPaymentFailed'
+
+  consumeTenantAddonPurchaseSubscriptionPaymentFailed:
+    action: receive
+    channel:
+      $ref: '#/channels/tenantAddonPurchaseSubscriptionPaymentFailed'
+    messages:
+      - $ref: '#/channels/tenantAddonPurchaseSubscriptionPaymentFailed/messages/tenantAddonPurchaseSubscriptionPaymentFailed'
+
+components:
+  messages:
+    TenantAddonPurchaseSubscriptionPaymentFailed:
+      name: TenantAddonPurchaseSubscriptionPaymentFailed
+      title: Stripe Subscription invoice payment failed for a H+ Marketplace tenant add-on (CHO-1775)
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/payments/tenant_addon_purchase.proto#/chora.payments.v1.TenantAddonPurchaseSubscriptionPaymentFailed'

@@ -1,0 +1,60 @@
+// =============================================================================
+// GENERATED — DO NOT EDIT.
+// Source : events/tenancy/tenant.proto message TenantClosed
+// Tool   : chora-contracts/internal/protoflatten
+// Why    : GCP Pub/Sub Schema Registry rejects (a) schemas with `import`
+//          statements and (b) schemas with more than one top-level message.
+//          This flat copy contains exactly ONE top-level message;
+//          EventEnvelope + Timestamp + transitive deps are nested inside.
+// Path C : see chora-contracts/CHANGELOG.md and m10-data-plane main.tf.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.tenancy.v1;
+
+message TenantClosed {
+  // Inlined chora.common.v1.EventEnvelope (nested for self-contained schema).
+  message Envelope {
+    string event_id = 1;
+    string idempotency_key = 2;
+    string tenant_id = 3;
+    string gcid = 4;
+    Timestamp occurred_at = 5;
+    Timestamp published_at = 6;
+    string traceparent = 7;
+    string tracestate = 8;
+    string source_project = 9;
+    string source_service = 10;
+    int32 schema_version = 11;
+    string correlation_id = 12;
+    string causation_id = 13;
+    string chora_imda_dimension = 14;
+    string imda_lifecycle_stage = 15;
+  }
+
+  // Inlined google.protobuf.Timestamp (nested; wire-compatible).
+  message Timestamp {
+    int64 seconds = 1;
+    int32 nanos = 2;
+  }
+
+  // Inlined enum dep: HostingMode
+  enum HostingMode {
+    HOSTING_MODE_UNSPECIFIED = 0;
+    HOSTING_MODE_PLATFORM_HOSTED = 1;
+    HOSTING_MODE_WHITE_LABEL = 2;
+    HOSTING_MODE_FRANCHISE = 3;
+    HOSTING_MODE_SELF_HOST = 4;
+  }
+
+  Envelope envelope = 1;
+  string tenant_id = 2;
+  string parent_tenant_id = 3;
+  string display_name = 4;
+  HostingMode hosting_mode = 5;
+  string reason = 6;
+  string closed_by_gcid = 7;
+  string saga_id = 8;
+  Timestamp closed_at = 9;
+}

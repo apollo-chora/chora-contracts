@@ -1,0 +1,69 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Governance — TenantImportExecuted (audit)
+  version: 1.0.0
+  description: |
+    IMDA-D1 accountability record for the tenant CSV mass-import (ADR-221
+    D8). Emitted by chora-identity BEFORE any import write fires (the
+    ADR-194 audit-before-write precedent): the confirming actor, mode pair
+    and full target-tenant set reach the audit trail even if the job later
+    fails mid-run. Synthetic-batch teardowns (ADR-222 D3) reuse the same
+    message with `action = "TEARDOWN"`, audited before the closure sagas
+    fan out.
+
+    - Domain: Governance (`chora_governance` DB) — producer: chora-identity
+    - Topic: `chora.governance.audit.tenant_import_executed.v1`
+    - Source proto: `proto/events/governance/audit.proto`
+       message `chora.governance.v1.TenantImportExecuted`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  tenantImportExecuted:
+    address: chora.governance.audit.tenant_import_executed.v1
+    messages:
+      tenantImportExecuted:
+        $ref: '#/components/messages/TenantImportExecuted'
+
+operations:
+  publishTenantImportExecuted:
+    action: send
+    channel:
+      $ref: '#/channels/tenantImportExecuted'
+    description: |
+      chora-identity publishes BEFORE the first tenant block / user row is
+      written (and before teardown sagas are enqueued) — never after.
+    messages:
+      - $ref: '#/channels/tenantImportExecuted/messages/tenantImportExecuted'
+
+  consumeTenantImportExecuted:
+    action: receive
+    channel:
+      $ref: '#/channels/tenantImportExecuted'
+    description: |
+      Consumers: chora-governance audit ingest (append-only trail), O+
+      governance dashboard (IMDA D1 evidence chain).
+    messages:
+      - $ref: '#/channels/tenantImportExecuted/messages/tenantImportExecuted'
+
+components:
+  messages:
+    TenantImportExecuted:
+      name: TenantImportExecuted
+      title: Tenant CSV Import Executed (audit)
+      summary: Pre-write accountability record for an import run or teardown
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/governance/audit.proto#/chora.governance.v1.TenantImportExecuted'

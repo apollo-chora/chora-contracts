@@ -1,0 +1,142 @@
+// =============================================================================
+// Chora Content Consumption — Companion concept/edge SUGGESTION events (ADR-212 WS-4)
+// =============================================================================
+//
+// The learner-sovereign Discovery redesign (ADR-212 D4) demotes the ADR-143
+// machine-authored "hexagonal fog" into a Companion-driven SUGGESTION engine: the
+// LLM proposes candidate CONCEPTS + EDGES over the learner's sovereign map; the
+// learner curates (Accept mints a real ConceptNode/Edge with
+// provenance=companion_suggested_accepted; Dismiss declines). The dispatch is
+// fully event-driven (feedback_agentic_pubsub_only): every agent invocation goes
+// through Pub/Sub, orchestrator-managed.
+//
+// Flow:
+//   1. chora-consumption publishes concept_suggestion.requested.v1 (learner asks
+//      their bound Companion to suggest, via outbox) with the focal-concept
+//      context + the existing concepts (so the fog does not re-propose them and
+//      can reference them by id in proposed edges).
+//   2. chora-fog-orchestrator (concept-shaped, ns ai-kernel) subscribes, runs the
+//      LLM, and publishes concept_suggestion.emitted.v1 with the proposed
+//      concepts + edges + the ADR-197 decision-stamps (model / run / tokens).
+//   3. chora-consumption subscribes to emitted.v1 and persists each item as a
+//      pending Suggestion (soft-cap, NOT exactly-6). Idempotent per envelope.
+//
+// Domain placement: per the topic-domain-follows-the-affected-aggregate-root
+// convention (see weakness.proto header), BOTH events live in the `consumption`
+// domain because the affected aggregate is the ConceptNode/Edge/Suggestion in
+// chora_consumption — even though emitted.v1 is EMITTED by the ai-kernel fog
+// orchestrator (the emitter does not determine the topic domain).
+//
+// Aggregate root : concept_suggestions / concept_nodes / concept_edges (chora_consumption)
+// Owning domain  : Content Consumption (chora_consumption)
+// Owning team    : Team 1 (Content)
+// Topic prefix   : chora.consumption.concept_suggestion.*
+// Surface        : A+ (Discovery map — suggestion chips)
+//
+// Subscribers:
+//   - chora-fog-orchestrator (concept-suggestion crew) — subscribes to
+//     concept_suggestion.requested.v1; runs the LLM; emits
+//     concept_suggestion.emitted.v1.
+//   - chora-consumption — subscribes to concept_suggestion.emitted.v1; persists
+//     pending Suggestions (idempotent).
+//   - chora-observability — D1 accountability + cost evidence on emitted.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.consumption.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/consumption/v1;consumptionv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// ConceptRef — an existing concept the learner already has on their map
+// (id + title). Sent in the request so the fog (a) does not re-propose an
+// existing concept and (b) can reference existing concepts by id in the edges
+// it proposes.
+// -----------------------------------------------------------------------------
+message ConceptRef {
+  string concept_id = 1;
+  string title      = 2;
+}
+
+// -----------------------------------------------------------------------------
+// ConceptSuggestionRequested — Topic: chora.consumption.concept_suggestion.requested.v1
+// Published by chora-consumption when a learner asks their bound Companion to
+// suggest concepts/edges around a focal concept on their sovereign map.
+// -----------------------------------------------------------------------------
+message ConceptSuggestionRequested {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // Tenant + learner (also in envelope.tenant_id / envelope.gcid; duplicated for
+  // tenant-sharded consumers + explicit RLS scoping downstream).
+  string tenant_id    = 2;
+  string learner_gcid = 3;
+
+  // The designated Companion for this map/theme (ADR-212 D5) + the map theme.
+  string companion_id = 4;
+  string map_theme   = 5;
+
+  // The focal concept the learner is centred on (empty ⇒ whole-map suggestion).
+  string focal_concept_id       = 6;
+  string focal_title            = 7;
+  repeated string focal_atom_refs = 8; // LearningAtom UUIDs under the focal concept (LLM grounding)
+
+  // The learner's existing concepts (id + title) so the fog does not re-propose
+  // them and can reference them by id in proposed edges.
+  repeated ConceptRef existing_concepts = 9;
+
+  google.protobuf.Timestamp requested_at = 10;
+}
+
+// -----------------------------------------------------------------------------
+// SuggestedConcept — a candidate NEW concept the fog proposes. atom_refs is
+// optional (the fog MAY link atoms it is confident belong; the learner curates).
+// -----------------------------------------------------------------------------
+message SuggestedConcept {
+  string title              = 1;
+  string rationale          = 2; // learner-facing "why" (ADR-215)
+  repeated string atom_refs = 3; // optional LearningAtom UUIDs
+}
+
+// -----------------------------------------------------------------------------
+// SuggestedEdge — a candidate relation between two EXISTING concepts (by id,
+// from the request's existing_concepts). edge_class is "hierarchy" | "lateral".
+// -----------------------------------------------------------------------------
+message SuggestedEdge {
+  string source_concept_id = 1;
+  string target_concept_id = 2;
+  string edge_class        = 3; // "hierarchy" | "lateral"
+  string rationale         = 4; // learner-facing "why" (ADR-215)
+}
+
+// -----------------------------------------------------------------------------
+// ConceptSuggestionEmitted — Topic: chora.consumption.concept_suggestion.emitted.v1
+// Published by chora-fog-orchestrator with the proposed concepts + edges. A
+// single event carries the whole batch (N items); chora-consumption persists
+// each as a pending Suggestion. Idempotency is per envelope (event id).
+// -----------------------------------------------------------------------------
+message ConceptSuggestionEmitted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string tenant_id    = 2;
+  string learner_gcid = 3;
+  string companion_id  = 4;
+  string map_theme    = 5;
+
+  // Echoed from the request (the focal the suggestions cluster around).
+  string focal_concept_id = 6;
+
+  repeated SuggestedConcept concepts = 7;
+  repeated SuggestedEdge    edges    = 8;
+
+  // ADR-197 decision-stamps (explainability + cost).
+  string model_used        = 9;
+  string run_id            = 10;
+  int32  input_token_count = 11;
+  int32  output_token_count = 12;
+
+  google.protobuf.Timestamp emitted_at = 13;
+}

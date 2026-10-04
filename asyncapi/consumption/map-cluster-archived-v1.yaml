@@ -1,0 +1,66 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Content Consumption — MapClusterArchived
+  version: 1.0.0
+  description: |
+    Published when a learner archives a knowledge map cluster (per ADR-143).
+    Archived clusters are read-only; sweeper soft-deletes their hex_nodes
+    after `kg_fog_invalidation_grace_seconds` × 12.
+
+    - Domain: Content Consumption (`chora_consumption` DB)
+    - Aggregate root: `MapCluster` (kg_user_map_clusters table)
+    - Topic: `chora.consumption.kg_map_cluster.archived.v1`
+    - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
+    - Source proto: `proto/events/consumption/knowledge_graph.proto`
+       message `chora.consumption.v1.MapClusterArchived`
+
+    Embeds the mandatory `chora.common.v1.EventEnvelope` as field 1.
+  contact:
+    name: Chora Content Team (Team 1)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+    description: Google Cloud Pub/Sub (chora-489812 platform host)
+
+channels:
+  mapClusterArchived:
+    address: chora.consumption.kg_map_cluster.archived.v1
+    description: Single-event topic for MapClusterArchived.
+    messages:
+      mapClusterArchived:
+        $ref: '#/components/messages/MapClusterArchived'
+
+operations:
+  publishMapClusterArchived:
+    action: send
+    channel:
+      $ref: '#/channels/mapClusterArchived'
+    summary: Publish a MapClusterArchived event
+
+  consumeMapClusterArchived:
+    action: receive
+    channel:
+      $ref: '#/channels/mapClusterArchived'
+    summary: Subscribe to MapClusterArchived events
+    description: |
+      Primary consumers:
+      - Observability — engagement analytics (cluster lifecycle)
+
+components:
+  messages:
+    MapClusterArchived:
+      name: MapClusterArchived
+      title: Map Cluster Archived
+      summary: A learner archived a knowledge map cluster
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/consumption/knowledge_graph.proto#/chora.consumption.v1.MapClusterArchived'

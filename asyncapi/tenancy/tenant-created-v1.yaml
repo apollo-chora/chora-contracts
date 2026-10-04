@@ -1,0 +1,64 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Tenancy — TenantCreated
+  version: 1.0.0
+  description: |
+    Published when a new Tenant is provisioned. Triggers RLS policy
+    bootstrap, default add-on plan attach, default IdP config, and
+    welcome notifications to the initial OWNER GCID.
+
+    - Domain: Tenancy + Billing (`chora_tenancy` DB) — combined
+    - Topic: `chora.tenancy.tenant.created.v1`
+    - Source proto: `proto/events/tenancy/tenant.proto`
+       message `chora.tenancy.v1.TenantCreated`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  tenantCreated:
+    address: chora.tenancy.tenant.created.v1
+    messages:
+      tenantCreated:
+        $ref: '#/components/messages/TenantCreated'
+
+operations:
+  publishTenantCreated:
+    action: send
+    channel:
+      $ref: '#/channels/tenantCreated'
+    messages:
+      - $ref: '#/channels/tenantCreated/messages/tenantCreated'
+
+  consumeTenantCreated:
+    action: receive
+    channel:
+      $ref: '#/channels/tenantCreated'
+    description: |
+      Consumers: ALL domain databases (RLS policy bootstrap),
+      Notifications (welcome email), Observability (KPI),
+      AI Kernel (default crew composition), Identity
+      (initial OWNER membership grant).
+    messages:
+      - $ref: '#/channels/tenantCreated/messages/tenantCreated'
+
+components:
+  messages:
+    TenantCreated:
+      name: TenantCreated
+      title: Tenant Created
+      summary: A new Tenant has been provisioned
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/tenancy/tenant.proto#/chora.tenancy.v1.TenantCreated'

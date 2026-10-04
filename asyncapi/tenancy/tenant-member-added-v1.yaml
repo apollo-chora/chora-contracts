@@ -1,0 +1,64 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Tenancy — TenantMemberAdded
+  version: 1.0.0
+  description: |
+    A new GCID was added as a member to a tenant. Distinct from
+    chora.identity.tenancy_membership.granted.v1 — the Identity event
+    records GCID-Tenant linkage; THIS event captures the Tenancy-side
+    seat / billing impact.
+
+    - Domain: Tenancy + Billing (`chora_tenancy` DB)
+    - Topic: `chora.tenancy.tenant.member_added.v1`
+    - Source proto: `proto/events/tenancy/tenant.proto`
+       message `chora.tenancy.v1.TenantMemberAdded`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  tenantMemberAdded:
+    address: chora.tenancy.tenant.member_added.v1
+    messages:
+      tenantMemberAdded:
+        $ref: '#/components/messages/TenantMemberAdded'
+
+operations:
+  publishTenantMemberAdded:
+    action: send
+    channel:
+      $ref: '#/channels/tenantMemberAdded'
+    messages:
+      - $ref: '#/channels/tenantMemberAdded/messages/tenantMemberAdded'
+
+  consumeTenantMemberAdded:
+    action: receive
+    channel:
+      $ref: '#/channels/tenantMemberAdded'
+    description: |
+      Consumers:
+        - chora-notifications (welcome email)
+        - chora-tenancy (downstream addon.usage_recorded if consumes_seat)
+        - chora-observability (active-learner growth dashboard)
+    messages:
+      - $ref: '#/channels/tenantMemberAdded/messages/tenantMemberAdded'
+
+components:
+  messages:
+    TenantMemberAdded:
+      name: TenantMemberAdded
+      title: New member added to a tenant
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/tenancy/tenant.proto#/chora.tenancy.v1.TenantMemberAdded'

@@ -1,0 +1,377 @@
+openapi: "3.2.0"
+info:
+  title: "Chora Identity Self-Service API"
+  version: "0.1.0"
+  description: |
+    Self-service REST API for the Identity supporting domain — the
+    authenticated user's own profile + per-course role context.
+
+    Per Comic Ch4 P8 "I Am Two People" → "One Identity to Rule Them All":
+    a single GCID (Global Chora ID) carries DIFFERENT roles per course.
+    `GET /me` returns the global account metadata; `GET /me/roles?course_id=X`
+    returns the role context within a specific course.
+
+    Owning domain : Identity (`chora_identity` database)
+    Owning team   : Team 3 (Platform)
+    Surface       : A+ (learner self-service) + H+ (Hub admin own-profile)
+                    + R+ (instructor own-profile)
+
+    AP-01: This contract exists BEFORE implementation. Admin endpoints are in
+    `identity-admin.yaml`.
+
+    Authorization (MVP): `Authorization: Bearer <gcid>`. The bearer value is
+    the user's GCID; full Identity Platform OIDC validation lands at M12+.
+    Unknown / missing GCIDs → 401.
+  contact:
+    name: "Chora Platform Team (Team 3)"
+  license:
+    name: "Proprietary"
+
+servers:
+  - url: "https://chora-identity-7b33ycv73q-as.a.run.app"
+    description: "Cloud Run (chora-489812, asia-southeast1) — dev"
+  - url: "http://localhost:8080"
+    description: "Local development"
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Me
+    description: "Authenticated user self-service"
+  - name: Resolve
+    description: "Identity resolution for the BFF gateway"
+
+paths:
+  /v1/identity/resolve:
+    post:
+      operationId: resolveIdentity
+      summary: "Resolve a Firebase-verified user to GCID + tenant memberships"
+      description: |
+        Called by chora-gateway during POST /api/v1/auth/session/mint AFTER
+        the Firebase ID token has been signature-validated. Returns the
+        user's GCID + the full list of tenant memberships they hold (one
+        GCID, many tenants, many roles per tenant — per the 2026-05-14
+        multi-tenant identity arch-correct invariant).
+
+        Flow:
+
+          1. Lookup-or-create the GlobalChoraIdentity row by
+             (email, firebase_uid). Soft-delete + UUIDv7 + GCID-stable.
+          2. gRPC call to chora-tenancy's ListMembershipsByGCID over
+             Cloud Service Mesh mTLS. The membership table lives in
+             chora_tenancy; chora-identity MUST NOT query it directly.
+          3. ADR-182 D2 — when the user holds ZERO memberships, auto-enrol
+             the GCID into the public `chora-master` tenant as
+             learner+author (idempotent), then re-list. A resolve response
+             therefore ALWAYS carries at least one membership; the former
+             Phase 5 zero-membership 200 (CHO-1648 bootstrap-mode) and the
+             pre-Phase-5 404 are both RETIRED.
+          4. Apply the `active_tenant_id` hint when present + valid.
+             Else use the server-derived default_tenant_id.
+          5. Emit chora.identity.gcid.resolved.v1 (idempotent on
+             sha256(email+firebase_uid)) for the audit trail.
+
+        Authentication: NONE at this endpoint — chora-gateway is the
+        upstream trust boundary that gates the Firebase ID token. The
+        endpoint is mesh-internal only; production deployment binds it
+        to the mesh-internal SVC_IDENTITY_URL.
+
+        Out-of-scope (M14+):
+          - Pub/Sub subscriber for the gcid.resolved.v1 event lands in
+            the M14 BLANKET consumer work.
+          - chora-identity does NOT auto-create PRIVATE tenants. Private
+            tenant issuance is PLATFORM_OPERATOR-only via the H+
+            Setup-Tenant wizard (ADR-182 D3).
+      tags: [Resolve]
+      security: [] # Mesh-internal — no JWT here.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResolveIdentityRequest"
+      responses:
+        "200":
+          description: "Identity resolved with memberships"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResolveIdentityResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          description: "RETIRED (ADR-182 D2) — zero-membership users are auto-enrolled into chora-master; resolve never 404s on empty memberships. Retained only as a transitional code while old identity pods drain."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          description: "chora-tenancy gRPC unreachable"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /me:
+    get:
+      operationId: getMe
+      summary: "Get the authenticated user's profile"
+      description: |
+        Returns the GCID, email, display name, account creation timestamp,
+        and the auth methods + linked IdPs registered for this GCID.
+
+        Per Comic Ch4 P8 invariant: the same `gcid` is returned regardless
+        of which tenant or course the caller is currently scoped to.
+      tags: [Me]
+      responses:
+        "200":
+          description: "Profile retrieved"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MeResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /me/roles:
+    get:
+      operationId: getMeRoles
+      summary: "Get the authenticated user's role on a specific course"
+      description: |
+        Returns the role + permissions the authenticated GCID holds on the
+        given course. Per Comic Ch4 P8 invariant: same GCID + different
+        course_id = different role, but ONE identity. If the user has no
+        assignment on the course, role=`none` and permissions is `[]`.
+
+        Course context is carried in the response `tenant_id` field — the
+        course belongs to a tenant, and the role grants are resolved against
+        the denormalised projection in chora_identity (refreshed via Pub/Sub
+        from chora.delivery.* events; deferred to Tier 2).
+      tags: [Me]
+      parameters:
+        - name: course_id
+          in: query
+          required: true
+          description: "Course UUID (UUIDv7) — see chora.delivery.course aggregate"
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: "Role context resolved"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CourseRoleContext"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: GCID
+      description: |
+        Bearer token whose value is the caller's GCID (UUIDv7). Full OIDC
+        validation lands at M12+ when Identity Platform is wired.
+
+  responses:
+    BadRequest:
+      description: "Bad request (missing or malformed query parameter)"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Unauthorized:
+      description: "Missing / malformed bearer or unknown GCID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    InternalError:
+      description: "Internal server error"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+
+  schemas:
+    MeResponse:
+      type: object
+      required:
+        - gcid
+        - email
+        - display_name
+        - created_at
+        - auth_methods
+        - linked_idps
+      properties:
+        gcid:
+          type: string
+          format: uuid
+          description: "Opaque cross-tenant-portable UUIDv7"
+          example: "01935b5a-9bcf-7000-8000-000000000001"
+        email:
+          type: string
+          format: email
+          example: "phyllis@mightymind.sg"
+        display_name:
+          type: string
+          maxLength: 128
+          example: "Phyllis Tan"
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-05-08T01:23:45Z"
+        auth_methods:
+          type: array
+          description: "Auth methods the user has registered (e.g., password, google_oidc, webauthn)"
+          items:
+            type: string
+            enum: [password, google_oidc, webauthn, saml, singpass]
+          example: ["password", "google_oidc"]
+        linked_idps:
+          type: array
+          description: "Identity providers federated to this GCID"
+          items:
+            type: string
+            enum: [google, microsoft, singpass, webauthn, saml]
+          example: ["google", "singpass"]
+
+    CourseRoleContext:
+      type: object
+      required:
+        - gcid
+        - course_id
+        - tenant_id
+        - role
+        - permissions
+      properties:
+        gcid:
+          type: string
+          format: uuid
+          description: "Same GCID for every course context — Comic Ch4 P8 invariant"
+          example: "01935b5a-9bcf-7000-8000-000000000001"
+        course_id:
+          type: string
+          format: uuid
+          example: "01935b5a-9bcf-7000-8000-000000000099"
+        tenant_id:
+          type: string
+          format: uuid
+          description: "Tenant that owns the course; empty when role=none"
+          example: "01935b5a-9bcf-7000-8000-000000000010"
+        role:
+          type: string
+          enum: [instructor, learner, tenant_admin, super_admin, auditor, none]
+          description: "Per-course role assignment; `none` when no assignment exists"
+          example: "instructor"
+        permissions:
+          type: array
+          description: "Hardcoded permissions per role for MVP — dynamic policy lands at M12+"
+          items:
+            type: string
+            enum: [read, submit, author, grade, publish, moderate, administer, audit]
+          example: ["author", "grade", "publish", "moderate"]
+
+    ErrorEnvelope:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: "IDENTITY_BEARER_REQUIRED"
+        message:
+          type: string
+          example: "Authorization: Bearer <gcid> header is required"
+
+    ResolveIdentityRequest:
+      type: object
+      required: [email, firebase_uid]
+      properties:
+        email:
+          type: string
+          format: email
+          description: "Email from the Firebase ID token (already verified by chora-gateway)"
+          example: "phyllis@mightymind.sg"
+        firebase_uid:
+          type: string
+          description: "Firebase sub claim (federated subject)"
+          example: "firebase-uid-abc-123"
+        active_tenant_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            OPTIONAL caller hint — when present + valid (the user IS a
+            member of this tenant) the response default_tenant_id will
+            match it. Used by the FE's tenant-switch flow. Empty / unknown
+            tenant_id is silently ignored — fallback to server-derived
+            default.
+          example: "01970000-0000-7000-8000-000000000010"
+
+    ResolveIdentityResponse:
+      type: object
+      required: [gcid, memberships, default_tenant_id, email, firebase_uid]
+      properties:
+        gcid:
+          type: string
+          format: uuid
+          description: "Opaque UUIDv7. Cross-tenant-portable."
+          example: "01935b5a-9bcf-7000-8000-000000000001"
+        memberships:
+          type: array
+          description: "All tenant memberships held by the GCID. May be empty (caller surfaces empty as HTTP 403)."
+          items:
+            $ref: "#/components/schemas/TenantMembership"
+        default_tenant_id:
+          type: string
+          format: uuid
+          description: "Picked active tenant — caller's hint when valid, else server default. Empty when memberships is empty."
+          example: "01970000-0000-7000-8000-000000000010"
+        email:
+          type: string
+          format: email
+          example: "phyllis@mightymind.sg"
+        firebase_uid:
+          type: string
+          example: "firebase-uid-abc-123"
+
+    TenantMembership:
+      type: object
+      required: [tenant_id, tenant_slug, roles, surfaces, is_default]
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+          example: "01970000-0000-7000-8000-000000000010"
+        tenant_slug:
+          type: string
+          example: "mightymind-academy"
+        roles:
+          type: array
+          description: "Full role set the user holds in this tenant. Multi-role-per-tenant is supported."
+          items:
+            type: string
+          example: ["learner", "author"]
+        surfaces:
+          type: array
+          description: "Deduplicated union of surfaces unlocked by the membership's roles."
+          items:
+            type: string
+            enum: [aplus, cplus, hplus, oplus, rplus]
+          example: ["aplus", "cplus"]
+        is_default:
+          type: boolean
+          description: "Exactly one membership has is_default=true (the most-recently-active)."
+          example: true

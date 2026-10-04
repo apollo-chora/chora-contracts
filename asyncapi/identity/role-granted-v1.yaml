@@ -1,0 +1,70 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Identity — RoleGranted
+  version: 1.0.0
+  description: |
+    Per-course CourseRole projection record materialised. Same GCID may
+    hold different CourseRoles in different courses (Phyllis Comic Ch4 P3
+    dual-card invariant).
+
+    - Domain: Identity (`chora_identity` DB)
+    - Topic: `chora.identity.role.granted.v1`
+    - Source proto: `proto/events/identity/role.proto`
+       message `chora.identity.v1.RoleGranted`
+    - IMDA: tag envelope.chora_imda_dimension = "transparency" (D2 — role provenance)
+
+    Phyllis MVP §6 calls for chora-identity to subscribe to:
+      - chora.delivery.enrollment.created.v1 (-> learner role)
+      - chora.delivery.course.created.v1     (-> instructor role)
+      - chora.delivery.application.accepted.v1 (-> learner role pre-payment)
+    and project a CourseRole, emitting RoleGranted as the audit anchor.
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  roleGranted:
+    address: chora.identity.role.granted.v1
+    messages:
+      roleGranted:
+        $ref: '#/components/messages/RoleGranted'
+
+operations:
+  publishRoleGranted:
+    action: send
+    channel:
+      $ref: '#/channels/roleGranted'
+    messages:
+      - $ref: '#/channels/roleGranted/messages/roleGranted'
+
+  consumeRoleGranted:
+    action: receive
+    channel:
+      $ref: '#/channels/roleGranted'
+    description: |
+      Consumers:
+        - chora-bff-gateway (cache /me/roles?course_id=X projections)
+        - chora-observability (IMDA D2 transparency evidence ledger)
+        - chora-creation (instructor edit-permission gating cache)
+    messages:
+      - $ref: '#/channels/roleGranted/messages/roleGranted'
+
+components:
+  messages:
+    RoleGranted:
+      name: RoleGranted
+      title: Per-course role projected for a GCID
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/identity/role.proto#/chora.identity.v1.RoleGranted'

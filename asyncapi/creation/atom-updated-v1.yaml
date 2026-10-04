@@ -1,0 +1,68 @@
+asyncapi: "3.0.0"
+info:
+  title: "Chora Content Creation — atom.updated.v1"
+  version: "1.0.0"
+  description: |
+    Published when atom-level metadata is updated (title / topic_node_ids /
+    difficulty / locale). Content edits do NOT use this event — content
+    lives in AtomRevision (append-only) and is published via
+    `chora.creation.revision.published.v1`.
+
+    Owning team    : Team 1 (Content)
+    Owning domain  : Content Creation (chora_creation database)
+
+    Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 2 D8
+    + .claude/rules/ddd-enforcement.md
+  contact:
+    name: "Chora Platform Team — Content Track"
+  license:
+    name: "Proprietary"
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  production:
+    host: "pubsub.googleapis.com"
+    protocol: googlepubsub
+    description: "Google Cloud Pub/Sub (production)"
+  emulator:
+    host: "localhost:8085"
+    protocol: googlepubsub
+    description: "Cloud Pub/Sub Emulator (local dev)"
+
+channels:
+  atomUpdated:
+    address: "chora.creation.atom.updated.v1"
+    description: |
+      Pub/Sub topic for AtomUpdated events. Pull-subscriptions only; no
+      push subscriptions (consumers run inside Autopilot pods or Cloud Run).
+    messages:
+      atomUpdated:
+        $ref: "#/components/messages/AtomUpdated"
+
+operations:
+  publishAtomUpdated:
+    action: send
+    channel:
+      $ref: "#/channels/atomUpdated"
+    summary: "Publish an atom-metadata update event"
+    description: |
+      Producer: chora-creation service.
+      Consumers: chora-consumption (knowledge-graph re-link), Meilisearch
+      re-indexer, audit log.
+    messages:
+      - $ref: "#/channels/atomUpdated/messages/atomUpdated"
+
+components:
+  messages:
+    AtomUpdated:
+      name: "AtomUpdated"
+      title: "Atom Updated"
+      summary: "A LearningAtom's metadata has been updated"
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf;version=3
+      payload:
+        schemaFormat: "application/vnd.google.protobuf;version=3"
+        schema:
+          protoFile: "proto/events/creation/atom.proto"
+          messageName: "chora.creation.v1.AtomUpdated"

@@ -1,0 +1,119 @@
+// =============================================================================
+// Chora Content Consumption — per-user Knowledge Graph events (per ADR-143)
+// =============================================================================
+//
+// Aggregate root : MapCluster (chora_consumption.MapCluster — 1:N per user)
+// Owning domain  : Content Consumption (chora_consumption DB)
+// Topic prefix   : chora.consumption.kg.*
+//
+// Per ADR-143 the Knowledge Graph is PER-USER (not per-tenant-shared). Each
+// learner has up to `tenant_entitlements.config_overrides.max_concurrent_kg_clusters_per_user`
+// (default 3) disconnected MapCluster aggregates. Discovery mode uses
+// HEXAGONAL FOG exploration (1 focal node → 6 LLM-generated neighbours via
+// the Knowledge Graph Fog crew — Hybrid P8 LangGraph supervisor + P1 ADK Go
+// hex explorers per ADR-147 §2).
+//
+// Authoring-time atom-to-atom edges live in chora_creation.atom_semantic_edges
+// (NOT here); this domain owns the per-user EXPLORATION overlay only.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.consumption.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/consumption/v1;consumptionv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// KGEdgeType — typed relationship per ADR-143 + existing edge taxonomy.
+// Additive enum.
+enum KGEdgeType {
+  KG_EDGE_TYPE_UNSPECIFIED = 0;
+  KG_EDGE_TYPE_PREREQUISITE_OF = 1;
+  KG_EDGE_TYPE_EXTENDS = 2;
+  KG_EDGE_TYPE_ANALOGY_OF = 3;
+  KG_EDGE_TYPE_CONTRASTS_WITH = 4;
+  KG_EDGE_TYPE_APPLIED_IN = 5;
+}
+
+// KGJunctionDetected — emitted by chora-consumption when the junction-detection
+// pipeline (driven by the Knowledge Graph Fog crew + nightly batch reconciliation)
+// finds semantic overlap between two of a single learner's `MapCluster` aggregates.
+//
+// Per ADR-143 §Decision: junctions auto-SURFACE but never auto-MERGE — merge
+// requires explicit user consent (see KGClusterMerged below).
+//
+// Topic: chora.consumption.kg.junction_detected.v1
+// Consumers: A+ Reader-mode UI (surfaces consent prompt to the learner),
+//            C+ Connect+ (XP credit for curiosity bridging — pending product
+//            decision per ADR-143 §Open), O+ (audit dashboard).
+message KGJunctionDetected {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // The learner whose two clusters overlap. KG is per-user (NOT per-tenant-shared).
+  string owner_gcid = 2;
+
+  // The two MapCluster IDs that overlap (UUIDv7). Order is canonical: sorted
+  // lexicographically — so the same junction-pair has stable identity across
+  // re-detections (idempotency anchor).
+  string cluster_id_a = 3;
+  string cluster_id_b = 4;
+
+  // The overlapping hex nodes (kg_hexagon_nodes.id) — the bridge that surfaced
+  // the junction. Typically a small set (1-3 nodes).
+  repeated string overlap_node_ids = 5;
+
+  // Semantic similarity score for the overlap (0..1).
+  float overlap_score = 6;
+
+  // Detection method. One of:
+  //   "fog_neighbour_collision" — Fog crew generated a neighbour that already
+  //                               exists in the OTHER cluster
+  //   "nightly_embedding_match" — batch reconciliation found embedding overlap
+  //   "user_navigation"         — learner clicked an atom in cluster_a that
+  //                               also lives in cluster_b
+  string detection_method = 7;
+
+  google.protobuf.Timestamp detected_at = 8;
+}
+
+// KGClusterMerged — emitted after a learner CONSENTS to merge two MapClusters
+// that were previously surfaced via KGJunctionDetected.
+//
+// Per ADR-143: merge is destructive in the sense that the smaller cluster is
+// absorbed into the larger one (renumbering hex node positions to maintain
+// canonical layout). Pre-merge state is snapshotted to cold storage for audit
+// + rollback (Coldline; 90-day retention).
+//
+// Topic: chora.consumption.kg.cluster_merged.v1
+// Consumers: A+ UI (refresh navigation), Sharing (achievement XP for completing
+//            a merge), Observability + O+ (audit + cluster-count dashboards).
+message KGClusterMerged {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string owner_gcid = 2;
+
+  // The MapCluster that absorbed the other (the "winner" — typically the larger).
+  string winner_cluster_id = 3;
+
+  // The MapCluster that was absorbed + tombstoned (rows soft-deleted; data
+  // archived to cold storage per ADR-143).
+  string absorbed_cluster_id = 4;
+
+  // The KGJunctionDetected event that triggered this merge (causation link;
+  // envelope.causation_id should also carry this).
+  string source_junction_event_id = 5;
+
+  // Total hex nodes in the new merged cluster (= winner + absorbed - overlap_count).
+  int32 merged_node_count = 6;
+
+  // Number of overlap nodes that were de-duplicated during merge.
+  int32 dedup_count = 7;
+
+  // Cold-storage URI for the absorbed cluster's pre-merge snapshot.
+  // gs://chora-489812-kg-cold/{tenant_id}/{owner_gcid}/{absorbed_cluster_id}.json.gz
+  string cold_archive_uri = 8;
+
+  google.protobuf.Timestamp merged_at = 9;
+}

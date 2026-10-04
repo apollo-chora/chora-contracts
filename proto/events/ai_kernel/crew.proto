@@ -1,0 +1,256 @@
+// =============================================================================
+// chora.ai_kernel.v1 — Crew composition + execution events
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 5 D20
+//   (fixed core crews per Content {verb} domain + dynamic specialists
+//    on-demand)
+// + .claude/skills/crew-composition/SKILL.md
+//
+// Owning domain : AI Kernel (chora_ai_kernel database)
+// Owning team   : Team 3 (Platform)
+// Topic prefix  : chora.ai_kernel.crew.*
+//
+// Crews are the unit of multi-agent collaboration. Each Content {verb}
+// domain owns one or more FIXED_CORE_PER_DOMAIN crews. Specialist agents
+// (e.g., a math tutor for a specific atom topic) are summoned dynamically
+// and added to an existing crew at run-time.
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.ai_kernel.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/ai_kernel/v1;aikernelv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// CrewKind — composition style of the crew.
+// -----------------------------------------------------------------------------
+enum CrewKind {
+  CREW_KIND_UNSPECIFIED = 0;
+  CREW_KIND_FIXED_CORE_PER_DOMAIN = 1;   // Stable domain crew (e.g., 6-agent content gate)
+  CREW_KIND_DYNAMIC_SPECIALIST = 2;       // On-demand specialist agent / sub-crew
+}
+
+// -----------------------------------------------------------------------------
+// CrewComposed — chora.ai_kernel.crew.composed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when the LangGraph orchestrator composes / instantiates a crew
+// for a workflow run. Members are listed by AGID.
+message CrewComposed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — crew run identifier (distinct from a long-lived crew template).
+  string crew_id = 2;
+
+  CrewKind crew_kind = 3;
+
+  // Owning domain (snake_case — "creation", "consumption", "delivery",
+  // "sharing", "a2a"). FIXED_CORE crews always map to a single core domain;
+  // DYNAMIC_SPECIALIST crews may serve any domain.
+  string domain = 4;
+
+  // AGIDs participating in this crew run.
+  repeated string member_agids = 5;
+
+  // Optional reference to the LangGraph state-machine template (UUIDv7
+  // in chora_ai_kernel.langgraph_templates).
+  string langgraph_template_id = 6;
+
+  google.protobuf.Timestamp composed_at = 7;
+}
+
+// -----------------------------------------------------------------------------
+// CrewExecuted — chora.ai_kernel.crew.executed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a crew run reaches a terminal state (completed or aborted).
+// Carries aggregated stats — total invocations, total cost, outcome.
+message CrewExecuted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string crew_id = 2;
+  CrewKind crew_kind = 3;
+  string domain = 4;
+  repeated string member_agids = 5;
+
+  // Outcome — UPPER_SNAKE_CASE (e.g., "COMPLETED", "ABORTED_BY_HUMAN",
+  // "ABORTED_GUARDRAIL", "ERROR").
+  string outcome = 6;
+
+  // Total model invocations within this crew run.
+  int32 invocation_count = 7;
+
+  // Aggregate cost in micro-dollars.
+  int64 total_cost_micros = 8;
+
+  // Total wall-clock duration of the crew run (ms).
+  int64 duration_ms = 9;
+
+  google.protobuf.Timestamp executed_at = 10;
+}
+
+// -----------------------------------------------------------------------------
+// CrewAtomsReady — chora.ai_kernel.crew.atoms_ready.v1
+// -----------------------------------------------------------------------------
+//
+// Published by chora-ai-kernel-orchestrator (Python LangGraph) when the
+// Content Creation AI Assist crew finalises a batch of LearningAtoms. The
+// Reporter agent stamps each atom with a `governance_status` verdict from the
+// Guardrail Screen (`approved` / `remediated` / `blocked`).
+//
+// Consumers: chora-creation (AtomsReadySubscriber) persists each non-blocked
+// atom + emits chora.creation.atom.created.v1 with IMDA accountability
+// evidence (D1 per ADR-141, lifecycle_stage=runtime). chora-observability +
+// chora-governance also consume for token-usage cross-check + Reporter trail
+// audit respectively.
+//
+// Schema mirrors AsyncAPI docs at
+// chora-contracts/asyncapi/ai_kernel/crew-atoms-ready-v1.yaml and the
+// AtomsReadyEvent struct in
+// services/chora-creation/internal/domain/atom/subscriber.go.
+message CrewAtomsReady {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — author GCID receives credit for the persisted atoms.
+  string gcid = 2;
+
+  // UUIDv7 — course the atoms belong to.
+  string course_id = 3;
+
+  // Content type — snake_case (mcq | flashcard | video | essay | outline).
+  // Bounded set matches AtomType in chora-creation domain.
+  string content_type = 4;
+
+  // 0-5 inclusive (chora-creation difficulty scale).
+  int32 difficulty = 5;
+
+  // Optional provenance — Vertex model identifier (e.g.,
+  // "vertex/gemini-2.5-pro"), prompt SHA-256 hex, and the LangGraph
+  // orchestrator run that produced the batch.
+  string model_used = 6;
+  string prompt_hash = 7;
+  string orchestrator_run_id = 8;
+
+  // One atom in the batch (nested for self-contained Schema Registry shape).
+  message Atom {
+    // Atom title; ≤256 chars.
+    string title = 1;
+
+    // Atom body — full content payload (post-Reporter, may carry remediations).
+    string body = 2;
+
+    // Reporter governance verdict — bounded set
+    // (approved | remediated | blocked). chora-creation skips `blocked`.
+    string governance_status = 3;
+
+    // Reporter's human-readable verdict. Optional.
+    string guardrail_remarks = 4;
+  }
+
+  // Non-empty list of atoms produced by the crew run.
+  repeated Atom atoms = 9;
+
+  google.protobuf.Timestamp ready_at = 10;
+}
+
+// -----------------------------------------------------------------------------
+// CrewMemberSwapped — chora.ai_kernel.crew.member_swapped.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a crew member is swapped mid-run (e.g., a specialist is
+// summoned, or a fallback agent replaces a failing primary). Surfaces the
+// dynamic specialist composition pattern.
+message CrewMemberSwapped {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string crew_id = 2;
+  CrewKind crew_kind = 3;
+  string domain = 4;
+
+  // Removed AGID (empty string if a pure addition).
+  string removed_agid = 5;
+
+  // Added AGID (empty string if a pure removal).
+  string added_agid = 6;
+
+  // Free-text reason (e.g., "specialist_summoned", "primary_timeout_fallback",
+  // "byoa_promotion"). Max 256 chars.
+  string reason = 7;
+
+  google.protobuf.Timestamp swapped_at = 8;
+}
+
+// -----------------------------------------------------------------------------
+// CrewRunFailed — chora.ai_kernel.crew.run_failed.v1
+// -----------------------------------------------------------------------------
+//
+// Published by chora-ai-kernel-orchestrator (the kennel) when the park reaper
+// settles a run whose agent never answered (ADR-254 D5; the D6 P2 layer-4
+// terminal, REUSED rather than minted anew). Every parked run carries a
+// deadline; the four arms that settle it FAILED are carried in `arm`:
+//
+//   request_dead_lettered     the dispatch request landed in its DLQ
+//   request_expired           the park deadline passed (retention by default)
+//   completion_dead_lettered  the agent answered but the completion could not
+//                             be consumed and dead-lettered
+//   outbox_dead_lettered      the request never left the outbox
+//
+// The parked thread is ALSO resumed with a FAILED completion, so the caller
+// receives a status on its own result topic; this event is the platform-wide
+// record (governance / observability), never the caller's only signal.
+//
+// Wire: JSON body with the envelope duplicated in the Pub/Sub attributes and
+// routing on the `event_topic` attribute (schema-less on the bus, ADR-254 D4;
+// topics.yaml `schema: null`). This message is the struct source for both
+// sides. Idempotency key: crew.run_failed.{arm}.{dispatch_idempotency_key}.
+//
+// Publisher: the kennel's outbox (ai_kernel_outbox_events) through the single
+// dispatcher. Consumer: chora-observability
+// (chora-observability.ai-kernel-crew-run-failed).
+message CrewRunFailed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // Aggregate root of the parked run (the outbox workflow_id, UUID).
+  string workflow_id = 2;
+
+  // LangGraph thread the run was parked under (may be non-UUID).
+  string thread_id = 3;
+
+  string tenant_id = 4;
+  string gcid = 5;
+
+  // Runner family that owns the thread (oe_grading, companion_diagnosis,
+  // qgen, single_agent:<role>, kg_exploration, companion_reflection).
+  string crew = 6;
+
+  // Dispatch role the run was parked on (ADR-254 D2).
+  string agent_role = 7;
+
+  // request_dead_lettered | request_expired | completion_dead_lettered |
+  // outbox_dead_lettered
+  string arm = 8;
+
+  // The topic the dead-lettered message came from, or the request topic for
+  // the scan arms.
+  string original_topic = 9;
+
+  // Pub/Sub delivery count of the dead-lettered message; 0 for the scan arms.
+  int32 delivery_attempt = 10;
+
+  // The dispatch idempotency key: agent_dispatch.{role}.{execution_id}.
+  string dispatch_idempotency_key = 11;
+
+  google.protobuf.Timestamp parked_at = 12;
+  google.protobuf.Timestamp deadline_at = 13;
+  google.protobuf.Timestamp reaped_at = 14;
+
+  // Human-readable cause; max 1000 chars.
+  string reason = 15;
+}

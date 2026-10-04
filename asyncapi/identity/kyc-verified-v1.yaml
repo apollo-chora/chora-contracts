@@ -1,0 +1,64 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Identity — KycVerified
+  version: 1.0.0
+  description: |
+    Published when KYC verification succeeds. Triggers downstream
+    side-effects: User aggregate update, instructor onboarding fast-track
+    unlock, SkillsFuture funding entitlement link (if scoped),
+    Notifications confirmation.
+
+    - Domain: Identity (`chora_identity` DB)
+    - Topic: `chora.identity.kyc.verified.v1`
+    - Source proto: `proto/events/identity/kyc.proto`
+       message `chora.identity.v1.KycVerified`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  kycVerified:
+    address: chora.identity.kyc.verified.v1
+    messages:
+      kycVerified:
+        $ref: '#/components/messages/KycVerified'
+
+operations:
+  publishKycVerified:
+    action: send
+    channel:
+      $ref: '#/channels/kycVerified'
+    messages:
+      - $ref: '#/channels/kycVerified/messages/kycVerified'
+
+  consumeKycVerified:
+    action: receive
+    channel:
+      $ref: '#/channels/kycVerified'
+    description: |
+      Consumers: Identity (User aggregate kyc_method + kyc_verified_at
+      update), Tenancy (instructor onboarding fast-track), Delivery
+      (SkillsFuture entitlement linking), Notifications, Governance.
+    messages:
+      - $ref: '#/channels/kycVerified/messages/kycVerified'
+
+components:
+  messages:
+    KycVerified:
+      name: KycVerified
+      title: KYC Verified
+      summary: A KYC verification has succeeded
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/identity/kyc.proto#/chora.identity.v1.KycVerified'

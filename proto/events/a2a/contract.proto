@@ -1,0 +1,126 @@
+// =============================================================================
+// Chora Agent-to-Agent — Contract (capability declaration) events
+// =============================================================================
+//
+// Aggregate root: A2AContract (a declared capability boundary between a
+//                 Chora-side agent and an external counterparty agent).
+// Owning domain : Agent-to-Agent (chora_a2a DB).
+// Owning team   : Team 3 (Platform)
+// Topic prefix  : chora.a2a.contract.*
+//
+// Source-of-truth:
+//   - docs/architecture/adrs/adr-132-a2a-protocol-integration.md
+//   - docs/architecture-review-inputs-2026-05-07.md Tier 2 D8
+//   - .claude/skills/domain-a2a/SKILL.md
+//
+// IMPORTANT IDENTITY MODEL (per ADR-132 + ddd-enforcement #10):
+//   - Both endpoints of an A2AContract are AGIDs, NOT GCIDs.
+//   - AGIDs CANNOT hold TenantMembership.
+//   - owning_agid is platform-internal (a Chora agent / companion / etc.).
+//   - counterparty_agid is external (registered via ExternalAgent flow).
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.a2a.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/a2a/v1;a2av1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// ContractDeclared — chora.a2a.contract.declared.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a Chora-side agent declares an inbound capability that
+// external agents may invoke. Declaration is NOT yet active — it must pass
+// platform_ops review and emit ContractApproved before invocations are
+// honoured. Consumers: O+ Observability+ governance dashboard, audit log.
+message ContractDeclared {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 identifier of the A2AContract aggregate.
+  string contract_id = 2;
+
+  // Capability identifier — UPPER_SNAKE_CASE; aligned with the A2A AgentCard
+  // skill name. Examples: "RECOMMEND_CONTENT", "STUDY_CONVERSATION".
+  string capability_name = 3;
+
+  // Chora-side agent (AGID) that owns the capability.
+  string owning_agid = 4;
+
+  // External counterparty agent (AGID). Empty for "open" contracts that
+  // any verified external agent may invoke; populated for bilateral
+  // contracts pinned to a single counterparty.
+  string counterparty_agid = 5;
+
+  // URI of the JSON Schema describing the request payload (versioned).
+  // Hosted under /.well-known/agent-skill/{capability_name}.v{N}.json.
+  string schema_uri = 6;
+
+  // OAuth-style scope strings the contract requires (e.g.,
+  // "consent:topics_only", "data:learner.profile.read").
+  repeated string scopes = 7;
+
+  // Optional expiration. Empty timestamp = no expiry (contract holds until
+  // explicitly Revoked).
+  google.protobuf.Timestamp expires_at = 8;
+
+  google.protobuf.Timestamp declared_at = 9;
+}
+
+// -----------------------------------------------------------------------------
+// ContractApproved — chora.a2a.contract.approved.v1
+// -----------------------------------------------------------------------------
+//
+// Published when platform_ops approves a previously declared contract.
+// After this event the A2A Gateway will route invocations to the owning
+// agent. AGID-based audit trail tracks the approver.
+message ContractApproved {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string contract_id = 2;
+  string capability_name = 3;
+  string owning_agid = 4;
+  string counterparty_agid = 5;
+  string schema_uri = 6;
+  repeated string scopes = 7;
+  google.protobuf.Timestamp expires_at = 8;
+
+  // GCID of the platform_ops approver — this is one of the few A2A events
+  // where the actor is a human (envelope.gcid).
+  string approved_by_gcid = 9;
+
+  google.protobuf.Timestamp approved_at = 10;
+}
+
+// -----------------------------------------------------------------------------
+// ContractRevoked — chora.a2a.contract.revoked.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a contract is revoked (kill switch). After this event
+// the A2A Gateway MUST reject all incoming invocations targeting the
+// contract. Revocation propagation SLO: 60 seconds (per ADR-132).
+message ContractRevoked {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string contract_id = 2;
+  string capability_name = 3;
+  string owning_agid = 4;
+  string counterparty_agid = 5;
+
+  // GCID OR AGID of the revoker (platform_ops human, OR a kill-switch
+  // automated rule). When automated, envelope.gcid carries the rule's AGID.
+  string revoked_by = 6;
+
+  // Revocation reason — UPPER_SNAKE_CASE taxonomy. Examples:
+  // "SCHEMA_DEPRECATED", "PARTNER_SUSPENDED", "POLICY_VIOLATION",
+  // "OPERATIONAL_KILL_SWITCH", "EXPIRED".
+  string reason_code = 7;
+
+  // Optional human-readable detail (max 1024 chars).
+  string detail = 8;
+
+  google.protobuf.Timestamp revoked_at = 9;
+}

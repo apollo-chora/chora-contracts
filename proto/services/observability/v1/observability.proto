@@ -1,0 +1,528 @@
+// =============================================================================
+// Chora Observability Service (gRPC)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture.md (consolidated 2026-05-15) §3
+//   + .claude/rules/ddd-enforcement.md (12-DB topology; chora_observability)
+//   + .claude/skills/ai-cost-tracking/SKILL.md (TokenUsageLedger)
+//   + .claude/skills/ai-observability-cloud-trace/SKILL.md
+//   + .claude/skills/imda-governance-4-dimensions/SKILL.md
+//   + services/chora-observability/internal/adapter/http/handler.go
+//
+// Inter-service gRPC contract for the Observability supporting domain
+// (chora_observability database, Team 3 / Platform). Wave-1 ADR-140
+// remediation per docs/m13/grpc-mass-remediation-2026-05-16.md §4 (owner
+// O-FULL): adds the gRPC surface so chora-gateway BFF + chora-governance
+// can dial inter-service over mTLS + service mesh instead of plain
+// HTTP :8080 (the prior systemic ADR-140 violation).
+//
+// Aggregates exposed:
+//   - TokenUsageLedger     — append-only billing-grade LLM usage ledger;
+//                            atomic outbox via ledger.LedgerHook when wired.
+//                            Primary write caller: Model Broker Gateway
+//                            / ADR-146 successor. Primary read caller:
+//                            chora-gateway BFF for the O+ cost dashboard.
+//   - AgentDecisionLog     — append-only audit log of agentic decisions
+//                            (route / escalate / refuse / respond). Primary
+//                            write caller: Governance Gatekeeper agent.
+//                            Primary read callers: chora-gateway BFF
+//                            (`GET /events` audit-events endpoint) +
+//                            chora-governance (IMDA D1/D2 evidence query).
+//   - TraceCorrelation     — correlation_id → (trace_id, parent_span_id,
+//                            child_spans[]) binding so downstream consumers
+//                            can walk a cross-service Pub/Sub fanout back
+//                            to the originating request.
+//
+// REST surfaces in services/chora-observability/internal/adapter/http/
+// remain LIVE in parallel through Wave-3 soak per the same doc §7 risk +
+// rollback ruling. gRPC is for internal service-to-service sync only;
+// learner/admin-facing UI continues to use the REST surface through
+// chora-gateway (which itself switches BFF → gRPC in Wave 2).
+//
+// Cross-DB queries FORBIDDEN — every cross-domain dependency is wired
+// via Pub/Sub events (e.g. token_usage.recorded.v1 outbox row).
+//
+// Deployed in chora-489812 team-platform pool. mTLS via Cloud Service Mesh;
+// SPIFFE identity in mesh; W3C trace context in gRPC metadata.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.services.observability.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/observability/v1;observabilityv1";
+
+import "google/protobuf/timestamp.proto";
+
+// -----------------------------------------------------------------------------
+// Service
+// -----------------------------------------------------------------------------
+
+service Observability {
+  // ---------------------------------------------------------------------------
+  // TokenUsageLedger RPCs — canonical billing-grade LLM usage ledger.
+  // ---------------------------------------------------------------------------
+
+  // AppendTokenUsage persists a new TokenUsageLedger entry. When the
+  // server's LedgerHook is wired, this also atomically queues the
+  // canonical `chora.observability.token_usage.recorded.v1` outbox row.
+  // Idempotent on (tenant_id, trace_id, span_id) — repeated calls within
+  // the same span MUST collapse to a single ledger entry. Primary caller:
+  // Model Broker Gateway (ADR-146 successor).
+  rpc AppendTokenUsage(AppendTokenUsageRequest) returns (AppendTokenUsageResponse);
+
+  // ListTokenUsage returns ledger entries for the tenant matching the
+  // (optional) window + pagination filter. Sorted RecordedAt ascending.
+  // Read-only; safe to retry. Primary callers: chora-gateway BFF (O+ cost
+  // dashboard), chora-governance (IMDA D3 cost+monitoring evidence).
+  rpc ListTokenUsage(ListTokenUsageRequest) returns (ListTokenUsageResponse);
+
+  // SumTokenUsageCost aggregates cost_usd_micros over entries matching
+  // the (optional) window. Returns (total_micros, total_usd_string,
+  // entry_count). Implementations MUST detect int64 overflow.
+  rpc SumTokenUsageCost(SumTokenUsageCostRequest) returns (SumTokenUsageCostResponse);
+
+  // ---------------------------------------------------------------------------
+  // AgentDecisionLog RPCs — append-only agent decision audit trail.
+  // ---------------------------------------------------------------------------
+
+  // AppendAgentDecision persists a new AgentDecisionLog entry. The
+  // input + output text on the optional ReasoningSummary is hashed
+  // server-side before storage (PII discipline — never store raw
+  // prompt/response). Primary caller: Governance Gatekeeper agent.
+  rpc AppendAgentDecision(AppendAgentDecisionRequest) returns (AppendAgentDecisionResponse);
+
+  // ListAgentDecisions returns decision logs for the tenant matching
+  // the filter. Sorted CreatedAt ascending. Read-only; safe to retry.
+  rpc ListAgentDecisions(ListAgentDecisionsRequest) returns (ListAgentDecisionsResponse);
+
+  // GetAgentDecision returns a single decision log by (tenant_id, log_id).
+  // Returns NOT_FOUND when no log matches. Read-only; safe to retry.
+  rpc GetAgentDecision(GetAgentDecisionRequest) returns (GetAgentDecisionResponse);
+
+  // GetAuditEvents projects AgentDecisionLog entries as audit events for
+  // the tenant. This is the gRPC analogue of REST `GET /events?tenant_id=X`
+  // — the canonical chora-gateway BFF read path (see
+  // services/chora-gateway/internal/adapter/upstream/http_upstream.go
+  // line 340 `GetAuditEvents`). Returns up to auditEventsCap items.
+  rpc GetAuditEvents(GetAuditEventsRequest) returns (GetAuditEventsResponse);
+
+  // ---------------------------------------------------------------------------
+  // TraceCorrelation RPCs — correlation_id → trace_id binding.
+  // ---------------------------------------------------------------------------
+
+  // RegisterCorrelation persists a TraceCorrelation. Idempotent on
+  // (tenant_id, correlation_id). The (trace_id, parent_span_id) pair is
+  // IMMUTABLE once persisted; subsequent calls with different values are
+  // REJECTED (use AttachChildSpan via repeated RegisterCorrelation with
+  // the SAME trace_id + parent_span_id but additional child_spans).
+  rpc RegisterCorrelation(RegisterCorrelationRequest) returns (RegisterCorrelationResponse);
+
+  // GetCorrelation returns the TraceCorrelation by (tenant_id,
+  // correlation_id). Returns NOT_FOUND when no binding exists.
+  rpc GetCorrelation(GetCorrelationRequest) returns (GetCorrelationResponse);
+}
+
+// -----------------------------------------------------------------------------
+// Shared enums
+// -----------------------------------------------------------------------------
+
+// AgentDecisionType — the four canonical agent decision verdicts.
+// Aligned with services/chora-observability/internal/domain/decision.Type
+// (route / escalate / refuse / respond).
+enum AgentDecisionType {
+  AGENT_DECISION_TYPE_UNSPECIFIED = 0;
+  AGENT_DECISION_TYPE_ROUTE = 1;      // routed to another agent / model
+  AGENT_DECISION_TYPE_ESCALATE = 2;   // escalated to human or higher tier
+  AGENT_DECISION_TYPE_REFUSE = 3;     // refused (guardrail block)
+  AGENT_DECISION_TYPE_RESPOND = 4;    // produced a final response
+}
+
+// AgentRiskTier — per-agent risk tier from the ai-runtime-guardrails YAML
+// (now Cloud Model Armor per ADR-152). Aligned with
+// services/chora-observability/internal/domain/decision.RiskTier.
+enum AgentRiskTier {
+  AGENT_RISK_TIER_UNSPECIFIED = 0;
+  AGENT_RISK_TIER_LOW = 1;
+  AGENT_RISK_TIER_MEDIUM = 2;
+  AGENT_RISK_TIER_HIGH = 3;
+  AGENT_RISK_TIER_CRITICAL = 4;
+}
+
+// -----------------------------------------------------------------------------
+// Shared message types
+// -----------------------------------------------------------------------------
+
+// TimeWindow — inclusive (from, until) time window. Either end may be
+// unset (treated as -inf / +inf respectively).
+message TimeWindow {
+  google.protobuf.Timestamp from = 1;
+  google.protobuf.Timestamp until = 2;
+}
+
+// PageRequest — pagination control. Limit max 1000 per domain contract.
+message PageRequest {
+  // Maximum number of items to return. 0 = server default (1000).
+  int32 limit = 1;
+
+  // Number of items to skip (offset-based pagination — fine for the
+  // append-only ledger / decision-log read paths).
+  int32 offset = 2;
+}
+
+// TokenUsageEntry — a single TokenUsageLedger row.
+message TokenUsageEntry {
+  // Server-stamped UUIDv7. Stable identifier.
+  string ledger_id = 1;
+
+  // Tenant that owns the entry. Required.
+  string tenant_id = 2;
+
+  // Optional learner GCID (when the LLM call was on behalf of a user).
+  string gcid = 3;
+
+  // Optional agent identity (AGID) — distinct from GCID.
+  string agid = 4;
+
+  // Model identifier (e.g. "gemini-2.5-pro", "gemma-4-9b-it-{tenant_lora}").
+  string model_id = 5;
+
+  // Prompt + completion token counts (rolled-up across tool calls in a span).
+  int32 prompt_tokens = 6;
+  int32 completion_tokens = 7;
+
+  // Cost in micro-USD (int64; pricing-config-version-stamped). 1_000_000 = $1.
+  int64 cost_usd_micros = 8;
+
+  // W3C trace context. Required for the (tenant_id, trace_id, span_id)
+  // idempotency triple.
+  string trace_id = 9;
+  string span_id = 10;
+
+  // Server-stamped UTC time the entry was recorded.
+  google.protobuf.Timestamp recorded_at = 11;
+}
+
+// AgentReasoningSummary — server-hashed reasoning summary persisted with
+// the decision log. The hashes preserve auditability without storing raw
+// prompts (PII discipline).
+message AgentReasoningSummary {
+  // sha256-hex of the original prompt text.
+  string input_hash = 1;
+
+  // sha256-hex of the original response text.
+  string output_hash = 2;
+
+  // End-to-end latency in milliseconds.
+  int32 latency_ms = 3;
+
+  // Free-text auditor-facing summary (e.g. "pii-detected-input"). Capped
+  // at decision.MaxReasoningLen (2048).
+  string summary = 4;
+}
+
+// AppendReasoningSummary — RAW input/output text + latency on the
+// AppendAgentDecision write path. The server hashes input_text +
+// output_text to populate AgentReasoningSummary.{input_hash, output_hash}
+// before persistence (raw text is NEVER stored).
+message AppendReasoningSummary {
+  // Raw prompt text — hashed server-side, NOT stored.
+  string input_text = 1;
+
+  // Raw response text — hashed server-side, NOT stored.
+  string output_text = 2;
+
+  // End-to-end latency in milliseconds.
+  int32 latency_ms = 3;
+
+  // Free-text auditor-facing summary. Capped at decision.MaxReasoningLen.
+  string summary = 4;
+}
+
+// AgentDecisionEntry — a single AgentDecisionLog row.
+message AgentDecisionEntry {
+  // Server-stamped UUIDv7. Stable identifier.
+  string log_id = 1;
+
+  // Tenant that owns the entry. Required.
+  string tenant_id = 2;
+
+  // Agent identity that produced the decision.
+  string agid = 3;
+
+  // The verdict.
+  AgentDecisionType decision_type = 4;
+
+  // Free-text reason. Capped at decision.MaxReasonLen (2048).
+  string reason = 5;
+
+  // Per-agent risk tier.
+  AgentRiskTier risk_tier = 6;
+
+  // Logical correlation_id (typically a per-conversation or per-saga ID).
+  string correlation_id = 7;
+
+  // W3C trace context (`traceparent` header value).
+  string traceparent = 8;
+
+  // Optional reasoning summary (hashed input/output + latency).
+  AgentReasoningSummary reasoning = 9;
+
+  // Server-stamped UTC time the entry was recorded.
+  google.protobuf.Timestamp created_at = 10;
+}
+
+// TraceCorrelationEntry — a single TraceCorrelation row.
+message TraceCorrelationEntry {
+  // Tenant that owns the binding. Required.
+  string tenant_id = 1;
+
+  // Logical correlation identifier. Required.
+  string correlation_id = 2;
+
+  // W3C trace_id (32-char lowercase hex). Immutable post-registration.
+  string trace_id = 3;
+
+  // W3C parent span_id (16-char lowercase hex). Immutable post-registration.
+  string parent_span_id = 4;
+
+  // Child span_ids associated with the correlation_id. May grow over time
+  // via repeated RegisterCorrelation calls.
+  repeated string child_spans = 5;
+
+  // Server-stamped UTC time the binding was registered.
+  google.protobuf.Timestamp registered_at = 6;
+}
+
+// -----------------------------------------------------------------------------
+// AppendTokenUsage RPC
+// -----------------------------------------------------------------------------
+
+message AppendTokenUsageRequest {
+  // Tenant that owns the entry. Required.
+  string tenant_id = 1;
+
+  // Optional learner GCID.
+  string gcid = 2;
+
+  // Optional agent identity (AGID).
+  string agid = 3;
+
+  // Model identifier. Required.
+  string model_id = 4;
+
+  // Prompt + completion tokens.
+  int32 prompt_tokens = 5;
+  int32 completion_tokens = 6;
+
+  // Cost in micro-USD.
+  int64 cost_usd_micros = 7;
+
+  // W3C trace context. Required for the idempotency triple.
+  string trace_id = 8;
+  string span_id = 9;
+
+  // W3C traceparent header value (preserved for the outbox row envelope).
+  string traceparent = 10;
+}
+
+message AppendTokenUsageResponse {
+  // The newly-persisted ledger entry.
+  TokenUsageEntry entry = 1;
+
+  // The outbox row's event_id (UUIDv7) when LedgerHook is wired. Empty
+  // string when the server is on the M10 direct-Append baseline.
+  string outbox_event_id = 2;
+
+  // Pricing config version stamped on the entry (e.g. "pricing-2026-05-13").
+  // Empty when LedgerHook is not wired.
+  string pricing_config_version = 3;
+}
+
+// -----------------------------------------------------------------------------
+// ListTokenUsage RPC
+// -----------------------------------------------------------------------------
+
+message ListTokenUsageRequest {
+  // Tenant whose ledger to list. Required.
+  string tenant_id = 1;
+
+  // Optional time window.
+  TimeWindow window = 2;
+
+  // Optional pagination.
+  PageRequest page = 3;
+}
+
+message ListTokenUsageResponse {
+  // Matching ledger entries, sorted RecordedAt ascending.
+  repeated TokenUsageEntry items = 1;
+
+  // Total count of items in this response page (NOT the full ledger size).
+  int32 total = 2;
+}
+
+// -----------------------------------------------------------------------------
+// SumTokenUsageCost RPC
+// -----------------------------------------------------------------------------
+
+message SumTokenUsageCostRequest {
+  // Tenant whose ledger to aggregate. Required.
+  string tenant_id = 1;
+
+  // Optional time window.
+  TimeWindow window = 2;
+}
+
+message SumTokenUsageCostResponse {
+  // Total cost in micro-USD.
+  int64 total_cost_usd_micros = 1;
+
+  // Total cost rendered as a fixed-point USD string (6 decimal places).
+  // Provided for read-path convenience — the canonical value is
+  // total_cost_usd_micros.
+  string total_cost_usd = 2;
+
+  // Number of ledger entries aggregated.
+  int32 entry_count = 3;
+}
+
+// -----------------------------------------------------------------------------
+// AppendAgentDecision RPC
+// -----------------------------------------------------------------------------
+
+message AppendAgentDecisionRequest {
+  // Tenant that owns the entry. Required.
+  string tenant_id = 1;
+
+  // Agent identity that produced the decision.
+  string agid = 2;
+
+  // The verdict. Required.
+  AgentDecisionType decision_type = 3;
+
+  // Free-text reason. Capped at decision.MaxReasonLen (2048).
+  string reason = 4;
+
+  // Per-agent risk tier. Required.
+  AgentRiskTier risk_tier = 5;
+
+  // Logical correlation_id.
+  string correlation_id = 6;
+
+  // W3C traceparent header value.
+  string traceparent = 7;
+
+  // Optional reasoning summary with RAW text. The server hashes input_text
+  // + output_text before persistence (raw text never stored).
+  AppendReasoningSummary reasoning = 8;
+}
+
+message AppendAgentDecisionResponse {
+  // The newly-persisted decision log entry.
+  AgentDecisionEntry entry = 1;
+}
+
+// -----------------------------------------------------------------------------
+// ListAgentDecisions RPC
+// -----------------------------------------------------------------------------
+
+message ListAgentDecisionsRequest {
+  // Tenant whose decision log to list. Required.
+  string tenant_id = 1;
+
+  // Optional filter by agent identity.
+  string agid = 2;
+
+  // Optional time window.
+  TimeWindow window = 3;
+
+  // Optional pagination.
+  PageRequest page = 4;
+}
+
+message ListAgentDecisionsResponse {
+  // Matching decision log entries, sorted CreatedAt ascending.
+  repeated AgentDecisionEntry items = 1;
+
+  // Total count of items in this response page.
+  int32 total = 2;
+}
+
+// -----------------------------------------------------------------------------
+// GetAgentDecision RPC
+// -----------------------------------------------------------------------------
+
+message GetAgentDecisionRequest {
+  // Tenant that owns the entry. Required.
+  string tenant_id = 1;
+
+  // The decision log identifier (UUIDv7). Required.
+  string log_id = 2;
+}
+
+message GetAgentDecisionResponse {
+  // The requested decision log entry.
+  AgentDecisionEntry entry = 1;
+}
+
+// -----------------------------------------------------------------------------
+// GetAuditEvents RPC
+// -----------------------------------------------------------------------------
+
+message GetAuditEventsRequest {
+  // Tenant whose audit events to project. Required.
+  string tenant_id = 1;
+}
+
+message GetAuditEventsResponse {
+  // Up to auditEventsCap (1000) decision log entries projected as audit
+  // events, most recent first.
+  repeated AgentDecisionEntry items = 1;
+
+  // Count of items in the response.
+  int32 total = 2;
+}
+
+// -----------------------------------------------------------------------------
+// RegisterCorrelation RPC
+// -----------------------------------------------------------------------------
+
+message RegisterCorrelationRequest {
+  // Tenant that owns the binding. Required.
+  string tenant_id = 1;
+
+  // Logical correlation identifier. Required.
+  string correlation_id = 2;
+
+  // W3C trace_id (32-char lowercase hex). Immutable post-registration.
+  string trace_id = 3;
+
+  // W3C parent span_id (16-char lowercase hex). Immutable post-registration.
+  string parent_span_id = 4;
+
+  // Optional child span_ids to attach in a single registration call.
+  repeated string child_spans = 5;
+}
+
+message RegisterCorrelationResponse {
+  // The persisted correlation binding.
+  TraceCorrelationEntry entry = 1;
+}
+
+// -----------------------------------------------------------------------------
+// GetCorrelation RPC
+// -----------------------------------------------------------------------------
+
+message GetCorrelationRequest {
+  // Tenant that owns the binding. Required.
+  string tenant_id = 1;
+
+  // Logical correlation identifier. Required.
+  string correlation_id = 2;
+}
+
+message GetCorrelationResponse {
+  // The persisted correlation binding.
+  TraceCorrelationEntry entry = 1;
+}

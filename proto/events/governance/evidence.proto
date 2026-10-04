@@ -1,0 +1,80 @@
+// =============================================================================
+// chora.governance.v1 — IMDA evidence-recording events
+// =============================================================================
+//
+// Source-of-truth: Tier 5 D17 (chora-governance is the canonical owner of all
+// IMDA evidence) + ADR-141 (canonical IMDA dimension labels) +
+// .claude/skills/imda-governance-4-dimensions/SKILL.md.
+//
+// Owning domain : Governance (chora_governance database)
+// Owning team   : Team 3 (Platform)
+// Topic prefix  : chora.governance.evidence.*
+//
+// This is the SHARED IMDA-evidence topic that EVERY domain service emits into
+// (federation success/rejection, passkey verify, role grant, KYC verify,
+// account closure, cross-tenant grant, ...). chora-governance subscribes and
+// projects each event into the O+ governance dashboard. Cross-DB queries
+// forbidden — this event is the only inter-domain mechanism carrying evidence
+// from a producing domain to Governance (per ddd-enforcement).
+//
+// The IMDA dimension + lifecycle stage travel on the shared EventEnvelope
+// (chora.common.v1.EventEnvelope.chora_imda_dimension = field 14,
+// imda_lifecycle_stage = field 15) — NOT as message-level fields — so any
+// envelope-aware consumer reads them uniformly across every topic.
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.governance.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/governance/v1;governancev1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// EvidenceRecorded
+// Topic: chora.governance.evidence.recorded.v1
+// -----------------------------------------------------------------------------
+//
+// Published by a producing domain each time it records a discrete piece of
+// IMDA evidence. Distinct from ImdaEvidenceGathered (imda.proto), which is the
+// governance-internal cumulative attestation-chain event referencing a GCS
+// artifact; EvidenceRecorded is the lightweight per-action evidence emitted
+// inline by domain services (identity, delivery, ...) as governed operations
+// happen.
+//
+// Producer (initial): services/chora-identity/internal/adapter/events/imda_evidence.go
+// (GovernancePublisher.RecordEvidence). chora-identity holds the outbox binary
+// encoder for this cross-domain topic (per the event-fabric audit 2026-07-01,
+// Class D contract paydown — the code emitted here before any proto / schema /
+// topic existed).
+message EvidenceRecorded {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // Canonical evidence label for the governed action, e.g.
+  // "kyc_verify_success", "role_grant", "oidc_federation_succeeded",
+  // "tenant_membership_granted", "account_closure_complete".
+  string evidence_type = 2;
+
+  // The chora.{domain}.{aggregate}.{event_type}.v{N} topic that THIS evidence
+  // references. Governance uses it to correlate the evidence with the
+  // originating event. Free-form string (not validated against the registry).
+  string source_event_type = 3;
+
+  // When the producing service recorded the evidence (UTC).
+  google.protobuf.Timestamp recorded_at = 4;
+
+  // Optional human-readable policy citation, e.g. "TP-04 (auth + identity)" /
+  // "ADR-142 §KYC" / "ADR-194 D1 (operator cross-tenant grant)".
+  string policy_reference = 5;
+
+  // Free-form source-event context the producer attaches (provider name, gcid,
+  // credential_id, granted_roles, ...). Producer-supplied map[string]any is
+  // rendered to string values on the wire — this is supplementary audit
+  // context, not a typed schema. The canonical IMDA dimension + lifecycle
+  // stage do NOT appear here; they ride the envelope (fields 14/15).
+  map<string, string> additional_fields = 6;
+}

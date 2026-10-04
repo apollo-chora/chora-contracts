@@ -1,0 +1,64 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Identity — UserSubscriptionPlanChanged
+  version: 1.0.0
+  description: |
+    Published when a user upgrades or downgrades their Companion plan tier
+    in place. Stripe proration applies per the original request's
+    proration_mode. Mana grants follow the new tier from the next renewal;
+    existing balance is preserved.
+
+    - Domain: Identity (`chora_identity` DB)
+    - Topic: `chora.identity.user_subscription.plan_changed.v1`
+    - Source proto: `proto/events/identity/user_subscription.proto`
+       message `chora.identity.v1.UserSubscriptionPlanChanged`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  userSubscriptionPlanChanged:
+    address: chora.identity.user_subscription.plan_changed.v1
+    messages:
+      userSubscriptionPlanChanged:
+        $ref: '#/components/messages/UserSubscriptionPlanChanged'
+
+operations:
+  publishUserSubscriptionPlanChanged:
+    action: send
+    channel:
+      $ref: '#/channels/userSubscriptionPlanChanged'
+    messages:
+      - $ref: '#/channels/userSubscriptionPlanChanged/messages/userSubscriptionPlanChanged'
+
+  consumeUserSubscriptionPlanChanged:
+    action: receive
+    channel:
+      $ref: '#/channels/userSubscriptionPlanChanged'
+    description: |
+      Consumers: AI Kernel (per-user entitlement / model budget refresh),
+      Notifications (tier change confirmation), Observability (tier
+      migration funnel), Billing (BigQuery streaming).
+    messages:
+      - $ref: '#/channels/userSubscriptionPlanChanged/messages/userSubscriptionPlanChanged'
+
+components:
+  messages:
+    UserSubscriptionPlanChanged:
+      name: UserSubscriptionPlanChanged
+      title: User Subscription Plan Changed
+      summary: A user has changed Companion plan tier in place
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/identity/user_subscription.proto#/chora.identity.v1.UserSubscriptionPlanChanged'

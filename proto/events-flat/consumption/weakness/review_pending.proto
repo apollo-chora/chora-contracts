@@ -1,0 +1,81 @@
+// =============================================================================
+// GENERATED — DO NOT EDIT.
+// Source : events/consumption/weakness.proto message WeaknessReviewPending
+// Tool   : chora-contracts/internal/protoflatten
+// Why    : GCP Pub/Sub Schema Registry rejects (a) schemas with `import`
+//          statements and (b) schemas with more than one top-level message.
+//          This flat copy contains exactly ONE top-level message;
+//          EventEnvelope + Timestamp + transitive deps are nested inside.
+// Path C : see chora-contracts/CHANGELOG.md and m10-data-plane main.tf.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.consumption.v1;
+
+message WeaknessReviewPending {
+  // Inlined chora.common.v1.EventEnvelope (nested for self-contained schema).
+  message Envelope {
+    string event_id = 1;
+    string idempotency_key = 2;
+    string tenant_id = 3;
+    string gcid = 4;
+    Timestamp occurred_at = 5;
+    Timestamp published_at = 6;
+    string traceparent = 7;
+    string tracestate = 8;
+    string source_project = 9;
+    string source_service = 10;
+    int32 schema_version = 11;
+    string correlation_id = 12;
+    string causation_id = 13;
+    string chora_imda_dimension = 14;
+    string imda_lifecycle_stage = 15;
+  }
+
+  // Inlined google.protobuf.Timestamp (nested; wire-compatible).
+  message Timestamp {
+    int64 seconds = 1;
+    int32 nanos = 2;
+  }
+
+  // Inlined dep: AvailableOutput
+  message AvailableOutput {
+    string kind = 1;
+    int64 mana_price = 2;
+    bool default_selected = 3;
+  }
+
+  // Inlined dep: CandidateStruggle
+  message CandidateStruggle {
+    string concept_key = 1;
+    string concept_label = 2;
+  }
+
+  // Inlined dep: ProposedGrowthEdge
+  message ProposedGrowthEdge {
+    string proposed_edge_id = 1;
+    string concept_label = 2;
+    string summary = 3;
+    repeated string suggested_angles = 4;
+    float strength = 5;
+    string suggested_difficulty = 6;
+  }
+
+  // Inlined dep: ReviewFamiliar
+  message ReviewFamiliar {
+    string familiar_id = 1;
+    string name = 2;
+    string species = 3;
+  }
+
+  Envelope envelope = 1;
+  string upload_id = 2;
+  string tenant_id = 3;
+  string learner_gcid = 4;
+  ReviewFamiliar familiar = 5;
+  repeated ProposedGrowthEdge proposed_edges = 6;
+  repeated CandidateStruggle candidate_struggles = 7;
+  repeated AvailableOutput available_outputs = 8;
+  Timestamp pending_at = 9;
+}

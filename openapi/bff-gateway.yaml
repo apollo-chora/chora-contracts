@@ -1,0 +1,3074 @@
+openapi: "3.2.0"
+info:
+  title: "Chora BFF Gateway — Phyllis MVP"
+  version: "0.8.0"
+  description: |
+    Backend-For-Frontend aggregation API for the Phyllis MVP happy-path per
+    `docs/m13/phyllis-mvp-2026-05-08.md`. Each route fans out to one or more
+    domain services (chora-identity, chora-tenancy, chora-creation,
+    chora-delivery, chora-consumption, chora-model-broker-router) and returns
+    a normalised JSON response.
+
+    v0.7.0 (2026-06-10, CHO-1708 WP-4): add the me-style mana-pool
+    `:auto-renew` proxy (`POST /api/v1/admin/tenants/me/mana-pool:auto-renew`
+    → chora-tenancy parametric `setTenantManaPoolAutoRenew`). Like `:topup`,
+    the colon suffix needs its own explicit route-table + mux entries.
+
+    v0.4.0 (2026-06-01): add the HITL approve/reject verdict passthrough
+    routes (`POST /bff/oplus/governance/hitl/{id}/{approve|reject}`) that
+    proxy to chora-governance `POST /api/hitl/decisions/{id}/{approve|reject}`.
+    Verdict actions accept an optional free-text `note` (operator rationale) —
+    `HITLActionRequest` gains the field; claim/release accept but ignore it.
+    Same write-action status mapping as claim/release (200/403/404/409/422/503).
+    Contract catch-up — the handlers shipped in `handlers_oplus_hitl.go`; this
+    documents them per AP-01.
+
+    v0.3.0 (2026-05-26, N13): add the HITL self-claim + release passthrough
+    routes (`POST /bff/oplus/governance/hitl/{id}/{claim|release}`) that
+    proxy to chora-governance `POST /api/hitl/decisions/{id}/{claim|release}`
+    (N7 wave). Unlike the 5 read routes, claim/release are WRITE actions and
+    surface real HTTP status codes (200/403/404/409/422/503) so the FE can
+    render targeted toast notifications + retry decisions.
+
+    v0.2.0 (2026-05-26): backfill the 5 O+ Observability+ BFF routes
+    (`/bff/oplus/dashboard|dimensions|agents|governance|a2a`) per the
+    Phase-C wiring in `handlers_oplus.go`. Every O+ response is wrapped in
+    the discriminated-union envelope (`state: live | stale | error |
+    pending`); error variants are returned with HTTP 200 + an `error`
+    field so the FE can render the in-page error variant rather than a
+    5xx page. The 6 ISO 25059:2023 safety-risk tiles are a FE-canonical
+    design-time invariant (`SAFETY_RISK_CATEGORIES`) — the BFF
+    intentionally does NOT ship a `safety_risks` field on the dashboard
+    envelope per audit finding #3.
+
+    Owning service : `chora-bff-gateway`
+    Owning team    : Team 3 (Platform)
+    Surfaces       : A+ (apex `chora.site`) + H+ (`hplus.chora.site`) for the
+                     Phyllis demo flow
+
+    AP-01 (API-First Design): this contract precedes implementation. Routes
+    are TDD-tested against `httptest.NewServer` mocks per
+    `.claude/rules/development-execution.md`.
+
+    Authorization (MVP): `Authorization: Bearer {gcid}`. The bearer is
+    forwarded to chora-identity (and downstream services); full Identity
+    Platform OIDC validation lands at M12+. Unknown / missing GCIDs surface
+    as 401 from the downstream service via pass-through.
+
+    Trace context: every request emits or propagates W3C `traceparent`. The
+    BFF stamps `traceparent` on every outbound fan-out call so Cloud Trace
+    can stitch the 8-step happy-path into one trace tree.
+
+    Error model: 401/403/404 from any downstream pass through verbatim.
+    5xx upstream cascades are normalised to `502 Bad Gateway`. Per-call
+    timeouts (5s) and per-aggregation budgets (15s) surface as
+    `504 Gateway Timeout`.
+  contact:
+    name: "Chora Platform Team (Team 3)"
+  license:
+    name: "Proprietary"
+
+servers:
+  - url: https://api.chora.site
+    description: Production
+  - url: https://api.dev.chora.site
+    description: Development
+  - url: http://localhost:8080
+    description: Local
+
+tags:
+  - name: O+
+    description: |
+      O+ (Observability+) surface BFF routes — IMDA D1-D4 dashboard,
+      per-dimension rubric drilldowns, crews + agents hierarchy,
+      governance 3-tab feed, and the A2A console. All routes are
+      auditor-role-gated (mounted AFTER chora-session JWT validation
+      via `auditor_gate` middleware). Responses use the
+      discriminated-union envelope `state: live | stale | error |
+      pending` so the FE can render loading/error variants without
+      observing HTTP 5xx.
+  - name: Identity
+    description: GCID + per-course role context (Step 1, 6 of Phyllis happy-path).
+  - name: Tenancy
+    description: Tenant resolution from auth context (Step 2).
+  - name: Courses
+    description: Course creation + public catalogue + enrolment (Steps 3, 5, 6).
+  - name: Atoms
+    description: Atom playback + Daily Dose feedback loop (Steps 7, 8).
+  - name: AI
+    description: AI Assist generation with Governance Gatekeeper screening (Step 4).
+  - name: Companion
+    description: RPG companion + daily-dose nudge (Step 8).
+  - name: Social
+    description: |
+      C+ (Connect+) Phyllis MVP social paths — feed, profile, share-to-feed,
+      reactions, comments. Per CHO-1457: contract gap closure surfaced by
+      A-FE-CPlus audit. Phyllis MVP scope is intentionally narrow — basic
+      social discovery only; Leaderboards, Three-Currency Economy,
+      Reward Vault, Territory Conquest, Companion Missions, Refer-a-Friend
+      are PARKED for M14+.
+
+      Backend handlers are stubs returning 501 Not Implemented or empty
+      collections so the C+ Angular surface compiles; full implementation
+      lands when chora-sharing learner-facing API ships (M12+).
+  - name: Discovery
+    description: |
+      Public course discovery (Phyllis Step 5, Mr. Chen visibility) — read
+      side of public-catalog cross-link from C+ to A+ course detail.
+
+paths:
+  /api/me:
+    get:
+      operationId: getMe
+      summary: Get the authenticated user's profile
+      description: |
+        Fans out to `chora-identity:/me`. Returns GCID, email, display name,
+        and linked IdPs. Bearer `gcid` propagated to identity service.
+      tags: [Identity]
+      responses:
+        "200":
+          description: User profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MeResponse"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+        "504": { $ref: "#/components/responses/GatewayTimeout" }
+
+  /api/me/roles:
+    get:
+      operationId: getMyRoles
+      summary: Get the authenticated user's roles, optionally per course
+      description: |
+        Fans out to `chora-identity:/me/roles`. When `course_id` is supplied,
+        returns the role context within that course (instructor / learner /
+        tenant_admin) — Comic Ch4 P8 "Same account, different role per
+        course." When omitted, returns ALL roles across courses + tenants.
+      tags: [Identity]
+      parameters:
+        - name: course_id
+          in: query
+          required: false
+          description: Course ID to scope the role query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Role context
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoleResponse"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+  /api/tenants/me:
+    get:
+      operationId: getMyTenant
+      summary: Resolve the active tenant from auth context
+      description: |
+        Reads `X-Tenant-Id` from the request and fans out to
+        `chora-tenancy:/tenants/{tenant_id}`. Step 2 of Phyllis happy-path.
+      tags: [Tenancy]
+      parameters:
+        - name: X-Tenant-Id
+          in: header
+          required: true
+          description: Tenant UUID, resolved from session/JWT.
+          schema: { type: string }
+      responses:
+        "200":
+          description: Tenant detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantResponse"
+        "400":
+          description: X-Tenant-Id missing
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+  /api/courses:
+    post:
+      operationId: createCourse
+      summary: Create a course (composite — atom root + course skeleton)
+      description: |
+        Composite operation per Step 3 of Phyllis happy-path. Sequentially
+        calls `chora-creation:/atoms` (root atom) then `chora-delivery:/courses`
+        (course skeleton). On success returns `course_id` + `root_atom_id`.
+        On any failure short-circuits with 502.
+      tags: [Courses]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCourseRequest"
+      responses:
+        "201":
+          description: Course created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateCourseResponse"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+        "504": { $ref: "#/components/responses/GatewayTimeout" }
+
+  /api/catalog:
+    get:
+      operationId: getCatalog
+      summary: List public courses (Udemy moment per Step 5)
+      description: |
+        Fans out to `chora-delivery:/courses?public=true` — read-side public
+        catalogue listing. Used in Step 5 of Phyllis happy-path.
+      tags: [Courses]
+      parameters:
+        - name: public
+          in: query
+          required: false
+          description: Filter to public courses only
+          schema: { type: boolean, default: true }
+      responses:
+        "200":
+          description: Catalogue listing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogResponse"
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+  /api/enrollments:
+    post:
+      operationId: createEnrollment
+      summary: Enrol the caller in a course
+      description: |
+        Calls `chora-delivery:/enrollments` and on success emits
+        `chora.delivery.enrollment.created.v1` Pub/Sub event. Step 6 of
+        Phyllis happy-path — drives the role-flip from instructor (own
+        course) to learner (Mr. Chen's course).
+      tags: [Courses]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateEnrollmentRequest"
+      responses:
+        "201":
+          description: Enrolment created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnrollmentResponse"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+  /api/atoms/{atom_id}:
+    get:
+      operationId: getAtom
+      summary: Read an atom + parallel session metadata
+      description: |
+        Parallel fan-out to `chora-creation:/atoms/{id}` and
+        `chora-consumption:/atoms/{id}/session`. Returns merged JSON with
+        `atom` and `session` blocks. Step 7 of Phyllis happy-path.
+
+        Graceful degradation: if the session call fails, atom is still
+        returned with `session_error: upstream_unavailable`.
+      tags: [Atoms]
+      parameters:
+        - name: atom_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Atom + session metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AtomResponse"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+  /api/atoms/{atom_id}/feedback:
+    post:
+      operationId: submitFeedback
+      summary: Submit SM-2 spaced-repetition feedback for an atom
+      description: |
+        Calls `chora-consumption:/atoms/{atom_id}/feedback`. Used by Daily
+        Dose to tune SM-2 retention scheduling per the Ebbinghaus formula
+        `R(t) = e^(-t/S)`.
+      tags: [Atoms]
+      parameters:
+        - name: atom_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FeedbackRequest"
+      responses:
+        "202":
+          description: Feedback accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeedbackResponse"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+  /api/atoms/{atom_id}/revisions:
+    get:
+      operationId: listAtomRevisions
+      summary: List revision history for an atom
+      description: |
+        Proxies `GET /api/atoms/{atom_id}/revisions` verbatim to
+        `chora-creation` at the same path (per
+        `chora-contracts/openapi/creation-admin.yaml::listAtomRevisions`).
+        Returns an `AtomRevisionPage` with cursor-based pagination.
+        Used by the A+ atom-revisions view (WS-7b).
+
+        Auth: requires Bearer ChoraSession JWT. Tenant RLS enforced
+        downstream by chora-creation via `X-Tenant-Id` mesh header.
+
+        Status passthrough: 401 / 403 / 404 forwarded verbatim; 5xx
+        normalised to 502 `GATEWAY_UPSTREAM_5XX`.
+      tags: [Atoms]
+      parameters:
+        - name: atom_id
+          in: path
+          required: true
+          schema: { type: string }
+          description: "UUIDv7 atom identifier."
+        - name: page_size
+          in: query
+          required: false
+          schema: { type: integer, default: 20, minimum: 1, maximum: 100 }
+          description: "Number of revisions to return per page."
+        - name: page_token
+          in: query
+          required: false
+          schema: { type: string }
+          description: "Opaque cursor returned in next_page_token from a previous response."
+      responses:
+        "200":
+          description: "Revision page returned."
+          content:
+            application/json:
+              schema:
+                type: object
+                description: "AtomRevisionPage — verbatim body from chora-creation (creation-admin.yaml::AtomRevisionPage)."
+                additionalProperties: true
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: "Forbidden — caller lacks AUTHOR / INSTRUCTOR / ADMIN role on the tenant."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+  # ---------------------------------------------------------------------------
+  # Personal Collections (CHO-1618, 2026-06-01) — 7 routes proxied verbatim to
+  # chora-creation at the SAME path (per
+  # `chora-contracts/openapi/creation-admin.yaml` §Collections). The gateway
+  # forwards method + path + body + query unchanged; mesh-trust headers
+  # (X-Tenant-Id + lowercase gcid) are stamped so chora-creation's
+  # tenantContext middleware + RLS resolve the caller. Status passthrough:
+  # 401 / 403 / 404 / 409 / 422 forwarded verbatim; 5xx normalised to 502
+  # `GATEWAY_UPSTREAM_5XX`. Unblocks the A+ Collections FE (WS-6b-BE-A1).
+  # ---------------------------------------------------------------------------
+  /api/v1/collections:
+    post:
+      operationId: createCollection
+      summary: "Create a new personal Collection"
+      description: |
+        Proxies `POST /api/v1/collections` verbatim to `chora-creation` at the
+        same path (per `creation-admin.yaml::createCollection`). The owning
+        gcid is resolved downstream from the stamped `gcid` mesh header.
+      tags: [Collections]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCollectionRequest"
+      responses:
+        "201":
+          description: "Collection created."
+          content:
+            application/json:
+              schema:
+                type: object
+                description: "Collection — verbatim body from chora-creation (creation-admin.yaml::Collection)."
+                additionalProperties: true
+        "400":
+          description: "Invalid body (CREATION_INVALID_BODY / CREATION_COLLECTION_INVALID)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+  /api/v1/me/collections:
+    get:
+      operationId: listMyCollections
+      summary: "List the caller's personal Collections"
+      description: |
+        Proxies `GET /api/v1/me/collections` verbatim to `chora-creation` at
+        the same path (per `creation-admin.yaml::listMyCollections`). Returns
+        the caller's Collections in the active tenant; soft-deleted rows are
+        filtered out downstream.
+      tags: [Collections]
+      responses:
+        "200":
+          description: "Collections listed."
+          content:
+            application/json:
+              schema:
+                type: object
+                description: "CollectionListResponse — verbatim body from chora-creation (creation-admin.yaml::CollectionListResponse)."
+                additionalProperties: true
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+  /api/v1/collections/{collection_id}:
+    parameters:
+      - name: collection_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+        description: "UUIDv7 Collection identifier."
+    get:
+      operationId: getCollection
+      summary: "Fetch a Collection by ID (visibility-gated)"
+      description: |
+        Proxies `GET /api/v1/collections/{collection_id}` verbatim to
+        `chora-creation` at the same path (per
+        `creation-admin.yaml::getCollection`).
+      tags: [Collections]
+      responses:
+        "200":
+          description: "Collection retrieved."
+          content:
+            application/json:
+              schema:
+                type: object
+                description: "Collection — verbatim body from chora-creation (creation-admin.yaml::Collection)."
+                additionalProperties: true
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+    patch:
+      operationId: patchCollection
+      summary: "Update Collection metadata (owner only)"
+      description: |
+        Proxies `PATCH /api/v1/collections/{collection_id}` verbatim to
+        `chora-creation` at the same path (per
+        `creation-admin.yaml::patchCollection`). Owner gate enforced downstream
+        (403 when gcid != owner_gcid).
+      tags: [Collections]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchCollectionRequest"
+      responses:
+        "200":
+          description: "Collection updated."
+          content:
+            application/json:
+              schema:
+                type: object
+                description: "Collection — verbatim body from chora-creation (creation-admin.yaml::Collection)."
+                additionalProperties: true
+        "400":
+          description: "Invalid body (CREATION_INVALID_BODY / CREATION_COLLECTION_INVALID)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: "Forbidden — caller is not the Collection owner."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+    delete:
+      operationId: deleteCollection
+      summary: "Soft-delete a Collection (owner only)"
+      description: |
+        Proxies `DELETE /api/v1/collections/{collection_id}` verbatim to
+        `chora-creation` at the same path (per
+        `creation-admin.yaml::deleteCollection`). Owner gate enforced
+        downstream. 204 (no body) passes through verbatim.
+      tags: [Collections]
+      responses:
+        "204":
+          description: "Collection soft-deleted."
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: "Forbidden — caller is not the Collection owner."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+  /api/v1/collections/{collection_id}/atoms:
+    parameters:
+      - name: collection_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+        description: "UUIDv7 Collection identifier."
+    post:
+      operationId: addCollectionAtom
+      summary: "Add an atom to a Collection"
+      description: |
+        Proxies `POST /api/v1/collections/{collection_id}/atoms` verbatim to
+        `chora-creation` at the same path (per
+        `creation-admin.yaml::addCollectionAtom`).
+      tags: [Collections]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddCollectionAtomRequest"
+      responses:
+        "201":
+          description: "Atom added; returns the updated Collection."
+          content:
+            application/json:
+              schema:
+                type: object
+                description: "Collection — verbatim body from chora-creation (creation-admin.yaml::Collection)."
+                additionalProperties: true
+        "400":
+          description: "Invalid body (atom_id required)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: "Forbidden — caller is not owner OR cross-tenant atom on non-PUBLIC collection."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: "Atom is already in the Collection."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "422":
+          description: "Atom cap exceeded."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+  /api/v1/collections/{collection_id}/atoms/{atom_id}:
+    parameters:
+      - name: collection_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+        description: "UUIDv7 Collection identifier."
+      - name: atom_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+        description: "UUIDv7 LearningAtom identifier."
+    delete:
+      operationId: removeCollectionAtom
+      summary: "Remove an atom from a Collection"
+      description: |
+        Proxies `DELETE /api/v1/collections/{collection_id}/atoms/{atom_id}`
+        verbatim to `chora-creation` at the same path (per
+        `creation-admin.yaml::removeCollectionAtom`). 204 (no body) passes
+        through verbatim.
+      tags: [Collections]
+      responses:
+        "204":
+          description: "Atom removed."
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: "Forbidden — caller is not the Collection owner."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+  /api/ai/generate:
+    post:
+      operationId: aiGenerate
+      summary: AI Assist generation with Governance Gatekeeper screening
+      description: |
+        Calls `chora-model-broker-router:/generate`. The router internally
+        invokes `chora-guardrail:/screen` (Tier-4 risk class — Cloud Model
+        Armor + DLP + regex baseline + output validators per
+        `ai-runtime-guardrails` skill). Verdict pass-through:
+
+        - `approved`: content is safe, return as-is.
+        - `remediated`: original content was biased/harmful, return a
+          replacement (Comic Ch6 P13 "Waterfall vs Agile" → balanced
+          comparison).
+        - `blocked`: refuse with 422 and a violation envelope.
+
+        Step 4 of Phyllis happy-path.
+      tags: [AI]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GenerateRequest"
+      responses:
+        "200":
+          description: Generation result (approved or remediated)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenerateResponse"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+        "504": { $ref: "#/components/responses/GatewayTimeout" }
+
+  /api/companion/me:
+    get:
+      operationId: getCompanionMe
+      summary: Get the caller's Companion (RPG companion)
+      description: |
+        Calls `chora-consumption:/companion/me`. Companion is a domain entity
+        in Content Consumption — distinct from the AI agent that powers it
+        (per memory `feedback_companion_vs_agent`).
+      tags: [Companion]
+      responses:
+        "200":
+          description: Companion state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompanionResponse"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+  /api/companion/daily-dose:
+    get:
+      operationId: getDailyDose
+      summary: Get the caller's Daily Dose composition (5 atoms)
+      description: |
+        Calls `chora-consumption:/companion/daily-dose`. Returns a
+        deterministic 5-atom composition: 40% Ebbinghaus + 30% curiosity +
+        30% weakness per `ux_engagement.md` §2. Step 8 of Phyllis happy-path
+        — the closing nudge.
+
+        Phase 2A — the optional `growth_edge_id` query param scopes the dose
+        to a focused single-Growth-Edge practice session: the whole 5-atom
+        budget drills that one edge (cached drill atoms first, then topic/tag
+        matches). Omitted ⇒ the standard composition (additive, backward-
+        compatible).
+      tags: [Companion]
+      parameters:
+        - name: growth_edge_id
+          in: query
+          required: false
+          description: Scope the dose to drilling one Growth Edge.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Daily Dose composition
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DailyDoseResponse"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+  # ---------------------------------------------------------------------------
+  # Social paths (CHO-1457) — Phyllis MVP basic social discovery for C+
+  # surface. Stubs in this version; full wire-up when chora-sharing
+  # learner-facing API ships.
+  # ---------------------------------------------------------------------------
+
+  /v1/feed:
+    get:
+      operationId: getFeed
+      summary: Paginated atomic posts feed
+      description: |
+        Returns the caller's social feed — atomic posts (atom shares,
+        reactions, comments) curated by social-graph adjacency. Stub
+        version returns an empty `data` array; full implementation wires
+        through to `chora-sharing:/feed` when learner-facing API lands.
+      tags: [Social]
+      parameters:
+        - name: tenant_id
+          in: query
+          required: false
+          description: Tenant scope override (defaults to caller's active tenant)
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, default: 20, minimum: 1, maximum: 100 }
+        - name: cursor
+          in: query
+          required: false
+          description: Opaque cursor for pagination
+          schema: { type: string }
+      responses:
+        "200":
+          description: Feed page (possibly empty in stub mode)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeedResponse"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+  /v1/me/social:
+    get:
+      operationId: getMySocial
+      summary: Get the caller's per-class reusable SocialProfile
+      description: |
+        SocialProfile is a per-class reusable identity card (display name,
+        avatar, atom count, follower count). Stub returns a placeholder
+        profile keyed off the caller's GCID.
+      tags: [Social]
+      responses:
+        "200":
+          description: SocialProfile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SocialProfile"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+  /v1/atoms/{atom_id}/share:
+    post:
+      operationId: shareAtomToFeed
+      summary: Share an atom to the social feed
+      description: |
+        Author-only action (role-conditional in C+ Angular surface). Stub
+        returns 501 Not Implemented with TODO body; full wire-up posts
+        to `chora-sharing:/posts` and emits
+        `chora.sharing.post.created.v1`.
+
+        **Idempotency** (full wire-up only): clients MUST send a
+        UUIDv7 in the `Idempotency-Key` header. The handler dedups by
+        `(gcid, idempotency_key)` so a network retry never produces a
+        duplicate post. Stubs accept the header but ignore it.
+      tags: [Social]
+      parameters:
+        - name: atom_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: UUIDv7 — required for retry-safe writes (full wire-up); ignored by stubs.
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ShareAtomRequest"
+      responses:
+        "201":
+          description: Post created (full implementation only)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Post"
+        "501":
+          description: Stub — chora-sharing learner-facing API not yet wired
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /v1/posts/{post_id}/reactions:
+    post:
+      operationId: createReaction
+      summary: React to a post
+      description: |
+        Add a reaction (like / insight / question) to a post. Stub returns
+        501; full implementation calls `chora-sharing:/posts/{id}/reactions`.
+
+        **Idempotency** (full wire-up only): clients MUST send a
+        UUIDv7 in the `Idempotency-Key` header. The handler dedups by
+        `(gcid, post_id, idempotency_key)` so a network retry never
+        produces duplicate reaction rows.
+      tags: [Social]
+      parameters:
+        - name: post_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: UUIDv7 — required for retry-safe writes (full wire-up).
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReactionRequest"
+      responses:
+        "201":
+          description: Reaction created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Reaction"
+        "501":
+          description: Stub
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /v1/posts/{post_id}/reactions/{reaction_id}:
+    delete:
+      operationId: deleteReaction
+      summary: Remove a previously created reaction
+      tags: [Social]
+      parameters:
+        - name: post_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: reaction_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "204":
+          description: Reaction removed (idempotent)
+        "501":
+          description: Stub
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /v1/posts/{post_id}/comments:
+    get:
+      operationId: getComments
+      summary: Get a post's threaded comments
+      description: |
+        Threaded comment tree (1-level parent_comment_id linking — matches
+        `community.service.loadComments` shape). Stub returns empty data.
+      tags: [Social]
+      parameters:
+        - name: post_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: Comments page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommentsResponse"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+    post:
+      operationId: addComment
+      summary: Add a comment to a post (or reply to one)
+      description: |
+        **Idempotency** (full wire-up only): clients MUST send a
+        UUIDv7 in the `Idempotency-Key` header. The handler dedups by
+        `(gcid, post_id, idempotency_key)` so a network retry never
+        produces duplicate comments.
+      tags: [Social]
+      parameters:
+        - name: post_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: UUIDv7 — required for retry-safe writes (full wire-up).
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CommentRequest"
+      responses:
+        "201":
+          description: Comment created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Comment"
+        "501":
+          description: Stub
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  # ---------------------------------------------------------------------------
+  # Atom Sharing Redesign (feat/atom-sharing-redesign) — social paths.
+  # RMM Level 2 (R-13): /v1/... resource-oriented URIs, correct verbs, proper
+  # status codes. chora-web consumes these via the chora-gateway BFF only.
+  # ---------------------------------------------------------------------------
+
+  /v1/feed/shared-atoms:
+    get:
+      operationId: listSharedAtoms
+      summary: Paginated ranked shared-atom feed
+      description: |
+        Returns shared-atom cards (stem preview + "by {author}" + license
+        badge). R1 attribution + R2 license per atom. Fan-out to
+        `chora-sharing` ListSharedAtoms. Pagination default 20 / max 100.
+      tags: [Social]
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, default: 20, minimum: 1, maximum: 100 }
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: string }
+        - name: topic_filter
+          in: query
+          required: false
+          schema: { type: string }
+        - name: question_type_filter
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: Shared-atom feed page
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SharedAtomFeedResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+  /v1/leaderboard:
+    get:
+      operationId: getLeaderboard
+      summary: Ranked leaderboard (atom-XP + ELO via duel_ratings)
+      description: |
+        Event-driven read-model (no cross-DB reads). XP from completed atom
+        sessions. Scoped tenant/class/global over a rolling season; descending
+        ranks, ties share a rank. Fan-out to `chora-sharing` GetLeaderboard.
+      tags: [Social]
+      parameters:
+        - name: scope
+          in: query
+          required: true
+          schema: { type: string, enum: [tenant, class, global] }
+        - name: scope_target_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+        - name: season_start
+          in: query
+          required: false
+          schema: { type: string, format: date-time }
+        - name: season_end
+          in: query
+          required: false
+          schema: { type: string, format: date-time }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, default: 20, minimum: 1, maximum: 100 }
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: Leaderboard page
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LeaderboardResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+  /v1/discovery/courses/public:
+    get:
+      operationId: getPublicCourses
+      summary: List public courses for cross-surface discovery (Phyllis Step 5)
+      description: |
+        Mr. Chen visibility — read-only public course summaries cross-linked
+        to A+ course detail. Stub fans out to `chora-delivery:/courses?public=true`
+        when SVC_DELIVERY_URL is set; otherwise returns an empty list.
+      tags: [Discovery]
+      parameters:
+        - name: tenant_id
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: Public course summaries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicCoursesResponse"
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+  # ---------------------------------------------------------------------------
+  # O+ Observability+ BFF aggregator routes (Phase C wiring)
+  #
+  # Implementation: `services/chora-gateway/internal/adapter/http/handlers_oplus.go`.
+  # All 5 routes are auditor-role-gated. Every response carries the
+  # discriminated-union envelope `state: live | stale | error | pending`;
+  # error variants land on HTTP 200 with an `error` field so the FE can
+  # render the in-page error variant per anchoring-decision #4.
+  # ---------------------------------------------------------------------------
+  /bff/oplus/dashboard:
+    get:
+      operationId: getOPlusDashboard
+      summary: IMDA D1-D4 dashboard envelope for the O+ surface
+      description: |
+        Composes `governance.GetIMDADashboard` with the canonical 4-tile
+        IMDA posture summary + `observability.CountAgentDecisions` for
+        the last-24h `recent_decisions_24h` rollup. Per audit finding #3
+        the response shape is `posture[]` + `all_baseline_achieved` +
+        optional `recent_decisions_24h`. The 6 ISO 25059:2023 safety-risk
+        tiles (`SAFETY_RISK_CATEGORIES`) are a FE-canonical design-time
+        invariant — the BFF does NOT ship a `safety_risks` field.
+        `recent_decisions_24h` is omitted (rather than zeroed) when the
+        observability upstream is unwired or the count call fails so the
+        dashboard envelope can remain `state: live` on the rest of the
+        payload per [[feedback-no-stubs-real-wiring]].
+      tags: [O+]
+      responses:
+        "200":
+          description: Dashboard envelope (state may be live, stale, or error)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardResponse"
+
+  /bff/oplus/dimensions:
+    get:
+      operationId: getOPlusDimensions
+      summary: Full per-dimension rubric expand for the O+ /dimensions surface
+      description: |
+        Fans out 4 `governance.GetDimensionRubric` calls in parallel (one
+        per canonical IMDA dimension). Producer rubric items are reshaped
+        to the FE-canonical `ref` + `requirement` + `tools[]` +
+        `tool_coverage` view per audit finding #5. Any single fan-out
+        error collapses the envelope to `state: error`.
+      tags: [O+]
+      responses:
+        "200":
+          description: Dimensions envelope
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DimensionsResponse"
+
+  /bff/oplus/agents:
+    get:
+      operationId: getOPlusAgents
+      summary: Crews + Agents hierarchy for the O+ surface
+      description: |
+        Pass-through to `chora-observability:/api/v1/observability/agents`.
+        Wraps the producer response in the OPlusEnvelope so the FE can
+        observe `state` + `fetched_at` uniformly.
+      tags: [O+]
+      responses:
+        "200":
+          description: Agents envelope
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentsBodyResponse"
+
+  /bff/oplus/governance:
+    get:
+      operationId: getOPlusGovernance
+      summary: 3-tab governance view for the O+ surface
+      description: |
+        Composes decision traces (`observability.GetAgentDecisions` over
+        the last 24h) + HITL queue (`governance.GetHITLPending`) + a
+        small static data lineage / RACI payload. Producer rows are
+        reshaped to the FE-canonical view shapes per audit findings #1 + #2.
+      tags: [O+]
+      responses:
+        "200":
+          description: Governance 3-tab envelope
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GovernanceTabsResponse"
+
+  /bff/oplus/a2a:
+    get:
+      operationId: getOPlusA2A
+      summary: A2A console view for the O+ surface
+      description: |
+        Returns either the live A2A console view OR a `mode: 'pending'`
+        envelope when chora-a2a-gateway has no configured backend. Live
+        mode composes 3 calls (contracts + identities + invocations) and
+        reshapes the rows to the FE-canonical views per audit finding #4
+        (`contract_id → id`, `invocation_id → id`, `outcome → status`,
+        `identities → external_agents`, partner display name lookup,
+        FE-canonical `trust_level` enum, computed `latency_ms`).
+      tags: [O+]
+      responses:
+        "200":
+          description: A2A envelope (live or pending)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/A2AResponse"
+
+  /bff/oplus/eval-runs:
+    get:
+      operationId: getOPlusEvalRuns
+      summary: Agent-eval crew-run index for the O+ surface
+      description: |
+        Pass-through to
+        `chora-observability:/api/v1/observability/eval-runs` (the BigQuery
+        `agent_eval_evidence` view). Wraps the producer response in the
+        OPlusEnvelope so the FE observes `state` + `fetched_at` uniformly.
+        Each crew run (`candidate_label`) carries a `bigquery_url` deep-link
+        and each member (`experiment`) a `vertex_experiment_url` deep-link
+        (mirrors the AgentView Cloud-Trace / Agent-Engine deep-link precedent
+        per anchoring-decision #2). IMDA D2 (transparency) evidence. Auditor /
+        admin-role gated by the AuditorGate middleware on the `/bff/oplus/`
+        prefix.
+      tags: [O+]
+      parameters:
+        - name: experiment
+          in: query
+          required: false
+          description: "Filter to one crew member."
+          schema:
+            type: string
+        - name: kind
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [autorater, adversarial]
+      responses:
+        "200":
+          description: Crew-run index envelope
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvalRunsResponse"
+
+  /bff/oplus/eval-runs/{candidateLabel}:
+    parameters:
+      - name: candidateLabel
+        in: path
+        required: true
+        description: "Crew-run key shared by all members."
+        schema:
+          type: string
+    get:
+      operationId: getOPlusEvalRunEvidence
+      summary: Per-row eval evidence drill-down for one crew run
+      description: |
+        Pass-through to
+        `chora-observability:/api/v1/observability/eval-runs/{candidateLabel}`.
+        Returns the per-row evidence (golden prompt -> agent response ->
+        autorater score + rationale, plus adversarial attack -> verdict) for
+        all members of one crew run, wrapped in the OPlusEnvelope.
+      tags: [O+]
+      parameters:
+        - name: experiment
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: kind
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [autorater, adversarial]
+      responses:
+        "200":
+          description: Per-row evidence envelope
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvalEvidenceResponse"
+
+  # ---------------------------------------------------------------------------
+  # N13 — HITL self-claim + release passthrough.
+  #
+  # Passes through to chora-governance
+  # `POST /api/hitl/decisions/{id}/{claim|release}` (N7 commit `03e7fbc3`).
+  # Unlike the 5 read routes above, claim/release are WRITE actions and do
+  # NOT collapse upstream errors to the OPlusEnvelope `state:'error'` 200
+  # variant — real HTTP status codes flow through so the FE can render
+  # targeted toast notifications + retry decisions.
+  # ---------------------------------------------------------------------------
+  /bff/oplus/governance/hitl/{id}/claim:
+    post:
+      operationId: claimOPlusHITLDecision
+      summary: Claim a pending HITL decision as the active reviewer
+      description: |
+        Sets `assignee_gcid = operator_gcid` on the pending HITL row so the
+        reviewer takes ownership of the gate. Idempotent at the producer
+        layer: a duplicate claim by the SAME reviewer surfaces as 200; a
+        claim by a DIFFERENT reviewer when the row is already assigned
+        surfaces as 409.
+
+        `operator_gcid` is the AUDITOR's own GCID (NOT a FE-picked
+        parameter). The FE reads it from the active Chora-session JWT.
+
+        Auditor-role-gated by the outer `auditor_gate` middleware — only
+        users with the `auditor` role in the active tenant can reach this
+        route. Non-auditors receive 403 BEFORE this handler runs.
+      tags: [O+]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: HITL decision id (UUIDv7)
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HITLActionRequest"
+      responses:
+        "200":
+          description: Claim succeeded; body is the updated HITLDecisionItem
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HITLDecisionItem"
+        "403":
+          description: Auditor role required (auditor_gate middleware)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: Decision not found (cross-tenant ⇒ same — no leak)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "409":
+          description: Already claimed by another reviewer OR terminal verdict
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "422":
+          description: Invalid body (blank operator_gcid OR malformed JSON)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "503":
+          description: chora-governance unreachable OR client not wired
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /bff/oplus/governance/hitl/{id}/release:
+    post:
+      operationId: releaseOPlusHITLDecision
+      summary: Release a HITL decision the caller previously claimed
+      description: |
+        Clears `assignee_gcid` on the HITL row so another reviewer can
+        claim it. Only the CURRENT assignee may release — a release
+        attempt by a non-assignee returns 403 (the producer enforces this
+        invariant per `evidence.HITLDecision.Release`).
+
+        `operator_gcid` is the AUDITOR's own GCID. Identical body shape to
+        the claim endpoint above.
+      tags: [O+]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: HITL decision id (UUIDv7)
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HITLActionRequest"
+      responses:
+        "200":
+          description: Release succeeded; body is the updated HITLDecisionItem
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HITLDecisionItem"
+        "403":
+          description: |
+            Either auditor-role missing (auditor_gate) OR caller is not
+            the current assignee (chora-governance domain error).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: Decision not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "409":
+          description: Terminal verdict — release no longer valid
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "422":
+          description: Invalid body (blank operator_gcid OR malformed JSON)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "503":
+          description: chora-governance unreachable OR client not wired
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /bff/oplus/governance/hitl/{id}/approve:
+    post:
+      operationId: approveOPlusHITLDecision
+      summary: Record an APPROVE verdict on a HITL decision
+      description: |
+        Records an `approve` verdict on the HITL gate by proxying to
+        chora-governance `POST /api/hitl/decisions/{id}/approve`. The verdict
+        is APPEND-only: chora_governance migration 0009 blocks an in-place
+        UPDATE of a recorded decision, so a verdict appends a new
+        `hitl_decision_log` row rather than mutating the pending one.
+
+        `operator_gcid` is the AUDITOR's own GCID (read from the active
+        Chora-session JWT, NEVER a FE-picked field). `note` is an OPTIONAL
+        free-text rationale forwarded to the producer; an empty/omitted note
+        is not forwarded.
+
+        Auditor-role-gated by the outer `auditor_gate` middleware — non-auditors
+        receive 403 BEFORE this handler runs. A verdict by a non-assignee, or
+        on a gate that already has a terminal verdict, surfaces as 403 / 409
+        respectively (producer-enforced).
+      tags: [O+]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: HITL decision id (UUIDv7)
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HITLActionRequest"
+      responses:
+        "200":
+          description: Approve verdict recorded; body is the updated HITLDecisionItem
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HITLDecisionItem"
+        "403":
+          description: |
+            Either auditor-role missing (auditor_gate) OR caller is not the
+            current assignee (chora-governance domain error).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: Decision not found (cross-tenant ⇒ same — no leak)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "409":
+          description: Terminal verdict already recorded — gate no longer actionable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "422":
+          description: Invalid body (blank operator_gcid OR malformed JSON)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "503":
+          description: chora-governance unreachable OR client not wired
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /bff/oplus/governance/hitl/{id}/reject:
+    post:
+      operationId: rejectOPlusHITLDecision
+      summary: Record a REJECT verdict on a HITL decision
+      description: |
+        Records a `reject` verdict on the HITL gate by proxying to
+        chora-governance `POST /api/hitl/decisions/{id}/reject`. Identical
+        semantics + body shape to the approve endpoint above (append-only
+        verdict, optional `note`, auditor-role + assignee enforcement).
+      tags: [O+]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: HITL decision id (UUIDv7)
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HITLActionRequest"
+      responses:
+        "200":
+          description: Reject verdict recorded; body is the updated HITLDecisionItem
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HITLDecisionItem"
+        "403":
+          description: |
+            Either auditor-role missing (auditor_gate) OR caller is not the
+            current assignee (chora-governance domain error).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: Decision not found (cross-tenant ⇒ same — no leak)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "409":
+          description: Terminal verdict already recorded — gate no longer actionable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "422":
+          description: Invalid body (blank operator_gcid OR malformed JSON)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "503":
+          description: chora-governance unreachable OR client not wired
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /api/v1/tenants/setup:
+    post:
+      operationId: setupTenant
+      summary: "Setup Wizard step 4 Apply — fan out IdP + finish-setup (CHO-1682)"
+      description: |
+        Aggregator that finalises the Setup Wizard in a single call. The BFF:
+          1. Validates the Chora session JWT → stamps `X-Tenant-Id` + `gcid`.
+          2. Calls `POST /api/v1/tenants/me/idp-providers` on chora-identity.
+          3. On success, calls `PATCH /api/v1/tenants/me/finish-setup` on
+             chora-tenancy.
+          4. Returns the combined payload to the FE.
+
+        Failure semantics:
+          - Identity 4xx → forwarded as-is (the FE retries the wizard).
+          - Identity 5xx OR network → 502 with body shape unchanged.
+          - Identity OK + tenancy 5xx → 502 `GATEWAY_UPSTREAM_TENANCY` —
+            BOTH endpoints are idempotent so the FE can retry the same
+            call safely.
+        The TenantSetupService spec (chora-web) maps these to discriminated
+        result kinds.
+      tags: [Phyllis]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetupTenantRequest"
+      responses:
+        "200":
+          description: "Identity upsert + tenancy finish-setup both succeeded"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SetupTenantResponse"
+        "400":
+          description: "Identity validation rejected the request (forwarded body)"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "502":
+          description: "Upstream 5xx — code distinguishes identity (default) vs tenancy (GATEWAY_UPSTREAM_TENANCY, retry-safe)"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /api/v1/admin/tenant-members:
+    get:
+      operationId: gatewaySearchTenantMembers
+      summary: "L1 Tenant — proxy member roster search to chora-identity"
+      description: |
+        Pass-through to chora-identity `GET /api/v1/admin/tenant-members`
+        (identity-admin.yaml v1.4.0 `searchTenantMembers`). Query params
+        (`q`, `role`, `page_size`, `page_token`) forwarded verbatim; the BFF
+        stamps `X-Tenant-Id` + `gcid` from the validated session JWT.
+        Canonical schemas live in identity-admin.yaml.
+      tags: [Phyllis]
+      parameters:
+        - { name: q, in: query, required: false, schema: { type: string } }
+        - { name: role, in: query, required: false, schema: { type: string } }
+        - { name: page_size, in: query, required: false, schema: { type: integer } }
+        - { name: page_token, in: query, required: false, schema: { type: string } }
+      responses:
+        "200": { description: "Roster page (identity-admin TenantMemberSearchResponse)" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { description: "Caller lacks TRAINING_ADMIN/TENANT_ADMIN" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+    post:
+      operationId: gatewayAddTenantMemberByEmail
+      summary: "L1 Tenant — proxy add-member-by-email to chora-identity"
+      description: |
+        Pass-through to chora-identity `POST /api/v1/admin/tenant-members`
+        (`addTenantMemberByEmail`). Body `{email, role}` forwarded verbatim;
+        tenant comes ONLY from the session JWT (stamped as `X-Tenant-Id`).
+      tags: [Phyllis]
+      responses:
+        "201": { description: "Member added (identity-admin TenantMemberSummary)" }
+        "400": { description: "Invalid body / AGID rejected" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { description: "Caller lacks TRAINING_ADMIN/TENANT_ADMIN" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: "Membership already exists" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+  /api/v1/admin/tenant-members/{gcid}/role:
+    parameters:
+      - { name: gcid, in: path, required: true, schema: { type: string, format: uuid } }
+    patch:
+      operationId: gatewayChangeTenantMemberRole
+      summary: "L1 Tenant — proxy member role change to chora-identity"
+      description: |
+        Pass-through to chora-identity
+        `PATCH /api/v1/admin/tenant-members/{gcid}/role`
+        (`changeTenantMemberRole`). Body `{role}` forwarded verbatim.
+      tags: [Phyllis]
+      responses:
+        "200": { description: "Role changed (identity-admin TenantMemberSummary)" }
+        "400": { description: "Invalid role" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { description: "Caller lacks TRAINING_ADMIN/TENANT_ADMIN" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+  /api/v1/admin/tenant-members/{gcid}:
+    parameters:
+      - { name: gcid, in: path, required: true, schema: { type: string, format: uuid } }
+    delete:
+      operationId: gatewayRemoveTenantMember
+      summary: "Training-Admin — proxy member removal to chora-identity (WS2b)"
+      description: |
+        Pass-through to chora-identity
+        `DELETE /api/v1/admin/tenant-members/{gcid}` (`removeTenantMember`,
+        CHO-1869 WS2b). Member-centric soft-delete: removes a member from the
+        caller's tenant (all roles). The BFF stamps `X-Tenant-Id` from the
+        session JWT; the identity handler gates on TRAINING_ADMIN/TENANT_ADMIN.
+      tags: [Phyllis]
+      responses:
+        "204": { description: "Member removed (all roles soft-deleted)" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { description: "Caller lacks TRAINING_ADMIN/TENANT_ADMIN" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+  /api/v1/admin/tenant-memberships:
+    post:
+      operationId: gatewayGrantTenantMembership
+      summary: "Training-Admin — proxy operator cross-tenant grant to chora-identity"
+      description: |
+        Pass-through to chora-identity `POST /api/v1/admin/tenant-memberships`
+        (`grantTenantMembership`, ADR-194 D1). Body `{gcid, tenant_id, roles[]}`
+        forwarded verbatim — the TARGET tenant comes from the body (contrast
+        `addTenantMemberByEmail`, which takes the tenant from the session JWT).
+        The caller MUST hold PLATFORM_OPERATOR; the role rides `x-mesh-user-roles`.
+      tags: [Phyllis]
+      responses:
+        "201": { description: "Membership granted (identity-admin TenantMembership)" }
+        "400": { description: "Invalid body / AGID rejected" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { description: "Caller lacks PLATFORM_OPERATOR" }
+        "404": { description: "Grantee gcid or target tenant not found" }
+        "409": { description: "Membership suspended" }
+        "422": { description: "Role not grantable (OWNER / PLATFORM_OPERATOR)" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+  /api/v1/admin/tenant-invites:
+    get:
+      operationId: gatewayListTenantInvites
+      summary: "Training-Admin — proxy pending-invite list to chora-identity"
+      description: |
+        Pass-through to chora-identity `GET /api/v1/admin/tenant-invites`
+        (`listTenantInvites`, ADR-194 D2). Tenant-scoped: the BFF stamps
+        `X-Tenant-Id` from the session JWT; the identity handler gates on
+        TRAINING_ADMIN / TENANT_ADMIN via `x-mesh-user-roles`.
+      tags: [Phyllis]
+      responses:
+        "200": { description: "Pending-invite page (identity-admin PendingInviteList)" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { description: "Caller lacks TRAINING_ADMIN/TENANT_ADMIN" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+    post:
+      operationId: gatewayCreateTenantInvite
+      summary: "Training-Admin — proxy cold-invite create to chora-identity"
+      description: |
+        Pass-through to chora-identity `POST /api/v1/admin/tenant-invites`
+        (`createTenantInvite`, ADR-194 D2). Body `{email, tenant_id?, roles[]}`
+        forwarded verbatim. Unifies add-by-email with cold-invite: an existing
+        user is granted NOW (`{kind:"granted"}`); a never-registered email
+        persists a pending invite the resolve seam auto-applies at first login
+        (`{kind:"invited"}`) — retiring the `addTenantMemberByEmail` 404 dead-end.
+        A body `tenant_id` selects the operator cross-tenant path
+        (PLATFORM_OPERATOR; tenant from body); omitting it selects the
+        tenant-scoped admin path (tenant from the session JWT). Like
+        `grantTenantMembership` the BFF does NOT require a session tenant.
+      tags: [Phyllis]
+      responses:
+        "201": { description: "Membership granted OR pending invite created (identity-admin)" }
+        "400": { description: "Invalid body / AGID rejected" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { description: "Caller lacks the required role (admin / PLATFORM_OPERATOR)" }
+        "409": { description: "Pending invite already exists / membership suspended" }
+        "422": { description: "Role not grantable (OWNER / PLATFORM_OPERATOR)" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+  /api/v1/admin/tenant-invites/{inviteId}:
+    parameters:
+      - { name: inviteId, in: path, required: true, schema: { type: string, format: uuid } }
+    delete:
+      operationId: gatewayRevokeTenantInvite
+      summary: "Training-Admin — proxy pending-invite revoke to chora-identity"
+      description: |
+        Pass-through to chora-identity
+        `DELETE /api/v1/admin/tenant-invites/{inviteId}`
+        (`revokeTenantInvite`, ADR-194 D2). Tenant-scoped (soft-revoke). The
+        BFF stamps `X-Tenant-Id` from the session JWT.
+      tags: [Phyllis]
+      responses:
+        "204": { description: "Invite revoked" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { description: "Caller lacks TRAINING_ADMIN/TENANT_ADMIN" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+  /api/v1/admin/tenants/me/mana-pool:
+    get:
+      operationId: gatewayGetMyTenantManaPool
+      summary: "L1 Tenant — read the caller-tenant's TenantManaPool"
+      description: |
+        Me-style proxy: rewrites to chora-tenancy parametric
+        `GET /api/v1/admin/tenants/{tenantId}/mana-pool`
+        (tenancy-admin.yaml) with `{tenantId}` = the session JWT's tenant —
+        the `handleAdminTenantsMeAddons` precedent (CHO-1698). Canonical
+        schemas live in tenancy-admin.yaml.
+      tags: [Phyllis]
+      responses:
+        "200": { description: "Pool detail (tenancy-admin ManaPool)" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: "No pool yet for this tenant" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+    post:
+      operationId: gatewayCreateMyTenantManaPool
+      summary: "L1 Tenant — create the caller-tenant's TenantManaPool"
+      description: |
+        Me-style proxy to chora-tenancy parametric
+        `POST /api/v1/admin/tenants/{tenantId}/mana-pool`. Body
+        (initial_topup_units / auto_allocation_policy) forwarded verbatim.
+      tags: [Phyllis]
+      responses:
+        "201": { description: "Pool created" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { description: "Pool already exists" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+  /api/v1/admin/tenants/me/mana-pool:topup:
+    post:
+      operationId: gatewayTopupMyTenantManaPool
+      summary: "L1 Tenant — top up the caller-tenant's TenantManaPool"
+      description: |
+        Me-style proxy to chora-tenancy parametric
+        `POST /api/v1/admin/tenants/{tenantId}/mana-pool:topup`. Body
+        forwarded verbatim.
+      tags: [Phyllis]
+      responses:
+        "200": { description: "Pool topped up; new balance returned" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: "No pool yet for this tenant" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+  /api/v1/admin/tenants/me/mana-pool:auto-renew:
+    post:
+      operationId: gatewaySetMyTenantManaPoolAutoRenew
+      summary: "L1 Tenant — configure monthly auto top-up for the caller-tenant's TenantManaPool"
+      description: |
+        Me-style proxy to chora-tenancy parametric
+        `POST /api/v1/admin/tenants/{tenantId}/mana-pool:auto-renew`
+        (tenancy-admin.yaml `setTenantManaPoolAutoRenew`). Body
+        (`SetManaPoolAutoRenewRequest` — `monthly_topup_units` int64 >= 0;
+        0 disables auto-renew) forwarded verbatim. Canonical schemas live
+        in tenancy-admin.yaml.
+      tags: [Phyllis]
+      responses:
+        "200": { description: "Auto-renew configured (tenancy-admin TenantManaPool)" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: "No pool yet for this tenant" }
+        "422": { description: "Validation failed (e.g. negative monthly_topup_units)" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+components:
+  securitySchemes:
+    BearerGCID:
+      type: http
+      scheme: bearer
+      bearerFormat: GCID
+      description: |
+        `Authorization: Bearer {gcid}` — the bearer is the caller's Global
+        Chora ID (UUIDv7). Forwarded to all downstream services. Full OIDC
+        validation lands at M12+.
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid bearer
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    NotFound:
+      description: Resource not found upstream
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    BadGateway:
+      description: Upstream 5xx cascade normalised
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    GatewayTimeout:
+      description: Per-call (5s) or aggregation (15s) budget exceeded
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  schemas:
+    MeResponse:
+      type: object
+      required: [gcid, email, display_name]
+      properties:
+        gcid: { type: string, description: "Global Chora ID (UUIDv7)" }
+        email: { type: string, format: email }
+        display_name: { type: string }
+        linked_idps:
+          type: array
+          items: { type: string }
+          description: "Federated identity providers (google, microsoft, singpass...)"
+
+    RoleResponse:
+      type: object
+      required: [role]
+      properties:
+        role:
+          type: string
+          enum: [tenant_admin, instructor, learner, guest]
+        course_id: { type: string }
+        tenant_id: { type: string }
+        granted_at: { type: string, format: date-time }
+
+    TenantResponse:
+      type: object
+      required: [tenant_id, name, plan]
+      properties:
+        tenant_id: { type: string, format: uuid }
+        name: { type: string }
+        plan: { type: string }
+        add_ons:
+          type: array
+          items: { type: string }
+
+    CreateCourseRequest:
+      type: object
+      required: [title]
+      properties:
+        title: { type: string }
+        description: { type: string }
+        visibility:
+          type: string
+          enum: [private, public]
+          default: private
+
+    CreateCourseResponse:
+      type: object
+      required: [course_id, root_atom_id]
+      properties:
+        course_id: { type: string, format: uuid }
+        root_atom_id: { type: string, format: uuid }
+        title: { type: string }
+
+    CatalogResponse:
+      type: object
+      required: [courses]
+      properties:
+        courses:
+          type: array
+          items:
+            $ref: "#/components/schemas/CatalogCourse"
+        next_cursor: { type: string }
+
+    CatalogCourse:
+      type: object
+      properties:
+        course_id: { type: string, format: uuid }
+        title: { type: string }
+        instructor_gcid: { type: string }
+        enrolment_count: { type: integer }
+        price: { type: number }
+        visibility: { type: string }
+
+    CreateEnrollmentRequest:
+      type: object
+      required: [course_id]
+      properties:
+        course_id: { type: string, format: uuid }
+        gcid: { type: string }
+
+    EnrollmentResponse:
+      type: object
+      required: [enrollment_id, course_id, gcid]
+      properties:
+        enrollment_id: { type: string, format: uuid }
+        course_id: { type: string, format: uuid }
+        gcid: { type: string }
+        role: { type: string, enum: [learner] }
+        enrolled_at: { type: string, format: date-time }
+
+    AtomResponse:
+      type: object
+      required: [atom]
+      properties:
+        atom:
+          type: object
+          additionalProperties: true
+          description: "AtomRevision fields from chora-creation"
+        session:
+          type: object
+          additionalProperties: true
+          description: "AtomicSession metadata from chora-consumption"
+        session_error:
+          type: string
+          description: "Set when consumption call failed; atom block still present"
+
+    FeedbackRequest:
+      type: object
+      required: [quality]
+      properties:
+        quality:
+          type: integer
+          minimum: 0
+          maximum: 5
+          description: "SM-2 quality (0=blackout, 5=perfect)"
+        latency_ms: { type: integer }
+
+    FeedbackResponse:
+      type: object
+      properties:
+        accepted: { type: boolean }
+        sm2_interval_days: { type: number }
+        next_review_at: { type: string, format: date-time }
+
+    GenerateRequest:
+      type: object
+      required: [prompt]
+      properties:
+        prompt: { type: string }
+        course_id: { type: string }
+        risk_class:
+          type: string
+          enum: [tier1, tier2, tier3, tier4]
+          default: tier4
+        max_tokens: { type: integer }
+
+    GenerateResponse:
+      type: object
+      required: [verdict, content]
+      properties:
+        verdict:
+          type: string
+          enum: [approved, remediated, blocked]
+        content: { type: string }
+        violations:
+          type: array
+          items: { type: string }
+        provider: { type: string, description: "e.g., vertex-gemini-1.5-pro" }
+        model: { type: string }
+        token_usage:
+          type: object
+          properties:
+            prompt_tokens: { type: integer }
+            completion_tokens: { type: integer }
+
+    CompanionResponse:
+      type: object
+      properties:
+        companion_id: { type: string }
+        name: { type: string }
+        level: { type: integer }
+        mood: { type: string }
+
+    # GreetingFrom (CHO-1577) — identifies the Companion greeting the learner
+    # for this dose. Absent when the roster is empty or every Companion is
+    # pre-hatch (Mystery Egg only).
+    GreetingFrom:
+      type: object
+      required: [companion_id, name]
+      properties:
+        companion_id:
+          type: string
+          format: uuid
+          description: "UUIDv7 of the greeting Companion"
+        name:
+          type: string
+          description: "Display name of the greeting Companion"
+        voice_accent:
+          type: string
+          description: "Optional voice accent key (from configured_rules.voice_accent)"
+        tie_break_reason:
+          type: string
+          enum: ["highest_growth_exp", ""]
+          description: |
+            Non-empty when a tie in topic-match count was resolved by
+            GrowthExp descending. Empty when the winner was unambiguous.
+
+    # AtomBreakdown (CHO-1577) — dose composition by reason bucket.
+    AtomBreakdown:
+      type: object
+      required: [ebbinghaus, weakness, curiosity, fresh]
+      properties:
+        ebbinghaus: { type: integer, minimum: 0, description: "Ebbinghaus review picks" }
+        weakness:   { type: integer, minimum: 0, description: "Weakness drill picks" }
+        curiosity:  { type: integer, minimum: 0, description: "Curiosity exploration picks" }
+        fresh:      { type: integer, minimum: 0, description: "Fresh top-up picks" }
+
+    DailyDoseResponse:
+      type: object
+      required: [atoms, atom_breakdown]
+      description: |
+        Daily Dose response (CHO-1577 extended shape).
+
+        N-Companion dispatch: `greeting_from` identifies which Companion in the
+        learner's roster is greeting them. Absent when every Companion is
+        pre-hatch (Mystery Egg only) or the roster is empty.
+
+        `atom_breakdown` replaces the earlier `composition` sub-object — it
+        separates the four dose-reason buckets (ebbinghaus / weakness /
+        curiosity / fresh) instead of the FE-side review/new/stretch buckets.
+
+        Both shapes are returned for backward compatibility during the
+        migration window.
+      properties:
+        atoms:
+          type: array
+          items: { type: string }
+          minItems: 5
+          maxItems: 5
+        greeting_from:
+          $ref: "#/components/schemas/GreetingFrom"
+        atom_breakdown:
+          $ref: "#/components/schemas/AtomBreakdown"
+        composition:
+          type: object
+          description: "DEPRECATED — use atom_breakdown. Kept for backward compat."
+          properties:
+            ebbinghaus: { type: integer }
+            curiosity: { type: integer }
+            weakness: { type: integer }
+        served_at: { type: string, format: date-time }
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: "GATEWAY_* prefix; UPPER_SNAKE_CASE"
+            message: { type: string }
+            details: { type: object, additionalProperties: true }
+
+    # -------------------------------------------------------------------------
+    # Personal Collections request bodies (CHO-1618, 2026-06-01) — mirror
+    # chora-contracts/openapi/creation-admin.yaml §Collections. The gateway
+    # forwards the body verbatim; these shapes document the contract for the
+    # POST / PATCH routes. Response bodies pass through as the verbatim
+    # creation-admin.yaml::Collection / CollectionListResponse shapes.
+    # -------------------------------------------------------------------------
+    CollectionVisibility:
+      type: string
+      description: |
+        Audience of a personal Collection (private / friends / tenant) —
+        ADR-233 D7. Mirrors creation-admin.yaml::CollectionVisibility, which
+        carries the full rationale.
+
+        BREAKING (2026-07-14): the former `PRIVATE` / `TENANT_INTERNAL` /
+        `PUBLIC` enum is RETIRED and REJECTED by chora-creation. `PUBLIC` was
+        never actually public — RLS capped collections at the tenant — so it
+        collapsed to `tenant`. The gateway forwards the body verbatim, so an
+        uppercase value reaches chora-creation and comes back a 400.
+      enum:
+        - private
+        - friends
+        - tenant
+
+    CreateCollectionRequest:
+      type: object
+      required: [title]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          type: string
+          maxLength: 2000
+        visibility:
+          $ref: "#/components/schemas/CollectionVisibility"
+
+    PatchCollectionRequest:
+      type: object
+      description: "Partial update — fields omitted are left unchanged."
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          type: string
+          maxLength: 2000
+        visibility:
+          $ref: "#/components/schemas/CollectionVisibility"
+
+    AddCollectionAtomRequest:
+      type: object
+      required: [atom_id]
+      properties:
+        atom_id:
+          type: string
+          format: uuid
+        position:
+          type: integer
+          minimum: 0
+          description: "Optional 0-based ordering slot. Omitted ⇒ append."
+
+    # -------------------------------------------------------------------------
+    # Social schemas (CHO-1457) — Phyllis MVP placeholder shapes. Fields are
+    # intentionally minimal until chora-sharing learner-facing API ships.
+    # -------------------------------------------------------------------------
+
+    Post:
+      type: object
+      required: [post_id, author_gcid, atom_id, created_at]
+      properties:
+        post_id: { type: string, format: uuid }
+        author_gcid: { type: string }
+        tenant_id: { type: string }
+        atom_id: { type: string, format: uuid }
+        body: { type: string, description: "Optional caption" }
+        reaction_count: { type: integer, default: 0 }
+        comment_count: { type: integer, default: 0 }
+        created_at: { type: string, format: date-time }
+
+    FeedResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/Post" }
+        next_cursor: { type: string }
+
+    SocialProfile:
+      type: object
+      required: [gcid]
+      properties:
+        gcid: { type: string }
+        display_name: { type: string }
+        avatar_url: { type: string }
+        atom_count: { type: integer, default: 0 }
+        follower_count: { type: integer, default: 0 }
+        following_count: { type: integer, default: 0 }
+        digital_skins:
+          type: array
+          items: { type: string }
+          description: "Earned visual rewards (NEVER purchasable per domain-vocabulary)"
+
+    ShareAtomRequest:
+      type: object
+      properties:
+        body: { type: string, description: "Optional caption", maxLength: 4000 }
+        visibility:
+          type: string
+          enum: [public, network, private]
+          default: network
+        # Atom Sharing Redesign (R2) — per-atom licensing, server-enforced.
+        # Only the atom's author may share (R1); royalty_rate is REQUIRED iff
+        # license_terms ∈ {royalty_pct, royalty_fixed}.
+        license_terms:
+          type: string
+          enum: [free, royalty_pct, royalty_fixed, cc_by_sa, cc_nd]
+          default: free
+        royalty_rate:
+          $ref: "#/components/schemas/RoyaltyRate"
+        atom_revision_id:
+          type: string
+          format: uuid
+          description: "Optional; defaults to the latest published revision (pinned at share time)."
+
+    RoyaltyRate:
+      type: object
+      required: [kind, value]
+      properties:
+        kind:
+          type: string
+          enum: [pct, fixed_per_use]
+        value:
+          type: number
+          minimum: 0
+          description: "pct: revenue-share % (0..100); fixed_per_use: flat fee."
+
+    ShareAtomResponse:
+      type: object
+      required: [share_entry_id, author_display_name, created_at]
+      properties:
+        share_entry_id: { type: string, format: uuid, description: "= social_feed_entries.id (the immutable share Post)." }
+        author_display_name: { type: string, description: "Denormalised snapshot (R1 — by {author})." }
+        created_at: { type: string, format: date-time }
+
+    SharedAtomCard:
+      type: object
+      required: [share_entry_id, author_display_name, atom_id, license_terms]
+      properties:
+        share_entry_id: { type: string, format: uuid }
+        author_gcid: { type: string }
+        author_display_name: { type: string, description: "R1 — by {author}." }
+        atom_id: { type: string, format: uuid }
+        atom_revision_id: { type: string, format: uuid }
+        atom_stem_preview: { type: string, maxLength: 140 }
+        question_type: { type: string }
+        caption: { type: string }
+        license_terms:
+          type: string
+          enum: [free, royalty_pct, royalty_fixed, cc_by_sa, cc_nd]
+        royalty_rate: { $ref: "#/components/schemas/RoyaltyRate" }
+        reaction_count: { type: integer, default: 0 }
+        created_at: { type: string, format: date-time }
+
+    SharedAtomFeedResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/SharedAtomCard" }
+        next_cursor: { type: string }
+
+    LeaderboardEntryResponse:
+      type: object
+      required: [gcid, score, rank]
+      properties:
+        gcid: { type: string }
+        display_name: { type: string, description: "Pseudonymised on closure (never hard-deleted)." }
+        score: { type: integer, description: "Accumulated atom-XP." }
+        rank: { type: integer, minimum: 1, description: "1 = top; ties share a rank." }
+        duel_elo: { type: integer, description: "From duel_ratings.rating (baseline 1200)." }
+        atoms_completed: { type: integer }
+
+    LeaderboardResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/LeaderboardEntryResponse" }
+        next_cursor: { type: string }
+        computed_at: { type: string, format: date-time }
+
+    Reaction:
+      type: object
+      required: [reaction_id, post_id, gcid, type, created_at]
+      properties:
+        reaction_id: { type: string, format: uuid }
+        post_id: { type: string, format: uuid }
+        gcid: { type: string }
+        type: { type: string, enum: [like, insight, question] }
+        created_at: { type: string, format: date-time }
+
+    ReactionRequest:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [like, insight, question]
+
+    Comment:
+      type: object
+      required: [comment_id, post_id, gcid, body, created_at]
+      properties:
+        comment_id: { type: string, format: uuid }
+        post_id: { type: string, format: uuid }
+        gcid: { type: string }
+        parent_comment_id:
+          type: string
+          format: uuid
+          description: "Set when this is a 1-level reply"
+        body: { type: string, maxLength: 4000 }
+        created_at: { type: string, format: date-time }
+
+    CommentRequest:
+      type: object
+      required: [body]
+      properties:
+        body: { type: string, maxLength: 4000 }
+        parent_comment_id: { type: string, format: uuid }
+
+    CommentsResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/Comment" }
+        next_cursor: { type: string }
+
+    PublicCourseSummary:
+      type: object
+      required: [course_id, title]
+      properties:
+        course_id: { type: string, format: uuid }
+        title: { type: string }
+        instructor_gcid: { type: string }
+        instructor_display_name: { type: string }
+        enrolment_count: { type: integer }
+        visibility: { type: string, enum: [public] }
+
+    PublicCoursesResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/PublicCourseSummary" }
+
+    # -------------------------------------------------------------------------
+    # O+ Observability+ schemas (Phase C wiring)
+    #
+    # Mirrors the response shapes in
+    # `services/chora-gateway/internal/adapter/http/handlers_oplus.go`. Every
+    # response embeds the discriminated-union `OPlusEnvelope` so the FE can
+    # observe `state` + `fetched_at` uniformly across all 5 routes. Error
+    # variants are returned with HTTP 200 + an `error` field.
+    # -------------------------------------------------------------------------
+    OPlusEnvelope:
+      type: object
+      description: |
+        Discriminated-union state wrapper per anchoring-decision #4. The
+        FE polls every 30s via Angular signal and renders one of:
+        `{state:'loading'}` | `{state:'live', data}` |
+        `{state:'stale', data, since}` | `{state:'error', error}` |
+        `{state:'pending', mock}` (A2A only).
+      required: [state, fetched_at]
+      properties:
+        state:
+          type: string
+          enum: [live, stale, error, pending]
+        fetched_at:
+          type: string
+          format: date-time
+        error:
+          type: string
+          description: |
+            Present only when `state == 'error'`. Format: `{label}: {message}`.
+
+    OPlusIMDADimensionLabel:
+      type: string
+      description: |
+        ADR-141 canonical IMDA dimension label. Lowercase + underscored.
+      enum:
+        - accountability
+        - transparency
+        - safety_and_robustness
+        - fairness_and_human_oversight
+
+    OPlusDimensionStatus:
+      type: string
+      description: |
+        FE-canonical derived status string per audit finding #3 thresholds
+        (`score >= 85 → achieved`, `60-84 → partial`, `30-59 → attention`,
+        `<30 → pending`).
+      enum: [achieved, partial, attention, pending]
+
+    PostureItemView:
+      type: object
+      description: |
+        Per-dimension posture row rendered on the O+ dashboard. `num` is
+        the canonical D1-D4 index (1..4); `score` is the 0..100 percent;
+        `status` is derived from `score` per the threshold table above.
+      required: [num, label, score, status]
+      properties:
+        num:
+          type: integer
+          minimum: 1
+          maximum: 4
+        label:
+          $ref: "#/components/schemas/OPlusIMDADimensionLabel"
+        score:
+          type: integer
+          minimum: 0
+          maximum: 100
+        status:
+          $ref: "#/components/schemas/OPlusDimensionStatus"
+
+    DashboardResponse:
+      description: |
+        `/bff/oplus/dashboard` body shape. The 6 ISO 25059:2023 safety-risk
+        tiles are a FE-canonical design-time invariant
+        (`SAFETY_RISK_CATEGORIES` in chora-web `imda-dimensions.ts`) — the
+        BFF intentionally does NOT ship a `safety_risks` field per audit
+        finding #3.
+      allOf:
+        - $ref: "#/components/schemas/OPlusEnvelope"
+        - type: object
+          required: [posture, all_baseline_achieved]
+          properties:
+            posture:
+              type: array
+              minItems: 4
+              maxItems: 4
+              items:
+                $ref: "#/components/schemas/PostureItemView"
+            all_baseline_achieved:
+              type: boolean
+              description: "True when every posture row has status == `achieved`."
+            recent_decisions_24h:
+              type: integer
+              minimum: 0
+              description: |
+                Count of agent_decision_log rows in the last 24h. Sourced
+                via `observability.CountAgentDecisions`. OMITTED (rather
+                than zeroed) when the observability upstream is unwired
+                or the count call fails — the rest of the dashboard
+                envelope stays `state: live` per
+                [[feedback-no-stubs-real-wiring]].
+
+    RubricItemView:
+      type: object
+      description: |
+        Per-rubric-item row rendered inside an O+ dimension panel. Per
+        audit finding #5: `ref` + `requirement` + `tools[]` +
+        `tool_coverage` + `evidence_source_url` are FE-canonical renames
+        + derivations of the producer rubric item.
+      required: [ref, requirement, tool_coverage, tools, status, evidence_source_url]
+      properties:
+        ref:
+          type: string
+        requirement:
+          type: string
+        tool_coverage:
+          type: string
+          description: "Human-readable evidence-source label (falls back to raw string)."
+        tools:
+          type: array
+          items:
+            type: string
+          description: |
+            Lowercase + underscore-slugged tool names derived from
+            `evidence_source` (split on `+` or `,`).
+        status:
+          type: string
+          enum: [pass, partial, fail]
+        evidence_source_url:
+          type: string
+          format: uri
+          nullable: true
+
+    DimensionRubricView:
+      type: object
+      description: |
+        Per-dimension panel rendered on the O+ /dimensions surface. Per
+        audit finding #5 + the FE DimensionsData type.
+      required: [num, label, score, status, rubric_items]
+      properties:
+        num:
+          type: integer
+          minimum: 1
+          maximum: 4
+        label:
+          $ref: "#/components/schemas/OPlusIMDADimensionLabel"
+        score:
+          type: integer
+          minimum: 0
+          maximum: 100
+        status:
+          $ref: "#/components/schemas/OPlusDimensionStatus"
+        description:
+          type: string
+        rubric_items:
+          type: array
+          items:
+            $ref: "#/components/schemas/RubricItemView"
+
+    DimensionsResponse:
+      allOf:
+        - $ref: "#/components/schemas/OPlusEnvelope"
+        - type: object
+          required: [dimensions]
+          properties:
+            dimensions:
+              type: array
+              items:
+                $ref: "#/components/schemas/DimensionRubricView"
+
+    AgentStatsView:
+      type: object
+      description: |
+        24h-rolling per-agent aggregate emitted by chora-observability.
+      required: [invocations_24h, p95_latency_ms, refusal_rate]
+      properties:
+        invocations_24h:
+          type: integer
+          minimum: 0
+        p95_latency_ms:
+          type: number
+          format: double
+        refusal_rate:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+
+    AgentView:
+      type: object
+      description: |
+        One agent within a crew. `cloud_trace_template_url` powers the
+        "View in Cloud Trace ↗" deep-link button per anchoring-decision #2.
+        (The Vertex AI Agent Engine deep-link was removed — decommissioned
+        per ADR-169.)
+      required: [agent_id, stats]
+      properties:
+        agent_id:
+          type: string
+        role:
+          type: string
+        engine_id:
+          type: string
+        cloud_trace_template_url:
+          type: string
+          format: uri
+        stats:
+          $ref: "#/components/schemas/AgentStatsView"
+
+    CrewView:
+      type: object
+      required: [crew_name, agents]
+      properties:
+        crew_name:
+          type: string
+        crew_id:
+          type: string
+        agents:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentView"
+
+    AgentsBodyResponse:
+      allOf:
+        - $ref: "#/components/schemas/OPlusEnvelope"
+        - type: object
+          required: [crews]
+          properties:
+            crews:
+              type: array
+              items:
+                $ref: "#/components/schemas/CrewView"
+
+    EvalMetricSummaryView:
+      type: object
+      description: |
+        Per-metric autorater aggregate within one crew member. Averages are
+        PER metric (safety is binary 0/1, instruction_following is a 1-5
+        Likert) — never blended across metrics.
+      required: [metric, count, avg_score]
+      properties:
+        metric:
+          type: string
+        count:
+          type: integer
+          minimum: 0
+        avg_score:
+          type: number
+          format: double
+
+    EvalAdversarialSummaryView:
+      type: object
+      description: "Red-team outcome aggregate within one crew member."
+      required: [total, blocked, leaked]
+      properties:
+        total:
+          type: integer
+          minimum: 0
+        blocked:
+          type: integer
+          minimum: 0
+        leaked:
+          type: integer
+          minimum: 0
+
+    EvalMemberView:
+      type: object
+      description: |
+        One crew member within a crew run. `vertex_experiment_url` powers the
+        "View in Vertex Experiments ↗" deep-link per the AgentView precedent
+        (anchoring-decision #2).
+      required: [experiment, member_label, autorater_metrics, adversarial]
+      properties:
+        experiment:
+          type: string
+        member_label:
+          type: string
+          description: "Short display label derived from experiment (e.g. `qgen-question`)."
+        vertex_experiment_url:
+          type: string
+          format: uri
+          nullable: true
+        autorater_metrics:
+          type: array
+          items:
+            $ref: "#/components/schemas/EvalMetricSummaryView"
+        adversarial:
+          allOf:
+            - $ref: "#/components/schemas/EvalAdversarialSummaryView"
+          nullable: true
+          description: "Null when the run had no adversarial rows."
+
+    EvalCrewRunView:
+      type: object
+      description: |
+        One crew run keyed by `candidate_label` (shared by all members).
+        `bigquery_url` powers the "View in BigQuery ↗" deep-link to the
+        `agent_eval_evidence` view.
+      required: [candidate_label, last_recorded_at, members]
+      properties:
+        candidate_label:
+          type: string
+        last_recorded_at:
+          type: string
+          format: date-time
+        bigquery_url:
+          type: string
+          format: uri
+          nullable: true
+        members:
+          type: array
+          items:
+            $ref: "#/components/schemas/EvalMemberView"
+
+    EvalRunsResponse:
+      allOf:
+        - $ref: "#/components/schemas/OPlusEnvelope"
+        - type: object
+          required: [runs]
+          properties:
+            runs:
+              type: array
+              items:
+                $ref: "#/components/schemas/EvalCrewRunView"
+
+    EvalEvidenceRowView:
+      type: object
+      required: [experiment, kind, row_index, metric, score, recorded_at]
+      properties:
+        experiment:
+          type: string
+        kind:
+          type: string
+          enum: [autorater, adversarial]
+        case_id:
+          type: string
+        row_index:
+          type: integer
+        metric:
+          type: string
+        score:
+          type: number
+          format: double
+        adversarial_verdict:
+          type: string
+          nullable: true
+        explanation:
+          type: string
+        prompt:
+          type: string
+        response:
+          type: string
+        reference:
+          type: string
+          nullable: true
+        recorded_at:
+          type: string
+          format: date-time
+
+    EvalEvidenceResponse:
+      allOf:
+        - $ref: "#/components/schemas/OPlusEnvelope"
+        - type: object
+          required: [candidate_label, rows]
+          properties:
+            candidate_label:
+              type: string
+            rows:
+              type: array
+              items:
+                $ref: "#/components/schemas/EvalEvidenceRowView"
+
+    GovernanceDecisionView:
+      type: object
+      description: |
+        Per-decision row rendered in the O+ Governance > Decision Traces
+        tab. Per audit finding #1 — FE-canonical fields derived from the
+        producer AgentDecisionRow:
+          - `workflow_id` ← `correlation_id` (falls back to `log_id`)
+          - `agent_slug` ← lowercase-hyphenated AGID/agent_id
+          - `decision_type` ← `decision_kind` (falls back to `decision`)
+          - `hitl_status` ← derived from `autonomy_level` + `acted_upon`
+          - `model` ← `model_id`
+          - `cost` ← formatted USD string (e.g. `$0.0021`)
+      required:
+        - id
+        - workflow_id
+        - agent
+        - agent_slug
+        - decision_type
+        - hitl_status
+        - model
+        - confidence
+        - cost
+        - timestamp
+        - trace_id
+      properties:
+        id:
+          type: string
+        workflow_id:
+          type: string
+        agent:
+          type: string
+        agent_slug:
+          type: string
+        decision_type:
+          type: string
+        hitl_status:
+          type: string
+          enum: [pending, approved, rejected, auto]
+        model:
+          type: string
+        confidence:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+        cost:
+          type: string
+          description: "Pre-formatted USD string (e.g. `$0.0021`). Empty when cost is unknown."
+        timestamp:
+          type: string
+          format: date-time
+        trace_id:
+          type: string
+          nullable: true
+        cloud_trace_url:
+          type: string
+          format: uri
+          nullable: true
+
+    GovernanceHitlView:
+      type: object
+      description: |
+        Per-HITL row rendered in the O+ Governance > Oversight tab. Per
+        audit finding #2. `assignee` is nullable JSON — `null` means
+        unassigned (default at creation). The FE renders `null` as the
+        localised "unassigned" string; the BFF NEVER substitutes a
+        synthetic placeholder per [[feedback-no-stubs-real-wiring]].
+      required:
+        - id
+        - workflow_id
+        - gate
+        - agent
+        - summary
+        - autonomy_level
+        - waiting_since
+        - assignee
+      properties:
+        id:
+          type: string
+        workflow_id:
+          type: string
+        gate:
+          type: string
+          enum: [question_review, report_review, material_decision]
+        agent:
+          type: string
+        summary:
+          type: string
+        autonomy_level:
+          type: string
+          description: "ADR-141 lowercase label (`hootl|hotl|hitl_l0|hitl_l1|hitl_l2`)."
+        waiting_since:
+          type: string
+          format: date-time
+        assignee:
+          type: string
+          nullable: true
+
+    GovernanceTabsResponse:
+      allOf:
+        - $ref: "#/components/schemas/OPlusEnvelope"
+        - type: object
+          required: [decisions, hitl_pending, data_lineage]
+          properties:
+            decisions:
+              type: array
+              items:
+                $ref: "#/components/schemas/GovernanceDecisionView"
+            hitl_pending:
+              type: array
+              items:
+                $ref: "#/components/schemas/GovernanceHitlView"
+            data_lineage:
+              description: |
+                Hand-curated lineage / RACI payload. When a YAML config is
+                wired via `CHORA_GATEWAY_DATA_LINEAGE_PATH` the raw YAML
+                string is forwarded for client-side parsing; otherwise a
+                small default object is emitted.
+              oneOf:
+                - type: string
+                  description: "Raw YAML string when CHORA_GATEWAY_DATA_LINEAGE_PATH is set."
+                - type: object
+                  additionalProperties: true
+
+    OPlusA2ATrustLevel:
+      type: string
+      description: |
+        FE-canonical A2A trust pill (lowercase three-bucket signal).
+        Distinct from the proto `TrustLevel`
+        (`UNTRUSTED|BASIC|VERIFIED|PARTNER`).
+      enum: [verified, pilot, experimental]
+
+    A2AContractView:
+      type: object
+      description: |
+        Per-contract row rendered on the O+ A2A console. Per audit finding
+        #4: `contract_id → id`, `partner` display-name lookup, computed
+        `scope[]`, `last_invocation`, `invocations_30d`.
+      required: [id, partner, agid, scope, status, last_invocation, invocations_30d, created_at]
+      properties:
+        id:
+          type: string
+        partner:
+          type: string
+        agid:
+          type: string
+        scope:
+          type: array
+          items:
+            type: string
+        status:
+          type: string
+        last_invocation:
+          type: string
+          format: date-time
+          nullable: true
+        invocations_30d:
+          type: integer
+          minimum: 0
+        created_at:
+          type: string
+          format: date-time
+
+    A2AExternalAgentView:
+      type: object
+      description: |
+        Per-external-agent row rendered on the O+ A2A console. Per audit
+        finding #4: rename `identities → external_agents`, add
+        `trust_level`, `key_fingerprint`, `rotated_at`. Both
+        `trust_level` and `key_fingerprint` are PASS-THROUGH from the
+        chora-a2a-gateway producer (oplus_router.registrationToOPlusMap)
+        per [[feedback-no-stubs-real-wiring]] — the BFF does NOT
+        fabricate defaults.
+      required: [agid, partner, trust_level, key_fingerprint, rotated_at]
+      properties:
+        agid:
+          type: string
+        partner:
+          type: string
+        trust_level:
+          $ref: "#/components/schemas/OPlusA2ATrustLevel"
+        key_fingerprint:
+          type: string
+          description: |
+            SHA-256 hex of the registered Ed25519 PEM. Empty string when
+            no key has been uploaded yet — NEVER `sha256(agid)`.
+        rotated_at:
+          type: string
+          description: |
+            Most recent identity rotation timestamp (RFC3339). Falls back
+            to the producer `created_at` for legacy payloads.
+
+    A2AInvocationView:
+      type: object
+      description: |
+        Per-invocation row rendered on the O+ A2A console. Per audit
+        finding #4: `invocation_id → id`, `outcome → status` (mapped to
+        `success | denied | error`), `started_at → timestamp`; computed
+        `endpoint` + `latency_ms`. `endpoint` carries the producer
+        dispatch URL pass-through; empty string is the honest-null
+        contract for legacy rows.
+      required: [id, contract_id, agid, partner, endpoint, status, latency_ms, timestamp]
+      properties:
+        id:
+          type: string
+        contract_id:
+          type: string
+        agid:
+          type: string
+        partner:
+          type: string
+        endpoint:
+          type: string
+        status:
+          type: string
+          enum: [success, denied, error]
+        latency_ms:
+          type: integer
+          minimum: 0
+        timestamp:
+          type: string
+          format: date-time
+
+    A2AResponse:
+      description: |
+        `/bff/oplus/a2a` body shape — two modes per Phase B6. `mode:
+        'live'` populates `contracts` + `external_agents` + `invocations`.
+        `mode: 'pending'` is the explicit deployment-pending signal
+        (chora-a2a backend not yet wired); the FE renders an "A2A
+        backend deployment pending" banner over the `mock` payload.
+      allOf:
+        - $ref: "#/components/schemas/OPlusEnvelope"
+        - type: object
+          required: [mode]
+          properties:
+            mode:
+              type: string
+              enum: [live, pending]
+            contracts:
+              type: array
+              items:
+                $ref: "#/components/schemas/A2AContractView"
+            external_agents:
+              type: array
+              items:
+                $ref: "#/components/schemas/A2AExternalAgentView"
+            invocations:
+              type: array
+              items:
+                $ref: "#/components/schemas/A2AInvocationView"
+            mock:
+              type: object
+              additionalProperties: true
+              description: "Deployment-pending mock payload (present when `mode == 'pending'`)."
+
+    # -------------------------------------------------------------------------
+    # N13 — HITL claim + release request / response schemas.
+    #
+    # `HITLDecisionItem` mirrors the chora-governance `hitlPendingItem` shape
+    # (see `governance-admin.yaml#/components/schemas/HITLDecision`). Inlined
+    # here rather than `$ref`-d cross-file to keep the BFF contract
+    # self-contained — the FE only consumes the BFF spec.
+    # -------------------------------------------------------------------------
+    HITLActionRequest:
+      type: object
+      description: |
+        Request body for
+        `POST /bff/oplus/governance/hitl/{id}/{claim|release|approve|reject}`.
+        `operator_gcid` is the AUDITOR's own GCID — the FE reads it from the
+        active Chora-session JWT, NEVER from a user-picked field. `note` is an
+        OPTIONAL free-text verdict rationale forwarded ONLY by the
+        approve/reject actions; claim/release accept the field but ignore it.
+      required: [operator_gcid]
+      properties:
+        operator_gcid:
+          type: string
+          format: uuid
+          description: |
+            UUIDv7 of the auditor performing the action. Blank string is
+            rejected with 422 at the BFF before the upstream is called.
+        note:
+          type: string
+          description: |
+            Optional operator verdict rationale (approve/reject only). Trimmed
+            BFF-side; an empty/omitted note is NOT forwarded upstream. Unknown
+            keys other than operator_gcid + note are rejected with 422
+            (the BFF decoder sets DisallowUnknownFields).
+
+    HITLDecisionItem:
+      type: object
+      description: |
+        Per-row projection of the chora_governance `hitl_decision_log`
+        aggregate, returned as the body of a successful claim/release. Same
+        shape as `HITLDecision` in `governance-admin.yaml` (inlined here
+        for FE consumption).
+
+        `operator_gcid` vs `assignee_gcid` — SEMANTICALLY DISTINCT:
+          - `operator_gcid` is the auditor who DECIDED the gate (verdict-time).
+          - `assignee_gcid` is the auditor currently RESPONSIBLE for a
+            pending gate (`null` = unassigned; cleared on release).
+      required: [decision_id, run_id, decision, autonomy_level, lifecycle_stage]
+      properties:
+        decision_id:
+          type: string
+          format: uuid
+        run_id:
+          type: string
+          format: uuid
+        operator_gcid:
+          type: string
+          format: uuid
+          description: |
+            Auditor GCID who recorded the verdict. Empty/omitted while the
+            gate is still pending.
+        assignee_gcid:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            Auditor GCID currently responsible for the pending gate.
+            `null` = unassigned (default at creation; cleared on release).
+        decision:
+          type: string
+          description: |
+            HitlVerdict — `pending` while the gate is awaiting a verdict;
+            otherwise one of `approve | reject | edit`.
+        autonomy_level:
+          type: string
+          description: "ADR-141 lowercase label (`hootl|hotl|hitl_l0|hitl_l1|hitl_l2`)."
+        edit_payload:
+          type: object
+          additionalProperties: true
+          nullable: true
+          description: "Operator-supplied edits when `decision == 'edit'`."
+        lifecycle_stage:
+          type: string
+          enum: [ci_pre_merge, pre_deploy, runtime, post_deploy]
+        decided_at:
+          type: string
+          format: date-time
+          description: "RFC3339 verdict timestamp (empty for pending rows)."
+
+    SetupTenantRequest:
+      type: object
+      required: [current_step, identity]
+      description: |
+        Wire shape for the Setup Wizard step 4 Apply aggregator. Mirrors
+        the FE TenantSetupService payload. `branding` + `add_ons` echo
+        the wizard's step 1 + step 2 selections back to the BFF so the
+        BFF can revisit prior persistence if step 4 retries after a
+        partial failure (currently no-op — pending CHO-1693 hardening).
+      properties:
+        current_step:
+          type: integer
+          minimum: 0
+          maximum: 4
+          description: "Wizard step at submission time (always 3 in this release)."
+        branding:
+          type: object
+          description: "Echo of step 1 branding selection."
+          properties:
+            primary_color_hex: { type: string }
+            logo_url: { type: string }
+        add_ons:
+          type: array
+          description: "Echo of step 2 add-on selections."
+          items:
+            type: string
+        identity:
+          $ref: "#/components/schemas/SetupTenantIdentitySlice"
+
+    SetupTenantIdentitySlice:
+      type: object
+      required: [provider_type]
+      description: |
+        Step 3 identity slice — forwarded to chora-identity's
+        UpsertTenantIdpProviderRequest (identity-admin.yaml). `client_secret`
+        is `writeOnly`: the BFF passes it through to identity (which
+        stashes it in Secret Manager) but it MUST NOT appear in any
+        response.
+      properties:
+        provider_type:
+          type: string
+          enum: [oidc, saml, singpass]
+        client_id: { type: string }
+        client_secret:
+          type: string
+          writeOnly: true
+        discovery_url: { type: string }
+        singpass_enabled: { type: boolean }
+
+    SetupTenantResponse:
+      type: object
+      required: [idp_provider, finish_setup]
+      description: |
+        Combined success payload — identity's persisted aggregate (no
+        `client_secret`) + tenancy's finish-setup envelope. The FE uses
+        `finish_setup.newly_completed` to decide whether to show the
+        "Tenant configured!" toast vs. the re-entry banner.
+      properties:
+        idp_provider:
+          description: "Persisted IdP aggregate from identity (mirrors TenantIdpProviderResponse)."
+          type: object
+        finish_setup:
+          description: "Tenancy finish-setup envelope (mirrors FinishMyTenantSetupResponse)."
+          type: object
+
+security:
+  - BearerGCID: []

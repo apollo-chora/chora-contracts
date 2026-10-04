@@ -1,0 +1,64 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Tenancy — InvoiceIssued
+  version: 1.0.0
+  description: |
+    Published when a new invoice is issued (Stripe invoice.created webhook).
+    Triggers Notifications email-the-billing-contact flow.
+
+    Note: Billing lives in the COMBINED `chora.tenancy.*` namespace —
+    there is NO separate `chora.billing.*`.
+
+    - Domain: Tenancy + Billing (`chora_tenancy` DB)
+    - Topic: `chora.tenancy.billing.invoice_issued.v1`
+    - Source proto: `proto/events/tenancy/billing.proto`
+       message `chora.tenancy.v1.InvoiceIssued`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  invoiceIssued:
+    address: chora.tenancy.billing.invoice_issued.v1
+    messages:
+      invoiceIssued:
+        $ref: '#/components/messages/InvoiceIssued'
+
+operations:
+  publishInvoiceIssued:
+    action: send
+    channel:
+      $ref: '#/channels/invoiceIssued'
+    messages:
+      - $ref: '#/channels/invoiceIssued/messages/invoiceIssued'
+
+  consumeInvoiceIssued:
+    action: receive
+    channel:
+      $ref: '#/channels/invoiceIssued'
+    description: |
+      Consumers: Notifications (billing email), Observability
+      (revenue KPI), Audit log.
+    messages:
+      - $ref: '#/channels/invoiceIssued/messages/invoiceIssued'
+
+components:
+  messages:
+    InvoiceIssued:
+      name: InvoiceIssued
+      title: Invoice Issued
+      summary: An invoice has been issued for a tenant
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/tenancy/billing.proto#/chora.tenancy.v1.InvoiceIssued'

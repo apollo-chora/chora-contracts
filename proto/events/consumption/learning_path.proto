@@ -1,0 +1,140 @@
+// =============================================================================
+// Chora Content Consumption — LearningPath events
+// =============================================================================
+//
+// Aggregate root: LearningPath (collection over atoms; QUERIES atoms, never owns).
+// Owning domain : Content Consumption (chora_consumption DB).
+// Topic prefix  : chora.consumption.path.*
+//
+// Source-of-truth:
+//   - docs/architecture-review-inputs-2026-05-07.md Tier 1 D1 + Tier 2 D7/D8
+//   - .claude/skills/domain-content-consumption/SKILL.md
+//   - .claude/rules/ddd-enforcement.md
+//
+// Modes (bimodal delivery, per skill):
+//   - STRAIGHT_UP    — linear cert track ("complete atoms 1..N")
+//   - GRAPH_DISCOVERY — curiosity-driven traversal of KnowledgeGraph
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.consumption.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/consumption/v1;consumptionv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// PathMode — bimodal delivery selector for a LearningPath.
+enum PathMode {
+  PATH_MODE_UNSPECIFIED = 0;
+  PATH_MODE_STRAIGHT_UP = 1;     // Linear certification track
+  PATH_MODE_GRAPH_DISCOVERY = 2; // Curiosity-driven KG traversal
+}
+
+// PathEnrolled — emitted when a learner enrolls in a LearningPath.
+//
+// Topic: chora.consumption.path.enrolled.v1
+// Consumers: Sharing (XP onboarding bonus), Notifications (welcome nudge),
+//            Delivery (cert-track progress init), Observability.
+message PathEnrolled {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // LearningPath aggregate root ID (UUIDv7).
+  string path_id = 2;
+
+  // Learner's GCID (UUIDv7, opaque, cross-tenant portable).
+  string learner_gcid = 3;
+
+  // Atoms referenced by this path. UUIDs; NO FK constraints across DB
+  // (cross-DB queries forbidden — see ddd-enforcement).
+  repeated string atom_ids = 4;
+
+  // Bimodal mode at enrolment time. Mode is sticky for the path attempt.
+  PathMode mode = 5;
+
+  // Total step count for STRAIGHT_UP mode (= atom_ids.size()).
+  // Zero / unset for GRAPH_DISCOVERY mode where total is open-ended.
+  int32 total_steps = 6;
+
+  // When the learner enrolled (producer clock).
+  google.protobuf.Timestamp enrolled_at = 7;
+}
+
+// PathStepCompleted — emitted when a single step in a path is marked done.
+//
+// Topic: chora.consumption.path.step_completed.v1
+// Consumers: Sharing (XP per-step), Notifications (encouragement),
+//            Observability.
+message PathStepCompleted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string path_id = 2;
+  string learner_gcid = 3;
+
+  // Atom completed at this step.
+  string atom_id = 4;
+
+  // 1-based step index for STRAIGHT_UP mode.
+  // For GRAPH_DISCOVERY, set to current_step in arrival order.
+  int32 current_step = 5;
+
+  // Cumulative completion percentage (0.0–1.0). Computed by producer.
+  float completion_percentage = 6;
+
+  PathMode mode = 7;
+
+  google.protobuf.Timestamp completed_at = 8;
+}
+
+// PathCompleted — emitted when a learner finishes the entire path.
+//
+// Topic: chora.consumption.path.completed.v1
+// Consumers: Delivery (certification issuance trigger),
+//            Sharing (post brag, leaderboard bump),
+//            Notifications (congratulations).
+message PathCompleted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string path_id = 2;
+  string learner_gcid = 3;
+
+  // All atoms covered (final list — may differ from PathEnrolled.atom_ids
+  // if path was adaptively expanded in GRAPH_DISCOVERY mode).
+  repeated string atom_ids = 4;
+
+  // Step count actually traversed (== atom_ids.size() for STRAIGHT_UP).
+  int32 current_step = 5;
+
+  // Always 1.0 at completion (kept for schema symmetry with step_completed).
+  float completion_percentage = 6;
+
+  PathMode mode = 7;
+
+  google.protobuf.Timestamp completed_at = 8;
+}
+
+// PathAbandoned — emitted when a learner explicitly abandons or times out.
+//
+// Topic: chora.consumption.path.abandoned.v1
+// Consumers: Notifications (re-engagement nudge),
+//            Observability (retention metrics).
+message PathAbandoned {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string path_id = 2;
+  string learner_gcid = 3;
+
+  repeated string atom_ids = 4;
+
+  // Step the learner reached before abandoning (1-based; 0 if never started).
+  int32 current_step = 5;
+
+  // Progress at abandonment (0.0–1.0).
+  float completion_percentage = 6;
+
+  PathMode mode = 7;
+
+  // When the abandonment was recorded.
+  google.protobuf.Timestamp abandoned_at = 8;
+}

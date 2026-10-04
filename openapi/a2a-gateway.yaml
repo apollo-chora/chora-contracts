@@ -1,0 +1,967 @@
+openapi: "3.2.0"
+info:
+  title: Chora A2A Gateway API
+  version: "2.1.0"
+  description: |
+    Agent-to-Agent (A2A) Gateway external-facing REST API per ADR-132.
+
+    This contract is served via GCP API Gateway (NOT the primary GCLB
+    ingress). External agents call here to:
+      1. Declare contracts (outbound capability registration).
+      2. Invoke Chora-side agent capabilities.
+      3. Register / lookup external agents.
+      4. Execute mutual-auth handshakes.
+
+    Identity model (ADR-132):
+      - Both endpoints of an invocation are AGIDs (UUIDv7), NOT GCIDs.
+      - AGIDs CANNOT hold TenantMembership.
+      - External agents are addressed by `external_agid`.
+
+    Auth — DUAL MODE:
+      - Internal callers (Chora services / admins) use Identity Platform
+        JWT Bearer tokens. Tenant scope from JWT `chora_tenant` claim.
+      - External callers use a JWS-signed request envelope where the
+        `external_agid` claim binds the call to a registered ExternalAgent
+        public key. The Gateway verifies the JWS before any routing.
+
+    Owning team   : Team 3 (Platform)
+    Owning domain : Agent-to-Agent (chora_a2a database)
+    Topic prefix  : chora.a2a.*
+
+    All inbound payloads are tainted as `untrusted` and MUST pass through
+    the Guardrail Service before reaching any Chora-side agent.
+
+    AP-01: This contract exists BEFORE implementation.
+  contact:
+    name: Chora Platform Team — Platform Track
+  license:
+    name: Proprietary
+
+servers:
+  - url: https://a2a.chora.site
+    description: Production (GCP API Gateway)
+  - url: http://localhost:8095
+    description: Local development
+
+security:
+  - bearerAuth: []
+  - jwsAuth: []
+
+tags:
+  - name: Contracts
+    description: A2A capability contract declaration + lifecycle
+  - name: Invocations
+    description: Cross-agent capability invocation lifecycle
+  - name: ExternalAgents
+    description: External agent identity registration + lookup
+  - name: Handshake
+    description: Mutual authentication between Chora and external agents
+  - name: OPlusA2A
+    description: |
+      Read-only A2A listing endpoints consumed by the O+ A2A Console via
+      the chora-gateway BFF. Per ADR-132 §6 + the O+ hydration plan,
+      each list row is projected with the FE-canonical lowercase
+      `trust_level` enum (`verified` / `pilot` / `experimental`) and the
+      real SHA-256 `key_fingerprint` derived from the registered Ed25519
+      PEM. Per [[feedback-no-stubs-real-wiring]] empty/null is honest —
+      `key_fingerprint` is emitted as an empty string when no
+      ExternalAgentIdentity is on file (never `sha256(agid)`).
+  - name: Health
+    description: Service health
+
+paths:
+  # ---------------------------------------------------------------------------
+  # Health
+  # ---------------------------------------------------------------------------
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Service health check
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  # ---------------------------------------------------------------------------
+  # Contracts
+  # ---------------------------------------------------------------------------
+  /a2a/contracts:
+    post:
+      operationId: declareContract
+      summary: Declare an outbound A2A capability contract
+      description: |
+        Used by a Chora-side agent (via internal JWT) to declare a
+        capability that external agents may invoke. Declaration is NOT
+        active — platform_ops must approve before invocations route. Emits
+        `chora.a2a.contract.declared.v1`.
+      tags: [Contracts]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeclareContractRequest"
+      responses:
+        "201":
+          description: Contract declared (pending approval)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/A2AContractResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  # ---------------------------------------------------------------------------
+  # Invocations
+  # ---------------------------------------------------------------------------
+  /a2a/invocations:
+    post:
+      operationId: createInvocation
+      summary: Invoke an A2A capability
+      description: |
+        Initiates a fresh invocation against a previously approved contract.
+        Inbound calls from external agents MUST carry a JWS signature with
+        an `external_agid` claim. The Gateway:
+          1. Verifies the JWS against the agent's registered public key.
+          2. Validates contract status (must be APPROVED, not REVOKED).
+          3. Runs the request payload through the Guardrail Service
+             (taint_level = untrusted).
+          4. Routes to the owning Chora-side agent.
+          5. Emits `chora.a2a.invocation.started.v1`.
+      tags: [Invocations]
+      parameters:
+        - $ref: "#/components/parameters/X-A2A-Signature"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateInvocationRequest"
+      responses:
+        "202":
+          description: Invocation accepted (asynchronous)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/A2AInvocationResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Guardrail block, scope exceeded, or contract revoked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /a2a/invocations/{invocationId}:
+    get:
+      operationId: getInvocation
+      summary: Get invocation status / result
+      description: |
+        Returns the current state of an invocation. For asynchronous
+        skills, callers poll this endpoint until status terminates.
+      tags: [Invocations]
+      parameters:
+        - $ref: "#/components/parameters/InvocationID"
+      responses:
+        "200":
+          description: Invocation details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/A2AInvocationResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---------------------------------------------------------------------------
+  # External Agents
+  # ---------------------------------------------------------------------------
+  /a2a/external-agents/register:
+    post:
+      operationId: registerExternalAgent
+      summary: Register an inbound external agent
+      description: |
+        External orgs register their agents by submitting their public
+        key + verified DNS domain. Platform_ops review may follow before
+        any contract approvals reference the AGID. Emits
+        `chora.a2a.external_agent.registered.v1`.
+      tags: [ExternalAgents]
+      security:
+        - jwsAuth: []
+      parameters:
+        - $ref: "#/components/parameters/X-A2A-Signature"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterExternalAgentRequest"
+      responses:
+        "201":
+          description: Agent registered (initial trust UNTRUSTED)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExternalAgentResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          description: Domain or public key already registered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /a2a/external-agents/{agid}:
+    get:
+      operationId: getExternalAgent
+      summary: Lookup an external agent by AGID
+      description: |
+        Returns public-facing metadata for an external agent (no PII).
+        Used by Chora-side services to display partner info on O+ +
+        validate counterparty AGIDs prior to invocation.
+      tags: [ExternalAgents]
+      parameters:
+        - $ref: "#/components/parameters/AGID"
+      responses:
+        "200":
+          description: External agent details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExternalAgentResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---------------------------------------------------------------------------
+  # Handshake
+  # ---------------------------------------------------------------------------
+  /a2a/handshake:
+    post:
+      operationId: mutualHandshake
+      summary: Mutual auth handshake between Chora and an external agent
+      description: |
+        Two-step exchange:
+          1. External agent sends a JWS-signed nonce.
+          2. Gateway verifies the signature, returns a Chora-signed
+             response nonce, and issues a short-lived session token
+             (15-minute TTL) for use on subsequent /a2a/invocations calls.
+      tags: [Handshake]
+      security:
+        - jwsAuth: []
+      parameters:
+        - $ref: "#/components/parameters/X-A2A-Signature"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HandshakeRequest"
+      responses:
+        "200":
+          description: Handshake accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HandshakeResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Agent suspended or deregistered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ---------------------------------------------------------------------------
+  # O+ A2A Console listings (read-only)
+  #
+  # Consumed by the chora-gateway BFF `/bff/oplus/a2a` aggregator. NO row
+  # carries a `gcid` field — A2A audit is AGID-only (CLAUDE.md §1). Each
+  # row reflects REAL backend state per [[feedback-no-stubs-real-wiring]].
+  # ---------------------------------------------------------------------------
+  /api/v1/a2a/contracts:
+    get:
+      operationId: listA2AContracts
+      summary: List all non-deleted A2A capability contracts
+      description: |
+        Returns every non-deleted contract from `chora_a2a`. Backs the O+
+        A2A Console contracts panel via the chora-gateway BFF
+        `/bff/oplus/a2a` aggregator (Phase C).
+      tags: [OPlusA2A]
+      responses:
+        "200":
+          description: Contracts listed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OPlusContractsListResponse"
+
+  /api/v1/a2a/identities:
+    get:
+      operationId: listA2AIdentities
+      summary: List all non-deleted partner registrations (AGIDs)
+      description: |
+        Returns one row per non-deleted partner registration with the
+        FE-canonical projection used by the O+ A2A Console. Trust pill
+        is derived from real backend signals (Registration state +
+        DNS-verification + approval age + recent-invocation error rate
+        — see `partner.DeriveTrustLevelView`). Key fingerprint is the
+        SHA-256 hex of the registered Ed25519 PEM when an
+        `ExternalAgentIdentity` is on file; emitted as an EMPTY STRING
+        when no key has been uploaded yet (never `sha256(agid)` per
+        [[feedback-no-stubs-real-wiring]]). Rotated_at carries the
+        latest of registration / `Rotate` calls; empty when no key is
+        on file.
+      tags: [OPlusA2A]
+      responses:
+        "200":
+          description: Partner registrations listed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OPlusIdentitiesListResponse"
+
+  /api/v1/a2a/invocations:
+    get:
+      operationId: listA2AInvocations
+      summary: List A2A invocations (optionally filtered by start time)
+      description: |
+        Returns invocations from `chora_a2a.a2a_invocation_log`, sorted
+        newest-first. Accepts an optional `since` RFC3339 filter on
+        `started_at` (use the BFF default of `now-24h` for the O+ Console).
+        Each row preserves the honest-null contract on `endpoint`: the
+        field is omitted (rather than backfilled with a placeholder) when
+        the dispatcher did not resolve a target.
+      tags: [OPlusA2A]
+      parameters:
+        - name: since
+          in: query
+          required: false
+          description: "RFC3339 lower bound on `started_at` (inclusive). When omitted, returns all non-deleted invocations."
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: Invocations listed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OPlusInvocationsListResponse"
+        "400":
+          description: Invalid `since` query (must be RFC3339)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Identity Platform JWT for INTERNAL Chora callers. Tenant scope is
+        carried in the `chora_tenant` claim.
+    jwsAuth:
+      type: apiKey
+      in: header
+      name: X-A2A-Signature
+      description: |
+        JWS signature for EXTERNAL agent callers. The signature payload
+        carries an `external_agid` claim that must match a registered
+        ExternalAgent. The Gateway verifies against the agent's stored
+        Ed25519 public key.
+
+  parameters:
+    X-A2A-Signature:
+      name: X-A2A-Signature
+      in: header
+      required: true
+      description: |
+        JWS signature of the canonicalised request body. Required for all
+        external-caller routes. Format: `<protected_header>.<payload>.<signature>`.
+      schema:
+        type: string
+    InvocationID:
+      name: invocationId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    AGID:
+      name: agid
+      in: path
+      required: true
+      description: AGID of the external agent (UUIDv7).
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unauthorized:
+      description: Authentication required or signature verification failed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Forbidden:
+      description: Caller authenticated but lacks permission
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    RateLimited:
+      description: Rate limit exceeded
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status, service]
+      properties:
+        status:
+          type: string
+          example: "ok"
+        service:
+          type: string
+          example: "chora-a2a-gateway"
+
+    ErrorResponse:
+      type: object
+      required: [error, code]
+      properties:
+        error:
+          type: string
+        code:
+          type: string
+          description: |
+            UPPER_SNAKE_CASE taxonomy. A2A examples include
+            CONTRACT_REVOKED, GUARDRAIL_BLOCKED, SCOPE_EXCEEDED,
+            SIGNATURE_INVALID, RATE_LIMITED, AGENT_SUSPENDED.
+        correlation_id:
+          type: string
+          nullable: true
+
+    # -- Shared enums --
+    TrustLevel:
+      type: string
+      enum: [UNTRUSTED, BASIC, VERIFIED, PARTNER]
+
+    ContractStatus:
+      type: string
+      enum: [DECLARED, APPROVED, REVOKED]
+
+    InvocationStatus:
+      type: string
+      enum: [STARTED, COMPLETED, FAILED, GUARDRAIL_BLOCKED]
+
+    GuardrailViolationType:
+      type: string
+      enum: [PII_LEAK, MODEL_ARMOR_BLOCK, SCOPE_EXCEEDED, RATE_LIMIT, AUTH_FAIL]
+
+    # -- Contracts --
+    DeclareContractRequest:
+      type: object
+      required: [capability_name, owning_agid, schema_uri, scopes]
+      properties:
+        capability_name:
+          type: string
+          description: UPPER_SNAKE_CASE skill name (e.g., RECOMMEND_CONTENT).
+        owning_agid:
+          type: string
+          format: uuid
+          description: AGID of the Chora-side capability owner.
+        counterparty_agid:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            Optional pinned external counterparty. Empty for "open"
+            contracts that any verified external agent may invoke.
+        schema_uri:
+          type: string
+          format: uri
+          description: |
+            URI to the JSON Schema describing the request payload.
+            Hosted under /.well-known/agent-skill/{name}.v{N}.json.
+        scopes:
+          type: array
+          items:
+            type: string
+          description: |
+            OAuth-style scope strings the contract requires (e.g.,
+            "consent:topics_only", "data:learner.profile.read").
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    A2AContractResponse:
+      type: object
+      required: [contract_id, capability_name, owning_agid, status, declared_at]
+      properties:
+        contract_id:
+          type: string
+          format: uuid
+        capability_name:
+          type: string
+        owning_agid:
+          type: string
+          format: uuid
+        counterparty_agid:
+          type: string
+          format: uuid
+          nullable: true
+        schema_uri:
+          type: string
+          format: uri
+        scopes:
+          type: array
+          items:
+            type: string
+        status:
+          $ref: "#/components/schemas/ContractStatus"
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        declared_at:
+          type: string
+          format: date-time
+        approved_at:
+          type: string
+          format: date-time
+          nullable: true
+        revoked_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    # -- Invocations --
+    CreateInvocationRequest:
+      type: object
+      required: [contract_id, caller_agid, request_payload]
+      properties:
+        contract_id:
+          type: string
+          format: uuid
+        caller_agid:
+          type: string
+          format: uuid
+          description: |
+            AGID of the calling agent. For external callers this MUST
+            match the JWS `external_agid` claim.
+        request_payload:
+          type: object
+          additionalProperties: true
+          description: |
+            Skill-specific input payload — JSON object validated against
+            the contract's schema_uri.
+
+    A2AInvocationResponse:
+      type: object
+      required: [invocation_id, contract_id, caller_agid, called_agid, status, started_at]
+      properties:
+        invocation_id:
+          type: string
+          format: uuid
+        contract_id:
+          type: string
+          format: uuid
+        caller_agid:
+          type: string
+          format: uuid
+        called_agid:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/InvocationStatus"
+        request_payload_hash:
+          type: string
+          description: SHA-256 hex digest of the canonicalised request payload.
+        response_payload_hash:
+          type: string
+          nullable: true
+        response_payload:
+          type: object
+          additionalProperties: true
+          nullable: true
+          description: Inline response for synchronous skills only.
+        error_code:
+          type: string
+          nullable: true
+        guardrail_violation_type:
+          allOf:
+            - $ref: "#/components/schemas/GuardrailViolationType"
+          nullable: true
+        started_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+        latency_ms:
+          type: integer
+          format: int64
+          nullable: true
+        endpoint:
+          type: string
+          nullable: true
+          description: |
+            Resolved dispatch URL the gateway routed this invocation to
+            (e.g. `https://a2a.chora.site/a2a/invoke#recommend_content`).
+            `null` (or absent) when no endpoint was resolved — legacy
+            rows or scope-denied invocations before routing. Per
+            [[feedback-no-stubs-real-wiring]] the honest-null contract
+            is preserved here; the field is NEVER backfilled with a
+            placeholder like "unknown".
+
+    # -- External agents --
+    RegisterExternalAgentRequest:
+      type: object
+      required: [owner_org_name, owner_org_domain, public_key]
+      properties:
+        owner_org_name:
+          type: string
+          maxLength: 200
+        owner_org_domain:
+          type: string
+          maxLength: 255
+          description: |
+            Verified DNS domain. Domain ownership is proven via TXT
+            record (`_chora-a2a.<domain> TXT chora-a2a-id=<challenge>`)
+            BEFORE this endpoint accepts the registration.
+        public_key:
+          type: string
+          description: Ed25519 public key in PEM format.
+        contact_email:
+          type: string
+          format: email
+          nullable: true
+          description: Operations contact (not a credential).
+
+    ExternalAgentResponse:
+      type: object
+      required: [external_agid, owner_org_name, owner_org_domain, public_key, public_key_fingerprint, trust_level, registered_at]
+      properties:
+        external_agid:
+          type: string
+          format: uuid
+        owner_org_name:
+          type: string
+        owner_org_domain:
+          type: string
+        public_key:
+          type: string
+        public_key_fingerprint:
+          type: string
+          description: SHA-256 hex fingerprint of public_key.
+        trust_level:
+          $ref: "#/components/schemas/TrustLevel"
+        registered_at:
+          type: string
+          format: date-time
+        suspended_at:
+          type: string
+          format: date-time
+          nullable: true
+        deregistered_at:
+          type: string
+          format: date-time
+          nullable: true
+        rotated_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            Most recent identity rotation timestamp (RFC3339), populated
+            from the `ExternalAgentIdentity.UpdatedAt` of the registered
+            Ed25519 key. `null` (or absent) when no key is on file —
+            typical for newly-approved registrations before the partner
+            uploads their public key. Per
+            [[feedback-no-stubs-real-wiring]] no synthetic backfill —
+            the honest empty/null contract is preserved.
+
+    # -- Handshake --
+    HandshakeRequest:
+      type: object
+      required: [external_agid, client_nonce]
+      properties:
+        external_agid:
+          type: string
+          format: uuid
+        client_nonce:
+          type: string
+          description: Base64-url client nonce, min 16 bytes.
+        algorithm:
+          type: string
+          enum: [EdDSA]
+          default: EdDSA
+
+    HandshakeResponse:
+      type: object
+      required: [server_nonce, signature, session_token, expires_at]
+      properties:
+        server_nonce:
+          type: string
+        signature:
+          type: string
+          description: Chora's Ed25519 signature over (client_nonce || server_nonce).
+        session_token:
+          type: string
+          description: |
+            Short-lived bearer-style token to send on subsequent
+            /a2a/invocations calls in addition to the X-A2A-Signature
+            header. TTL = 15 minutes.
+        expires_at:
+          type: string
+          format: date-time
+
+    # -- O+ console projections (FE-canonical, lowercase trust pill) --
+    OPlusTrustLevel:
+      type: string
+      description: |
+        FE-canonical A2A Console trust pill string. Distinct from the
+        `TrustLevel` proto enum (`UNTRUSTED|BASIC|VERIFIED|PARTNER`)
+        emitted on the registration event payload. The lowercase
+        three-bucket signal is derived from the live registration
+        aggregate state + the most recent invocation outcomes — see
+        `partner.DeriveTrustLevelView` for the rule.
+      enum:
+        - verified
+        - pilot
+        - experimental
+
+    OPlusA2AContract:
+      type: object
+      description: |
+        Per-row projection of an A2A contract for the O+ console.
+        Shape mirrors `httpadapter.contractResp` in
+        `services/chora-a2a-gateway/internal/adapter/http/ext_router.go`.
+      required: [id, partner_id, auth_method, capabilities, version, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        partner_id:
+          type: string
+          format: uuid
+        auth_method:
+          type: string
+        capabilities:
+          type: array
+          items:
+            type: object
+            required: [name, tier, rate_limit_per_minute]
+            properties:
+              name:
+                type: string
+              tier:
+                type: string
+              rate_limit_per_minute:
+                type: integer
+        version:
+          type: integer
+        supersedes_id:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        sunset_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    OPlusContractsListResponse:
+      type: object
+      required: [contracts]
+      properties:
+        contracts:
+          type: array
+          items:
+            $ref: "#/components/schemas/OPlusA2AContract"
+
+    OPlusA2AIdentity:
+      type: object
+      description: |
+        Per-row partner registration projection for the O+ A2A Console.
+        `trust_level` is the FE-canonical lowercase enum; the proto
+        `TrustLevel` (`UNTRUSTED|BASIC|VERIFIED|PARTNER`) is NOT used
+        here. `key_fingerprint` is the SHA-256 hex of the registered
+        Ed25519 PEM when an `ExternalAgentIdentity` is on file, else an
+        empty string. `rotated_at` carries the `ExternalAgentIdentity.
+        UpdatedAt` of the on-file key, or empty when none is on file.
+        NO `gcid` field — A2A audit is AGID-only (CLAUDE.md §1).
+      required:
+        - id
+        - org_name
+        - capabilities
+        - requested_rate_limit
+        - state
+        - agid
+        - dns_verified
+        - created_at
+        - trust_level
+        - key_fingerprint
+        - rotated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: "Registration aggregate id (UUIDv7)."
+        org_name:
+          type: string
+        contact_email:
+          type: string
+          format: email
+        capabilities:
+          type: array
+          items:
+            type: string
+        requested_rate_limit:
+          type: integer
+        state:
+          type: string
+          description: "Registration lifecycle state (pending|approved|suspended|...)."
+        agid:
+          type: string
+          format: uuid
+          description: "Partner AGID (UUIDv7). Distinct from GCID."
+        partner_domain:
+          type: string
+          description: "Verified partner DNS domain (when DNS-TXT challenge cleared)."
+        dns_verified:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        trust_level:
+          $ref: "#/components/schemas/OPlusTrustLevel"
+        key_fingerprint:
+          type: string
+          description: |
+            SHA-256 hex of the registered Ed25519 PEM. Empty string when
+            no ExternalAgentIdentity has been uploaded yet (per
+            [[feedback-no-stubs-real-wiring]] — NEVER `sha256(agid)`).
+        rotated_at:
+          type: string
+          description: |
+            RFC3339 timestamp of the most recent identity rotation
+            (`ExternalAgentIdentity.UpdatedAt`). Empty string when no
+            identity is on file.
+
+    OPlusIdentitiesListResponse:
+      type: object
+      required: [identities]
+      properties:
+        identities:
+          type: array
+          items:
+            $ref: "#/components/schemas/OPlusA2AIdentity"
+
+    OPlusA2AInvocation:
+      type: object
+      description: |
+        Per-row invocation projection for the O+ A2A Console. Shape
+        mirrors `httpadapter.invocationToMap` in
+        `services/chora-a2a-gateway/internal/adapter/http/ext_router.go`.
+        Fields with empty/zero values are omitted from the JSON body —
+        notably `endpoint` is OMITTED rather than set to a placeholder
+        when no dispatch URL was resolved (honest-null contract per
+        [[feedback-no-stubs-real-wiring]]).
+      required:
+        - id
+        - agid
+        - partner_id
+        - capability
+        - correlation_id
+        - status
+        - latency_ms
+        - response_size_bytes
+        - error_code
+        - started_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        agid:
+          type: string
+          format: uuid
+        partner_id:
+          type: string
+          format: uuid
+        capability:
+          type: string
+        correlation_id:
+          type: string
+        status:
+          type: string
+          enum: [started, completed, failed, rate_limited, scope_denied]
+          description: "Lowercase invocation lifecycle state (`invocation.Status`)."
+        latency_ms:
+          type: integer
+        response_size_bytes:
+          type: integer
+        error_code:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+        ended_at:
+          type: string
+          format: date-time
+        traceparent:
+          type: string
+          description: "W3C traceparent header value (omitted when empty)."
+        endpoint:
+          type: string
+          description: |
+            Resolved dispatch URL (e.g.
+            `https://a2a.chora.site/a2a/invoke#recommend_content`).
+            OMITTED from the JSON body when empty — never replaced by a
+            placeholder string per [[feedback-no-stubs-real-wiring]].
+
+    OPlusInvocationsListResponse:
+      type: object
+      required: [invocations]
+      properties:
+        invocations:
+          type: array
+          items:
+            $ref: "#/components/schemas/OPlusA2AInvocation"

@@ -1,0 +1,64 @@
+# Chora-LMS Protobuf codegen config — buf v2 schema
+#
+# Generates Go + Python stubs from proto/ into gen/{go,python}/.
+# Frontend consumes GraphQL/REST through the gateway, not generated proto.
+#
+# Run `buf generate` in CI on contract changes; do NOT hand-edit gen/.
+#
+# Managed mode is DISABLED: every .proto declares its own `option go_package`
+# (verified across proto/{common,events,services,chora}/**/*.proto). The
+# managed `go_package_prefix` option globs files by filesystem path, but our
+# by-purpose layout (proto/services/{name}.proto) means many files share a
+# directory yet need DIFFERENT generated Go packages — managed prefix
+# collapses them and protoc-gen-go-grpc rejects with "inconsistent names".
+# Trusting the explicit `option go_package` per-file is the correct fix.
+
+version: v2
+
+plugins:
+  # Go message types
+  #
+  # paths=source_relative preserves directory structure from proto/. For
+  # nested protos (proto/services/sharing/v1/sharing.proto), output lands at
+  # gen/go/services/sharing/v1/ which keeps one Go package per directory.
+  #
+  # The 7 flat service protos (proto/services/{agent_executor,
+  # closure_orchestrator, guardrail_service, langgraph_orchestrator,
+  # model_broker_router, model_broker_gateway, model_broker_classifier}.proto)
+  # land at gen/go/services/ and would collapse 7 different Go packages into
+  # one directory — Go's "one package per directory" rule rejects that.
+  # `scripts/relocate-flat-services.sh` (invoked from `make codegen`) moves
+  # those 7 file-pairs into gen/go/chora/services/{name}/v1/ subdirs to
+  # match their option go_package declarations after `buf generate`.
+  - remote: buf.build/protocolbuffers/go:v1.36.11
+    out: gen/go
+    opt:
+      - paths=source_relative
+
+  # Go gRPC service stubs
+  - remote: buf.build/grpc/go:v1.6.2
+    out: gen/go
+    opt:
+      - paths=source_relative
+
+  # Python message types (used by chora_contracts Pydantic-coexistence layer)
+  #
+  # PINNED to v33.0 (→ "Protobuf Python Version: 6.33.0" gencode). The plugin
+  # was UNPINNED and drifted to v35 (gencode 7.35.0); every Chora Python
+  # service resolves the protobuf RUNTIME to 6.33.x (grpcio-status 1.81 +
+  # google-api-core 2.30 cap protobuf <7), so the 7.35 gencode raised
+  # `VersionError: runtime cannot be older than the linked gencode` on stub
+  # import. Latent until W8 became the first Python runtime consumer of these
+  # gRPC stubs (ModelGatewayImageClient). Pin = gencode <= runtime. Bump in
+  # lockstep with a platform-wide protobuf-runtime bump, never ahead of it.
+  - remote: buf.build/protocolbuffers/python:v33.0
+    out: gen/python
+
+  # Python gRPC service stubs — pinned to match grpcio 1.81 (the _pb2_grpc
+  # files carry no runtime version guard, but pin for reproducibility so a
+  # future `make codegen` doesn't drift the stub shape).
+  - remote: buf.build/grpc/python:v1.71.0
+    out: gen/python
+
+inputs:
+  - directory: proto

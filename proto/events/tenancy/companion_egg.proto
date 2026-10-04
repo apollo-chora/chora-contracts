@@ -1,0 +1,158 @@
+// =============================================================================
+// Chora Tenancy — Companion Egg purchase events (Stripe-driven)
+// =============================================================================
+//
+// Aggregate root: CompanionEggPurchase (1:1 with a Stripe Checkout session).
+// Owning domain : Tenancy + Billing (chora_tenancy DB).
+// Topic prefix  : chora.tenancy.companion_egg.*
+//
+// These events describe the BILLING + PURCHASE lifecycle of Companion eggs
+// per ADR-149. The corresponding CompanionEggPurchased event in the
+// consumption domain (chora.consumption.companion.egg_purchased.v1) is
+// emitted by chora-consumption AFTER it has provisioned the Stage-0
+// companion_instances row in response to CompanionEggPaymentSucceeded.
+//
+// Free-egg paths (trial + subscription_inclusion + tenant_grant) DO NOT
+// flow through these events — they go straight to
+// chora.consumption.companion.egg_purchased.v1 with source != "purchase".
+//
+// Breed is rolled at HATCH (not purchase) per ADR-149 §Breed lootbox. These
+// events therefore do NOT carry breed/species.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.tenancy.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/tenancy/v1;tenancyv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// CompanionEggCheckoutStarted — emitted when chora-tenancy creates a Stripe
+// Checkout session for an egg purchase. The user has NOT yet paid.
+//
+// Topic: chora.tenancy.companion_egg.checkout_started.v1
+// Consumers: Observability (funnel telemetry), Governance (audit trail for
+//            IMDA D1 accountability).
+//
+// DEPRECATED: superseded by chora.payments.companion_egg_purchase.checkout_started.v1 per ADR-164. Drain by 2026-06-30.
+message CompanionEggCheckoutStarted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // CompanionEggPurchase aggregate id (UUIDv7) — same id flows through the
+  // payment_succeeded + chora.consumption.companion.egg_purchased events.
+  string purchase_id = 2;
+
+  // Purchaser GCID (the learner who initiated checkout).
+  string purchaser_gcid = 3;
+
+  // The tenant context the egg is purchased into. May differ from the
+  // purchaser's home tenant if they're cross-tenant browsing.
+  string target_tenant_id = 4;
+
+  // Egg SKU from the tenant's catalog.
+  string egg_sku = 5;
+
+  // Stripe correlation handles.
+  string stripe_session_id = 6;
+  string stripe_checkout_url = 7;
+
+  // Pricing snapshot.
+  int64  amount_cents = 8;
+  string currency = 9;            // ISO 4217
+
+  // Pre-bound focal-atom suggestion from the egg SKU (may be empty).
+  string suggested_focal_atom_id = 10;
+
+  google.protobuf.Timestamp checkout_started_at = 11;
+}
+
+// CompanionEggPaymentSucceeded — emitted on Stripe's checkout.session.completed
+// webhook. chora-consumption subscribes to this and provisions the Stage-0
+// Companion instance, then emits chora.consumption.companion.egg_purchased.v1.
+//
+// Topic: chora.tenancy.companion_egg.payment_succeeded.v1
+// Consumers: Consumption (provisions companion_instances row), Observability
+//            (revenue ledger), Notifications (receipt email), Governance.
+//
+// DEPRECATED: superseded by chora.payments.companion_egg_purchase.payment_captured.v1 per ADR-164. Drain by 2026-06-30.
+message CompanionEggPaymentSucceeded {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string purchase_id = 2;
+  string purchaser_gcid = 3;
+  string target_tenant_id = 4;
+  string egg_sku = 5;
+
+  string stripe_session_id = 6;
+  string stripe_payment_intent_id = 7;
+  string stripe_charge_id = 8;
+
+  int64  amount_cents_paid = 9;
+  int64  amount_cents_refunded = 10;  // 0 unless partial refund post-success
+  string currency = 11;
+
+  string suggested_focal_atom_id = 12;
+
+  google.protobuf.Timestamp paid_at = 13;
+}
+
+// CompanionEggPaymentFailed — emitted when Stripe reports a payment failure
+// (checkout.session.async_payment_failed or charge.failed for offline
+// methods). Cleanup signal — chora-consumption should NOT provision a
+// Companion instance for this purchase.
+//
+// Topic: chora.tenancy.companion_egg.payment_failed.v1
+// Consumers: Observability, Notifications (failure email), Governance.
+//
+// DEPRECATED: superseded by chora.payments.companion_egg_purchase.payment_failed.v1 per ADR-164. Drain by 2026-06-30.
+message CompanionEggPaymentFailed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string purchase_id = 2;
+  string purchaser_gcid = 3;
+  string egg_sku = 4;
+
+  string stripe_session_id = 5;
+  string stripe_failure_code = 6;     // Stripe-defined reason
+  string stripe_failure_message = 7;  // human-readable
+
+  google.protobuf.Timestamp failed_at = 8;
+}
+
+// CompanionEggRefunded — emitted on a Stripe refund (full or partial) of an
+// egg purchase. May be triggered by:
+//   - hard-expiry of unhatched egg (ADR-149 §60d auto-refund-credit)
+//   - support-initiated refund
+//   - tenant policy refund (e.g., "trial mistakenly billed")
+//
+// Topic: chora.tenancy.companion_egg.refunded.v1
+// Consumers: Consumption (must mark the Companion instance as voided + free
+//            up the slot in CompanionRoster), Observability, Notifications.
+//
+// DEPRECATED: superseded by chora.payments.companion_egg_purchase.refunded.v1 per ADR-164. Drain by 2026-06-30.
+message CompanionEggRefunded {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string purchase_id = 2;
+  string purchaser_gcid = 3;
+  string egg_sku = 4;
+
+  string stripe_charge_id = 5;
+  string stripe_refund_id = 6;
+
+  int64  amount_cents_refunded = 7;
+  string currency = 8;
+
+  // Refund reason. One of:
+  //   hard_expiry_unhatched | support_initiated | tenant_policy |
+  //   customer_request | duplicate_charge | fraud
+  string reason = 9;
+
+  // True if the refund yields a mana_credit instead of a real money refund
+  // (per ADR-149 §"Unhatched egg expiry" — 50% credit on hard-expiry path).
+  bool   credit_only = 10;
+
+  google.protobuf.Timestamp refunded_at = 11;
+}

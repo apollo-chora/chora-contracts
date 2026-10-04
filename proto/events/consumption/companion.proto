@@ -1,0 +1,969 @@
+// =============================================================================
+// Chora Content Consumption — Companion (RPG companion DOMAIN ENTITY) events
+// =============================================================================
+//
+// Aggregate root: Companion — RPG learning companion.
+// Owning domain : Content Consumption (chora_consumption DB).
+// Topic prefix  : chora.consumption.companion.*
+//
+// CRITICAL DISTINCTION (per memory feedback_companion_vs_agent):
+//   Companion is a DOMAIN ENTITY with personality / evolution / memories
+//   that a learner sees and interacts with from the frontend. Pure game
+//   mechanics. NO LLM imports. NO prompt strings. NO model identifiers.
+//
+//   The AI agent that POWERS Companion responses (LangGraph orchestrator,
+//   Model Broker calls, RAG retrieval, persona synthesis) is a SEPARATE
+//   adapter concern owned by AI Kernel — emit those events under
+//   chora.ai_kernel.* (NOT here).
+//
+// These events describe the entity's lifecycle only.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.consumption.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/consumption/v1;consumptionv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// CompanionSpecies — RPG-flavoured species taxonomy (game mechanic only).
+// Per project_chora_governance_ai memory the species roster is editorial.
+// New species added as additive enum values within v1.
+enum CompanionSpecies {
+  COMPANION_SPECIES_UNSPECIFIED = 0;
+  COMPANION_SPECIES_OWL = 1;
+  COMPANION_SPECIES_FOX = 2;
+  COMPANION_SPECIES_CAT = 3;
+  COMPANION_SPECIES_DRAGON = 4;
+  COMPANION_SPECIES_PHOENIX = 5;
+  COMPANION_SPECIES_TURTLE = 6;
+  COMPANION_SPECIES_WOLF = 7;
+  COMPANION_SPECIES_RAVEN = 8;
+  COMPANION_SPECIES_PENGUIN = 9;
+}
+
+// CompanionBonded — emitted when a learner first bonds with a Companion.
+//
+// Topic: chora.consumption.companion.bonded.v1
+// Consumers: Sharing (social broadcast), Notifications (welcome).
+message CompanionBonded {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // Companion aggregate root ID (UUIDv7).
+  string companion_id = 2;
+
+  // Owning learner GCID. Multi-Companion per ADR-116 amendment (2026-05-12) +
+  // ADR-147 §7 — a learner may bond multiple specialised Companions (math /
+  // history / coding / ...). CompanionRoster (per ADR-100) enforces the cap.
+  string owner_gcid = 3;
+
+  // Species selected at bonding.
+  CompanionSpecies species = 4;
+
+  // Starting level (always 1 at bonding; explicit for downstream consumers).
+  int32 level = 5;
+
+  // When the bond was formed.
+  google.protobuf.Timestamp bonded_at = 6;
+}
+
+// CompanionLeveledUp — emitted when a Companion's level changes.
+//
+// Topic: chora.consumption.companion.leveled_up.v1
+// Consumers: Sharing (post + reputation), Notifications (celebration).
+message CompanionLeveledUp {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string companion_id = 2;
+  string owner_gcid = 3;
+  CompanionSpecies species = 4;
+
+  // Previous level (before the level-up).
+  int32 previous_level = 5;
+
+  // New level (after the level-up).
+  int32 level = 6;
+
+  google.protobuf.Timestamp leveled_up_at = 7;
+}
+
+// CompanionSkinEquipped — emitted when a DigitalSkin is equipped on a Companion.
+//
+// Topic: chora.consumption.companion.skin_equipped.v1
+// Consumers: Sharing (social), Observability (cosmetic adoption).
+//
+// Note: DigitalSkin is EARNED, never purchasable (per CLAUDE.md domain vocab).
+message CompanionSkinEquipped {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string companion_id = 2;
+  string owner_gcid = 3;
+
+  // DigitalSkin identifier (UUIDv7). Cross-domain UUID.
+  string digital_skin_id = 4;
+
+  // Previously-equipped skin (empty if none / default).
+  string previous_skin_id = 5;
+
+  google.protobuf.Timestamp equipped_at = 6;
+}
+
+// CompanionRetired — emitted when a Companion is permanently retired by its
+// owner (game-mechanic action; distinct from account closure).
+//
+// Topic: chora.consumption.companion.retired.v1
+// Consumers: Sharing (memorial post), Notifications, Observability.
+message CompanionRetired {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string companion_id = 2;
+  string owner_gcid = 3;
+  CompanionSpecies species = 4;
+
+  // Final level at retirement.
+  int32 level = 5;
+
+  // Free-form reason tag (e.g., "owner_choice", "evolution_cap_reached").
+  string reason = 6;
+
+  google.protobuf.Timestamp retired_at = 7;
+}
+
+// ============================================================================
+// Multi-Companion events (per ADR-147 §7 + multi-companion-per-user-2026-05-11.md §2.8)
+// + ADR-116 amendment (2026-05-12, drops 1:1 Companion:user assumption).
+//
+// Every event below carries companion_id (instance discriminator) AND owner_gcid
+// (the owning learner). Consumers SHOULD project both into observability spans
+// for per-Companion dashboards in O+ and engagement analytics in C+.
+// ============================================================================
+
+// CompanionCreated — emitted when a learner creates a new Companion in their roster.
+//
+// Distinct from CompanionBonded: CompanionBonded is the legacy "first ever Companion"
+// event from the 1:1 era; CompanionCreated covers EVERY Companion instance created
+// in the multi-Companion (1:N) model. New roster spawns emit BOTH for v1 backward
+// compatibility; M14.x deprecation removes CompanionBonded.
+//
+// Topic: chora.consumption.companion.created.v1
+// Consumers: Sharing (XP credit on first-Companion bonus), Tenancy (mana-pool
+//            counting), Notifications (welcome to your new Companion), C+ surface
+//            (UI roster refresh).
+message CompanionCreated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // Companion aggregate root ID (UUIDv7).
+  string companion_id = 2;
+
+  // Owning learner GCID.
+  string owner_gcid = 3;
+
+  // Learner-chosen Companion name (e.g., "Newton", "Curie").
+  string name = 4;
+
+  // Subject specialization: "math" | "history" | "coding" | "music" | ...
+  // Drives RAG slice via chora-creation.SearchEmbeddings scope=COMPANION_SPECIALIZED.
+  string specialization = 5;
+
+  // Species selected at creation (defaults derived from specialization).
+  CompanionSpecies species = 6;
+
+  // Initial age stage per ADR-116. Always "toddler" at creation unless admin grant.
+  string age_stage = 7;
+
+  // Initial evolution tier per multi-companion-per-user-2026-05-11.md §2.1.
+  // Always "apprentice" at creation; user XP unlocks higher tiers across all roster Companions.
+  string evolution_tier = 8;
+
+  // Roster position (1-indexed). Reaches max_companions_per_user entitlement cap.
+  int32 roster_position = 9;
+
+  google.protobuf.Timestamp created_at = 10;
+}
+
+// CompanionSkillSlotUnlocked — emitted on every growth-stage transition:
+// the companion's capability-slot allowance changed (slots = stage + 1,
+// ADR-218 D2). FIRST real emission = CHO-2012; the pre-P0 shape (per-USER
+// XP tier crossing over companion_progression_tiers) was defined but never
+// emitted and is superseded — the per-user XP axis is retired (ADR-218 D8).
+//
+// Topic: chora.consumption.companion.skill_slot_unlocked.v1
+// Producer: chora-consumption growth.Service (stage-up + hatch paths).
+// Consumers: P1 growth UX (stage-up ceremony), Notifications,
+//            O+ (unlock-cadence dashboards), Observability.
+message CompanionSkillSlotUnlocked {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // The companion whose slot allowance changed.
+  string companion_id = 2;
+  string owner_gcid = 3;
+
+  // Growth stage before/after the transition (0..6, ADR-149).
+  int32 stage_from = 4;
+  int32 stage_to = 5;
+
+  // Slot allowance before/after (SlotsForStage = stage + 1, clamped 7;
+  // editor-tunable per ADR-201).
+  int32 slots_before = 6;
+  int32 slots_after = 7;
+
+  google.protobuf.Timestamp unlocked_at = 8;
+}
+
+// CompanionSkillGranted — emitted on every REAL grant mint: a Skill became
+// OWNED on a companion (ADR-218 D3: unlocked = owned forever; the slot cap
+// binds only the equipped set — see CompanionLoadoutChanged). Minted by the
+// species-Path unlocker on stage transitions and by the admin/dev grant
+// endpoint. FIRST real emission = CHO-2012; the pre-P0 shape (slot-capped
+// learner self-grant) was defined but never emitted and is superseded.
+//
+// Topic: chora.consumption.companion.skill_granted.v1
+// Producer: chora-consumption (PathUnlocker via outbox; loadout handlers).
+// Consumers: chora-ai-kernel (tool-registry warmup for next session), P1/P2
+//            Grimoire UX (unlock reveals), Sharing (achievement track),
+//            Observability (per-skill adoption telemetry), O+ (audit).
+message CompanionSkillGranted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string companion_id = 2;
+  string owner_gcid = 3;
+
+  // Stable skill key from companion_skill_catalog.skill_key (e.g., "map_sight").
+  string skill_key = 4;
+
+  // Catalogue kind: "active" (slots, tools, sinks) | "craft" (slot-free
+  // designer-grammar passive — ADR-218 R2-5 amendment).
+  string skill_kind = 5;
+
+  // How the skill was unlocked: "species_path" | "admin_grant" | "aha_preview".
+  string unlocked_via = 6;
+
+  // The growth stage whose Path band unlocked it (2..6; ADR-218 D3).
+  int32 unlocked_at_stage = 7;
+
+  // Whether the grant arrived in effect (craft Skills mint equipped=true).
+  bool equipped = 8;
+
+  google.protobuf.Timestamp granted_at = 9;
+}
+
+// CompanionLoadoutChanged — emitted on every equip/unequip (ADR-218 D3:
+// free swap; the slot-cost cap binds the equipped set only). NEW with
+// CHO-2012.
+//
+// Topic: chora.consumption.companion.loadout_changed.v1
+// Producer: chora-consumption loadout handlers (outbox).
+// Consumers: P1/P2 Grimoire UX, agent session-bootstrap invalidation,
+//            O+ (loadout audit — no audit gap on swaps, GQ-7).
+message CompanionLoadoutChanged {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string companion_id = 2;
+  string owner_gcid = 3;
+
+  // The skill whose equip state changed.
+  string skill_key = 4;
+
+  // "equip" | "unequip".
+  string action = 5;
+
+  // The full equipped ACTIVE skill-key set AFTER the change (the runtime
+  // AllowedSkills allowlist).
+  repeated string equipped_skills = 6;
+
+  // Sum of equipped slot costs after the change.
+  int32 slots_used = 7;
+
+  // The stage-derived slot allowance at the time of the change.
+  int32 skill_slots_unlocked = 8;
+
+  google.protobuf.Timestamp changed_at = 9;
+}
+
+// CompanionMemoryEviction — emitted when the LRU eviction policy fires at
+// memory_context_capacity cap for a Companion's Vertex AI Memory Bank scope
+// (app_name = "companion:{companion_id}"). Each event = one batch of evicted
+// memories; the batch_count tracks how many entries were trimmed.
+//
+// Triggered by memory_lru_plugin in chora-adk-common (sibling to manaplugin).
+//
+// Topic: chora.consumption.companion.memory_eviction.v1
+// Consumers: O+ Observability (memory-usage + eviction-rate dashboards),
+//            chora-governance (audit if specific eviction patterns indicate
+//            policy violations).
+message CompanionMemoryEviction {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string companion_id = 2;
+  string owner_gcid = 3;
+
+  // Memory Bank scope app_name = "companion:{companion_id}". Included for
+  // observability without requiring consumers to reconstruct from companion_id.
+  string memory_bank_app_name = 4;
+
+  // Number of memories evicted in this batch.
+  int32 batch_count = 5;
+
+  // Reason for eviction. One of: "lru_cap_reached" | "tenant_policy_purge" |
+  // "specialization_changed_purge" | "manual_admin_purge".
+  string reason = 6;
+
+  // Configured cap at time of eviction (companions.memory_context_capacity).
+  int32 capacity = 7;
+
+  // Memory Bank size AFTER eviction (should equal capacity).
+  int32 retained_count = 8;
+
+  // Oldest-retained event timestamp after the eviction batch.
+  google.protobuf.Timestamp oldest_retained_at = 9;
+
+  google.protobuf.Timestamp evicted_at = 10;
+}
+
+// CompanionSpecializationChanged — emitted when a learner changes a Companion's
+// specialization (e.g., Math Companion → coding Companion).
+//
+// Per multi-companion-per-user-2026-05-11.md §2.8 + §6 risk #4: this MAY trigger
+// Memory Bank purge or carry-over; the user-explicit decision is captured in
+// the memory_handling field. Downstream, chora-consumption re-tags the
+// per-Companion RAG specialization filter (Pattern A) and chora-ai-kernel
+// refreshes the per-instance prompt.
+//
+// Topic: chora.consumption.companion.specialization_changed.v1
+// Consumers: chora-consumption (re-tag RAG slice + handle memory accordingly),
+//            chora-ai-kernel (refresh per-instance prompt cache),
+//            Sharing (engagement signal if same-Companion pivots specialization
+//            multiple times = curiosity signal), O+ (audit).
+message CompanionSpecializationChanged {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string companion_id = 2;
+  string owner_gcid = 3;
+
+  // Previous specialization (the one being replaced).
+  string previous_specialization = 4;
+
+  // New specialization (the one selected).
+  string new_specialization = 5;
+
+  // Memory handling decision by the learner. One of:
+  //   - "purge"            — wipe per-Companion Memory Bank (clean slate)
+  //   - "carry_over"       — keep prior memories (learner accepts mixed context)
+  //   - "snapshot_archive" — archive to cold storage then purge live store
+  string memory_handling = 6;
+
+  // Free-form reason if user provided one (optional).
+  string user_reason = 7;
+
+  google.protobuf.Timestamp changed_at = 8;
+}
+
+// CompanionPersonaUpdated — emitted when a learner saves the Companion's Persona
+// sheet (CHO-2015, ADR-219 D2). Carries the bounded, non-sensitive typed knobs
+// + the new monotonic version. PRIVACY: the free-text guidance note is NEVER
+// emitted onto the bus — only has_guidance_note (whether one is set). The note
+// itself is Model-Armor-screened at save + fenced into the agent prompt.
+//
+// Topic: chora.consumption.companion.persona_updated.v1
+// Consumers: chora-ai-kernel (refresh per-instance prompt cache), O+ (audit /
+//            IMDA D2 transparency), Gateway BFF (UI cache invalidation).
+message CompanionPersonaUpdated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string companion_id = 2;
+  string owner_gcid = 3;
+
+  // Monotonic persona version AFTER this save (>= 1).
+  int32 persona_version = 4;
+
+  // Bounded typed knobs (non-sensitive). tone: socratic|direct|encouraging;
+  // difficulty_cap: foundation|intermediate|advanced; address_style:
+  // first_name|nickname|formal.
+  string tone = 5;
+  string difficulty_cap = 6;
+  string address_style = 7;
+
+  // Whether the learner set a fenced free-text guidance note (the note TEXT is
+  // never emitted — privacy).
+  bool has_guidance_note = 8;
+
+  google.protobuf.Timestamp updated_at = 9;
+}
+
+// ============================================================================
+// ADR-116 amendment companions — payloads gain companion_id
+// ============================================================================
+
+// CompanionMatured — emitted on age stage transition per ADR-116 §Decision.
+// Per ADR-116 amendment, payload carries companion_id (the specific instance —
+// each Companion matures on its own per-Companion XP/level curve).
+//
+// Topic: chora.consumption.companion.matured.v1
+// Consumers: Sharing (achievement / gamification XP), Notifications
+//            (congratulatory push), Gateway BFF (UI update).
+message CompanionMatured {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string companion_id = 2;
+  string owner_gcid = 3;
+
+  // Previous age stage (toddler | child | teen | young_adult).
+  string previous_age_stage = 4;
+
+  // New age stage (child | teen | young_adult | adult).
+  string new_age_stage = 5;
+
+  // Companion level that triggered the transition (per ADR-116 EconomyConfig
+  // mapping from level ranges to age stages).
+  int32 trigger_level = 6;
+
+  // Whether the Companion has young_forever set (informational — `young_forever`
+  // suppresses maturation; this event won't fire while the flag is on, but
+  // the flag MAY toggle between events so consumers should not assume false).
+  bool young_forever_active = 7;
+
+  google.protobuf.Timestamp matured_at = 8;
+}
+
+// CompanionAccentUnlocked — emitted when a learner earns a VoiceAccent per
+// ADR-116 §Decision. The accent unlock itself is GCID-scoped (learner-wide),
+// but if the unlock event is triggered by application to a specific Companion
+// (e.g., direct-grant via the H+ admin UI), companion_id is populated.
+//
+// Topic: chora.consumption.companion.accent_unlocked.v1
+// Consumers: Sharing (achievement track), Gateway BFF (UI accent picker
+//            refresh), Observability.
+message CompanionAccentUnlocked {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // The learner who earned the accent (GCID-scoped per ADR-116).
+  string owner_gcid = 2;
+
+  // VoiceAccent catalog id (UUIDv7).
+  string accent_id = 3;
+
+  // Unlock mechanism per ADR-116: "xp_threshold" | "goal_reward" | "lootbox" |
+  // "admin_grant".
+  string unlock_mechanism = 4;
+
+  // Accent rarity per ADR-116: "common" | "rare" | "legendary".
+  string rarity = 5;
+
+  // Optional: specific Companion to which the accent was immediately applied
+  // (empty when the unlock is to the catalog only — application happens later
+  // via a separate user action).
+  string applied_to_companion_id = 6;
+
+  google.protobuf.Timestamp unlocked_at = 7;
+}
+
+// ============================================================================
+// ADR-149 Companion Growth Stage Model (7-stage × per-breed)
+//
+// Supersedes ADR-116 §age_stage. The growth_stage axis is per-Companion and
+// drives LLM tier, tool set, memory architecture, and KG reach — bounded by
+// the user's mana_tier ceiling (ADR-142). Breed is randomly rolled at
+// hatching (gacha-style) against the egg SKU's breed_distribution table
+// (IMDA D2 transparency-disclosed).
+//
+// Stage 0 = Egg (pre-hatch, may be pre-purchase). Stage 6 = Matured.
+// Stage names are breed-neutral; per-breed display nicknames composed at
+// the UI layer (e.g., "Teen Dragon", "Teen Owl").
+//
+// EXP is per-Companion; the active dispatched Companion earns from a given
+// source event (not split across roster).
+// ============================================================================
+
+// CompanionEggPurchased — emitted when chora-consumption provisions a new
+// Stage-0 Companion (egg) for a learner. The breed is NOT yet known (rolled
+// at HatchEgg, not purchase). Distinct from CompanionCreated: CompanionCreated
+// is the legacy multi-Companion instance creation post-bonding;
+// CompanionEggPurchased fires for the new pre-hatch row in the egg-funnel flow.
+//
+// Topic: chora.consumption.companion.egg_purchased.v1
+// Consumers: Observability (provisioning + revenue ledger), Governance
+//            (audit), Notifications (welcome email), AI Kernel (warms
+//            instance cache scaffold).
+message CompanionEggPurchased {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string companion_id = 2;        // UUIDv7, freshly minted
+  string owner_gcid = 3;
+  string egg_sku = 4;            // "egg.trial.v1" | "egg.standard.v1" | "egg.skillflow-cspo.v1" | ...
+  string source = 5;              // "purchase" | "subscription_inclusion" | "tenant_grant" | "trial"
+
+  // Stripe correlation if purchased; empty for subscription-inclusion / trial.
+  string stripe_session_id = 6;
+  int64  amount_cents = 7;        // 0 for trial / inclusion
+  string currency = 8;            // ISO 4217; empty for free
+
+  // Pre-bound focal-atom hint from the egg SKU (may be empty — learner picks
+  // at hatching from a tenant-curated list).
+  string suggested_focal_atom_id = 9;
+
+  // Soft + hard expiry timestamps for unhatched eggs.
+  google.protobuf.Timestamp soft_expiry_at = 10;  // typically +30d
+  google.protobuf.Timestamp hard_expiry_at = 11;  // typically +60d
+
+  google.protobuf.Timestamp purchased_at = 12;
+}
+
+// CompanionStirring — one-shot incubation signal: a Stage-0 egg has accrued
+// growth EXP across its hatch threshold and is now "stirring" (ready for the
+// learner to tap-to-hatch at the Hatching Ceremony). Derived from the EXP
+// crossing (no persisted flag); the strict boundary + upstream award
+// idempotency guarantee EXACTLY ONE award stirs a given egg. Idempotency key
+// "stirring:{companion_id}". F-I1 (ADR-228 incubation).
+//
+// Wire layout is fixed by the chora-consumption hand-rolled protomarshal
+// encoder (adapter/events/protomarshal, MarshalPayload) — this message is the
+// canonical schema for it; field numbers + types MUST stay in lock-step.
+//
+// Topic: chora.consumption.companion.stirring.v1
+// Consumers: Notifications ("your egg is stirring!" in_app + push nudge), A+
+//            (hatch-CTA badge on the egg), Observability (incubation funnel).
+message CompanionStirring {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string companion_id = 2;
+  string owner_gcid = 3;
+
+  // Growth EXP at the moment of stirring (>= hatch_threshold).
+  int32  growth_exp = 4;
+  // The hatch threshold this egg crossed to become stirring.
+  int32  hatch_threshold = 5;
+
+  google.protobuf.Timestamp stirred_at = 6;
+}
+
+// CompanionBreedRevealed — emitted at the Hatching Ceremony's gacha-reveal
+// moment, BEFORE CompanionHatched. The breed (CompanionSpecies) is rolled by
+// the chora-consumption server using a cryptographically-seeded PRNG against
+// the egg SKU's breed_distribution JSONB. Single-use per Companion (no
+// rerolls per ADR-149).
+//
+// Topic: chora.consumption.companion.breed_revealed.v1
+// Consumers: C+ (queue shareable reveal post template), Gateway BFF (drive
+//            reveal animation in /a/companion/hatching), Observability
+//            (lootbox outcome ledger for IMDA D2 transparency audits),
+//            AI Kernel (start warming per-breed persona prompt slot).
+message CompanionBreedRevealed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string companion_id = 2;
+  string owner_gcid = 3;
+
+  // The rolled breed. Uses the existing CompanionSpecies enum at top of file.
+  CompanionSpecies species = 4;
+
+  // Shiny variant flag — TRUE if the learner already owns another Companion
+  // of this species across their active roster. Cosmetic only (alternate
+  // palette); no capability difference.
+  bool shiny_variant = 5;
+
+  // Rarity tier of this species per the egg SKU's distribution at roll time.
+  // common | uncommon | rare | legendary
+  string rarity = 6;
+
+  // Egg SKU this Companion was rolled from (audit trail).
+  string egg_sku = 7;
+
+  // The probability weight the SKU assigned to this species at the roll
+  // (e.g., 25.0 = 25% chance). Persisted for IMDA D2 transparency audits.
+  double rolled_probability = 8;
+
+  google.protobuf.Timestamp revealed_at = 9;
+}
+
+// CompanionHatched — emitted when a learner completes the Hatching Ceremony,
+// advancing growth_stage 0 → 1. Carries the Resonant Atom + identity bundle
+// AND the breed (already revealed in CompanionBreedRevealed but repeated here
+// so subscribers can subscribe to a single event for cache warm-up).
+//
+// Topic: chora.consumption.companion.hatched.v1
+// Consumers: AI Kernel (per-instance prompt cache + Vertex Agent Engine
+//            session warm-up — needs breed for persona prompt slot), C+
+//            (social broadcast), Notifications, Observability.
+message CompanionHatched {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string companion_id = 2;
+  string owner_gcid = 3;
+
+  // Learner-chosen identity at hatching.
+  string display_name = 4;
+  string tone = 5;                // socratic | direct | encouraging
+  string learner_persona = 6;     // curious-explorer | cert-focused | social-leader
+
+  // Immutable Resonant Atom anchor. UUIDv7 of a LearningAtom from the
+  // learner's per-user KG (ADR-143). Must reference a real atom; validated
+  // server-side via chora-creation.ValidateAtomID (per Iter 1 wiring).
+  string resonant_atom_id = 7;
+
+  // Broad specialization category derived from resonant_atom_id's KG cluster
+  // (e.g., "math", "history", "coding"). Drives RAG slice scope.
+  string specialization = 8;
+
+  // Breed snapshot (rolled at CompanionBreedRevealed; included here for
+  // single-subscriber convenience).
+  CompanionSpecies species = 9;
+  bool shiny_variant = 10;
+
+  google.protobuf.Timestamp hatched_at = 11;
+}
+
+// CompanionExpAwarded — emitted on every EXP increment. Idempotent on the
+// composite (companion_id, source, idempotency_key) — the idempotency_key is
+// typically the source event_id, or {session_id}:{turn_seq} for runtime
+// conv_turn awards.
+//
+// Topic: chora.consumption.companion.exp_awarded.v1
+// Consumers: Observability (IMDA D1 evidence ledger), AI Kernel (invalidates
+//            cached stage tier on imminent stage_up), C+ (XP chip refresh).
+message CompanionExpAwarded {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string companion_id = 2;
+  string owner_gcid = 3;
+
+  int32  exp_delta = 4;
+  int32  exp_total_after = 5;
+
+  // Source taxonomy. One of:
+  //   atom_session | ebbinghaus_review | hex_expand | conv_turn |
+  //   daily_dose_open | social_share | social_reaction |
+  //   junction_accepted | atom_authored | admin_grant
+  string source = 6;
+
+  // event_id (UUIDv7) of the source event for idempotency. Empty for direct
+  // runtime awards (conv_turn) which derive idempotency from session_id +
+  // turn_seq instead — populated in source_session_id + source_turn_seq.
+  string source_event_id = 7;
+  string source_topic = 8;        // canonical topic of source event
+  string source_session_id = 9;   // for conv_turn awards
+  int32  source_turn_seq = 10;    // for conv_turn awards
+
+  // True when the daily cap for this source was reached on this event
+  // (delta would have been higher but was clamped to remaining cap).
+  bool   daily_cap_hit = 11;
+
+  // Stage hint — true when this award causes a stage_up. Consumers can
+  // pre-warm caches; the actual stage_up is emitted in its own event.
+  bool   triggers_stage_up = 12;
+
+  google.protobuf.Timestamp awarded_at = 13;
+}
+
+// CompanionStageUp — emitted when growth_stage increments. Carries the
+// capability delta so consumers can render unlock cards without joining
+// against catalog tables.
+//
+// Topic: chora.consumption.companion.stage_up.v1
+// Consumers: C+ (shareable celebration post), Notifications (push), AI Kernel
+//            (refresh per-instance config + tool list), Gateway BFF (UI
+//            unlock card payload), Observability.
+message CompanionStageUp {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string companion_id = 2;
+  string owner_gcid = 3;
+
+  // Stage transition. 0→1 = hatching (also emits CompanionHatched).
+  int32  stage_from = 4;
+  int32  stage_to = 5;
+
+  // Canonical stage names per ADR-149 (breed-neutral).
+  // egg | baby | fledgling | awakened | structural | teen | matured
+  string stage_from_name = 6;
+  string stage_to_name = 7;
+
+  // Capabilities NEWLY unlocked at the new stage (delta, not cumulative).
+  repeated string newly_unlocked_tools = 8;
+  repeated string newly_revealed_kg_neighbors = 9;  // atom_ids
+
+  // New LLM tier the agent runtime should use (mana-tier-bounded; carries
+  // the effective tier the user can actually run, not the theoretical
+  // stage-max).
+  string new_llm_tier = 10;       // flash-lite | flash | flash-reasoning | pro
+
+  // New memory architecture in effect.
+  string new_memory_mode = 11;    // stateless | rolling-1 | rolling-3 | rolling-7 | rolling-21-rag | vector-rag-all | full-procedural
+
+  google.protobuf.Timestamp stage_up_at = 12;
+
+  // Denormalised display field (CHO-2266). The learner-chosen Companion name,
+  // snapshotted from the CompanionInstance at publish time so the C+ milestone
+  // auto-share copy can NAME the Companion ("Tempo grew") without a cross-DB
+  // join into chora_consumption (cross-DB queries forbidden — the payload is
+  // the lawful carrier). Always populated: the Companion is named at hatch
+  // (stage 1) and stage_up only ever fires at stage >= 1. Additive within v1 —
+  // requires a Pub/Sub schema revision before publish (400s AT PUBLISH otherwise).
+  string companion_display_name = 13;
+}
+
+// CompanionKgNeighborRevealed — emitted when a new KG node enters the
+// Companion's reach. Two paths: stage_up auto-discovery (via ADR-143 hexagon)
+// and user-pick (at Stage 2 hatching follow-up, or at Stage 4 second pick,
+// or at Stage 6 cross-junction).
+//
+// Topic: chora.consumption.companion.kg_neighbor_revealed.v1
+// Consumers: AI Kernel (RAG slice refresh), Observability, Gateway BFF
+//            (refresh KG-reach map widget on /a/companion).
+message CompanionKgNeighborRevealed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string companion_id = 2;
+  string owner_gcid = 3;
+
+  // The newly visible atom in the KG.
+  string atom_id = 4;
+
+  // How the neighbor became visible. One of:
+  //   user_pick      — user explicitly selected at Stage 2 / Stage 4
+  //   stage_up_hex   — auto-discovered via hexagon expansion on stage_up
+  //   junction_accept — Stage 6 cross-cluster junction with user consent
+  //   admin_grant    — admin override
+  string revealed_via = 5;
+
+  // Distance from resonant_atom_id (1 = adjacent, 2 = two-hop via hex).
+  int32  graph_distance = 6;
+
+  google.protobuf.Timestamp revealed_at = 7;
+}
+
+// CompanionSourceRevelation — emitted ONCE when a Companion first reaches
+// Stage 3 (Awakened). Marks the 24-hour Source Revelation preview window
+// during which the Companion runtime uses Stage-6-tier capabilities (capped
+// by mana_tier). Single-use per Companion lifetime. Per-breed art renders
+// the "destined form" reveal differently (Dragon wings / Phoenix flame /
+// Owl true-eyes / etc.) but the capability mechanic is identical.
+//
+// Topic: chora.consumption.companion.source_revelation.v1
+// Consumers: AI Kernel (apply Stage-6 plugin overrides for the window),
+//            Gateway BFF (render Source Revelation dialogue ceremony), C+
+//            (queue shareable post template post-window), Observability.
+message CompanionSourceRevelation {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string companion_id = 2;
+  string owner_gcid = 3;
+
+  // LLM tier active during this preview (mana-tier-bounded — Basic gets
+  // flash, Standard + Premium get pro).
+  string preview_llm_tier = 4;
+
+  // Tools available during preview (Stage 6 tool set, intersected with the
+  // catalog the tenant has enabled).
+  repeated string preview_tools = 5;
+
+  // Window start + scheduled end.
+  google.protobuf.Timestamp revelation_at = 6;
+  google.protobuf.Timestamp window_expires_at = 7;
+
+  // Duration in seconds (typically 86400 — 24h; per-tenant configurable).
+  int32  window_duration_seconds = 8;
+
+  // Denormalised display field (CHO-2266). The learner-chosen Companion name,
+  // snapshotted from the CompanionInstance at publish time so the C+ Stage-3
+  // Aha-moment ceremony copy can NAME the Companion ("Tempo paused...") without
+  // a cross-DB join into chora_consumption (cross-DB queries forbidden — the
+  // payload is the lawful carrier). Always populated: source_revelation fires
+  // only at stage >= 3, well after the Companion is named at hatch (stage 1).
+  // Additive within v1 — requires a Pub/Sub schema revision before publish.
+  //
+  // NB (CHO-2266 follow-up): the full breed-themed ceremony imagery
+  // (stage-6 form / breed-themed effect) is NOT restored here — no per-breed
+  // descriptor content exists in the consumption domain to denormalise, so it
+  // is deferred pending an editorial/design source (see the CHO-2266 report).
+  string companion_display_name = 9;
+}
+
+// =============================================================================
+// CompanionExposureGrant + Session lifecycle (BE-agent D2.1 — added 2026-05-15)
+//
+// Two events feed the multi-Companion runtime contract:
+//
+//   - CompanionExposureGranted — per-CompanionExposureGrant consent emission
+//     when a learner grants their Companion exposure to a piece of content
+//     (atom / course / permanent scope). The grant is the consent boundary
+//     for cross-Companion RAG slice expansion — chora-consumption authoritatively
+//     enforces, and chora-sharing projects to the C+ social feed where
+//     applicable (e.g., learners can opt-in to broadcasting Companion choices).
+//
+//   - CompanionSessionStarted — emitted at session-open. Distinct from the
+//     existing AtomicSession events because a Companion session is the
+//     per-instance LangGraph conversation context (a learner with two
+//     Companions + same atom = two distinct sessions). Multi-Companion per
+//     ADR-116 amendment + ADR-147 §7.
+// =============================================================================
+
+// CompanionExposureGranted — emitted when a learner grants their Companion
+// exposure to a piece of content. The exposure grant is per-Companion
+// per-content (NOT per-learner) so the cross-Companion RAG slice is bounded
+// by explicit consent.
+//
+// Topic: chora.consumption.companion.exposure_granted.v1
+// Consumers: chora-consumption (write CompanionExposureGrant aggregate; widen
+//            the per-Companion RAG slice scope on next session), chora-sharing
+//            (project to C+ feed when post.visibility ≠ TENANT_ONLY and the
+//            learner has opted in to broadcasting Companion choices),
+//            chora-observability (D1 IMDA accountability — consent events
+//            are auditable evidence).
+message CompanionExposureGranted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // Companion (the instance receiving the exposure widening).
+  string companion_id = 2;
+
+  // UUIDv7 — the CompanionExposureGrant aggregate root id.
+  string exposure_grant_id = 3;
+
+  // The learner granting consent. Same as envelope.gcid for user-driven
+  // grants; duplicated for filter-friendly subscribers.
+  string learner_gcid = 4;
+
+  // UUIDv7 of the content atom the grant covers. For broader scopes
+  // (course / permanent) this is the anchor atom_id and `exposure_scope`
+  // carries the widening hint.
+  string content_atom_id = 5;
+
+  // Scope of the grant. One of:
+  //   "single_atom" — only the named atom (default narrow scope)
+  //   "course"      — all atoms in the course containing content_atom_id
+  //   "permanent"   — durable widening (no expires_at)
+  // The chora-consumption RAG-slice projector reads this to compute the
+  // effective slice for the next CompanionSessionStarted.
+  string exposure_scope = 6;
+
+  // When the grant was registered.
+  google.protobuf.Timestamp granted_at = 7;
+
+  // Optional expiry. Zero-value (or omitted) means permanent. For "course"
+  // scope grants the default is +90d; for "single_atom" it is +30d. Tenant
+  // policy can shorten via tenancy.config_overrides.exposure_grant_default_ttl.
+  google.protobuf.Timestamp expires_at = 8;
+
+  // Free-text or canonical reason. Examples:
+  //   "user_explicit_consent" — user clicked Grant in C+ surface dialog
+  //   "implicit_session"      — the learner started a Companion session on
+  //                             the atom and the tenant policy permits
+  //                             implicit-on-engagement (off by default)
+  //   "admin_grant"           — tenant admin override (audit trail)
+  string grant_reason = 9;
+}
+
+// CompanionSessionStarted — emitted when a learner opens a Companion session.
+// A Companion session is the per-instance LangGraph conversation context that
+// the chora-ai-kernel-orchestrator drives; distinct from AtomicSession (which
+// is the assessment / learning-session aggregate in chora_consumption).
+//
+// A single learner with N Companions in their roster MAY have N parallel
+// sessions on the SAME atom — this event discriminates them by companion_id
+// + session_id.
+//
+// Topic: chora.consumption.companion.session_started.v1
+// Consumers: chora-consumption (write per-Companion session row + emit RAG
+//            slice scope for the orchestrator to consume), chora-observability
+//            (D1 IMDA accountability — per-session attribution for runtime
+//            audit trail).
+message CompanionSessionStarted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // Companion (the instance hosting the session).
+  string companion_id = 2;
+
+  // UUIDv7 of the Companion session. Distinct from atomic_session_id (which
+  // is the assessment aggregate's id when the session is atom-scoped) —
+  // keep both linked downstream via session_type + context_atom_id.
+  string session_id = 3;
+
+  // The learner who opened the session. Same as envelope.gcid; duplicated
+  // for filter-friendly subscribers.
+  string learner_gcid = 4;
+
+  // Session type. One of:
+  //   "daily_dose"      — opened from a DailyDoseEntry click
+  //   "kg_exploration"  — opened from the per-user KG hex map
+  //   "atomic_session"  — opened from an AtomicSession assessment flow
+  //   "free_form"       — opened from C+ Companion chat (no atom anchor)
+  string session_type = 5;
+
+  // Optional UUIDv7 of the atom anchoring the session. Empty for free_form.
+  string context_atom_id = 6;
+
+  google.protobuf.Timestamp started_at = 7;
+}
+
+// =============================================================================
+// ADR-154 — Companion conversational chat surface (added 2026-05-15)
+//
+// CompanionChatTurnCompleted — emitted at the end of every successful chat
+// turn. Carries the per-turn cost ledger fields so the BigQuery cost-attribution
+// export (ai-cost-tracking skill) can sum per-(tenant_id, owner_gcid, model)
+// without joining against the chora_consumption.companion_chat_sessions table.
+//
+// Failed turns (4xx pre-flight, 5xx engine error) do NOT emit this event —
+// the mana ledger handles its own debit lifecycle, and an engine error
+// flows as the SSE `event: error` frame.
+//
+// Topic: chora.consumption.companion.chat_turn_completed.v1
+// Consumers: Observability (D1 IMDA accountability — per-turn provenance),
+//            AI Kernel (cost ledger feed for the TokenUsageLedger),
+//            Sharing (engagement signal — opt-in user broadcast).
+// =============================================================================
+message CompanionChatTurnCompleted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // chora_consumption.companion_chat_sessions.id (UUIDv7).
+  string session_id = 2;
+
+  // Per-turn UUIDv7 — unique within a session. Stable correlation key for
+  // FE-side traces + BigQuery cost-attribution rows.
+  string turn_id = 3;
+
+  // The learner-owner. Mirrors envelope.gcid; duplicated for filter-friendly
+  // BigQuery slicing.
+  string gcid = 4;
+
+  // Tenant scope. Mirrors envelope.tenant_id.
+  string tenant_id = 5;
+
+  // The Companion instance the chat is bound to. UUIDv7 of a
+  // chora_consumption.companion_instances row.
+  string companion_id = 6;
+
+  // Engine-side session identifier (Vertex AI Agent Engine opaque).
+  string engine_session_id = 7;
+
+  // Resolved model_version (e.g. "gemini-2.5-flash-lite",
+  // "gemini-3-flash-preview", "gemini-3.1-pro-preview"). Mirrors the
+  // tieredmodelplugin choice for the active mana tier.
+  string model = 8;
+
+  // Engine-reported output token count. Used for cost attribution.
+  int32 output_tokens = 9;
+
+  // Mana charged for this turn — tier-resolved per ADR-154 D3:
+  // basic=5, standard=15, premium=30.
+  int32 mana_charged = 10;
+
+  // Mana tier active at the turn time. One of: "basic" | "standard" | "premium".
+  string mana_tier = 11;
+
+  // Count of tool_call frames emitted during the turn (atom_search,
+  // persona_lookup, ebbinghaus_state). Drives the "Companion used N tools"
+  // UX hint + the IMDA D2 transparency audit.
+  int32 tool_calls_count = 12;
+
+  // Engine finish_reason per StreamEvent. One of: "STOP" | "MAX_TOKENS" |
+  // "SAFETY" | "TOOL_ERROR".
+  string finish_reason = 13;
+
+  // Wall-clock at the start of the turn (FIRST byte sent to the engine).
+  google.protobuf.Timestamp started_at = 14;
+
+  // Wall-clock at turn_complete frame emission.
+  google.protobuf.Timestamp completed_at = 15;
+}

@@ -1,0 +1,71 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Content Consumption — AnswerValidated
+  version: 1.0.0
+  description: |
+    Published when a learner's submitted answer has been validated against
+    the atom's answer rule.
+
+    - Domain: Content Consumption (`chora_consumption` DB)
+    - Aggregate root: `AtomicSession`
+    - Topic: `chora.consumption.session.answer_validated.v1`
+    - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
+    - Source proto: `proto/events/consumption/session.proto`
+       message `chora.consumption.v1.AnswerValidated`
+
+    Embeds the mandatory `chora.common.v1.EventEnvelope` as field 1.
+  contact:
+    name: Chora Platform Team (Team 3) + Team 1 (Content)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+    description: Google Cloud Pub/Sub (chora-489812 platform host)
+
+channels:
+  answerValidated:
+    address: chora.consumption.session.answer_validated.v1
+    description: Single-event topic for AnswerValidated.
+    messages:
+      answerValidated:
+        $ref: '#/components/messages/AnswerValidated'
+
+operations:
+  publishAnswerValidated:
+    action: send
+    channel:
+      $ref: '#/channels/answerValidated'
+    summary: Publish an AnswerValidated event
+    messages:
+      - $ref: '#/channels/answerValidated/messages/answerValidated'
+
+  consumeAnswerValidated:
+    action: receive
+    channel:
+      $ref: '#/channels/answerValidated'
+    summary: Subscribe to AnswerValidated events
+    description: |
+      Primary consumers:
+      - Sharing — XP / combo / streak signal
+      - Notifications — instant feedback (correct/incorrect summary)
+      - Observability — accuracy + grading-confidence analytics
+    messages:
+      - $ref: '#/channels/answerValidated/messages/answerValidated'
+
+components:
+  messages:
+    AnswerValidated:
+      name: AnswerValidated
+      title: Answer Validated
+      summary: A learner's answer was validated against an atom's answer rule
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/consumption/session.proto#/chora.consumption.v1.AnswerValidated'

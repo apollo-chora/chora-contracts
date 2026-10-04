@@ -1,0 +1,466 @@
+openapi: "3.2.0"
+info:
+  title: "Chora Guardrail Service API"
+  version: "1.0.0"
+  description: |
+    REST API for the Guardrail Service — the AI Kernel concern that screens
+    LLM input + output for every Chora agent call.
+
+    Owning domain : AI Kernel (`chora_ai_kernel` database; cross-DB queries
+                    forbidden — see ddd-enforcement.md)
+    Owning team   : Team 3 (Platform)
+    Surface       : O+ Observability+ (Admin / Auditor read-only on audit
+                    records; ALL services may invoke `/screen` and
+                    `/api/guard/evaluate`)
+
+    AP-01: This contract exists BEFORE implementation per CLAUDE.md §4.
+
+    ## Endpoints
+
+    Two parallel surfaces are exposed:
+
+    1. `/api/v1/screen` (and the legacy alias `/screen`) — the **Phyllis MVP
+       §5.8 Gatekeeper screening endpoint**. The BFF AI Assist orchestrator
+       calls this synchronously per atom-generation request to enforce the
+       Comic Ch6 P13 "Safe AI" anchor: detect bias / PII / profanity / length
+       violations, auto-rewrite biased prompts to balanced comparisons, and
+       refuse outright on critical risk-tier or hard-rule violations.
+
+    2. `/api/guard/evaluate` (CLAUDE.md task-D legacy) — the lower-level
+       tier-pipeline evaluator (regex / DLP / Model Armor / output validators)
+       used by the Model Gateway pre + post each LLM call.
+
+    ## Risk-tiered guardrails per agent
+
+    Per `ai-runtime-guardrails` skill + project memory `project_chora_concerns.md`:
+    every agent declares its risk class via `GuardrailConfig.applied_tiers` and
+    `risk_tier`. The Phyllis MVP uses `tier=critical` only for content that
+    must never reach a learner (e.g., academic dishonesty triggers).
+
+  contact:
+    name: "Chora Platform Team (Team 3)"
+  license:
+    name: "Proprietary"
+
+servers:
+  - url: "https://api.chora.app"
+    description: "Production"
+  - url: "http://localhost:8080"
+    description: "Local development"
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Screen
+    description: "Phyllis MVP §5.8 Gatekeeper screening (Comic Ch6 P13)"
+  - name: Evaluate
+    description: "Tier-pipeline evaluator (legacy task-D)"
+  - name: Config
+    description: "Per-agent guardrail config CRUD"
+  - name: Pattern
+    description: "Regex pattern catalogue"
+  - name: Health
+    description: "Health check"
+
+paths:
+  /api/v1/screen:
+    post:
+      operationId: screenContent
+      summary: "Gatekeeper screen — Phyllis MVP Comic Ch6 P13 anchor"
+      description: |
+        Screens user-prompt or model-output content against the in-memory
+        rule pack (bias detector / PII regex / profanity / length validator)
+        and returns a 3-way verdict:
+
+        - `allow`   — content passed all checks (low-tier may carry warning flags)
+        - `rewrite` — bias detected; balanced-comparison alternative supplied
+        - `refuse`  — PII / profanity / length / critical-tier escalation
+
+        The same handler is mounted at `/screen` for the MVP agent contract.
+      tags: [Screen]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScreenRequest"
+      responses:
+        "200":
+          description: "Screen verdict (decision is in the body, not status)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScreenResponse"
+        "400":
+          $ref: "#/components/responses/InvalidBody"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /screen:
+    post:
+      operationId: screenContentAlias
+      summary: "Top-level alias for /api/v1/screen"
+      description: |
+        Identical behaviour to `/api/v1/screen`. Maintained per Phyllis MVP
+        agent task contract; new clients should prefer `/api/v1/screen`.
+      tags: [Screen]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScreenRequest"
+      responses:
+        "200":
+          description: "Screen verdict"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScreenResponse"
+        "400":
+          $ref: "#/components/responses/InvalidBody"
+
+  /api/guard/evaluate:
+    post:
+      operationId: guardEvaluate
+      summary: "Tier-pipeline evaluator (legacy task-D)"
+      description: |
+        Lower-level evaluator. Runs configured tiers (regex / dlp /
+        model_armor / output_validator) and returns a 3-decision verdict
+        (`allowed` / `redacted` / `blocked`). Used by the Model Gateway.
+      tags: [Evaluate]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EvaluateRequest"
+      responses:
+        "200":
+          description: "Evaluation persisted as append-only audit record"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GuardrailEvaluation"
+        "400":
+          $ref: "#/components/responses/InvalidBody"
+
+  /api/configs:
+    post:
+      operationId: createConfig
+      summary: "Create a per-agent GuardrailConfig"
+      tags: [Config]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateConfigRequest"
+      responses:
+        "201":
+          description: "Config created"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GuardrailConfig"
+        "400":
+          $ref: "#/components/responses/InvalidBody"
+
+  /api/configs/{agent_id}:
+    parameters:
+      - name: agent_id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getConfig
+      summary: "Fetch latest config version for an agent"
+      tags: [Config]
+      responses:
+        "200":
+          description: "Config found"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GuardrailConfig"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/regex-patterns:
+    post:
+      operationId: createRegexPattern
+      summary: "Register a regex pattern"
+      tags: [Pattern]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateRegexPatternRequest"
+      responses:
+        "201":
+          description: "Pattern registered"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegexPattern"
+        "400":
+          $ref: "#/components/responses/InvalidBody"
+
+  /healthz:
+    get:
+      operationId: healthz
+      summary: "Liveness probe"
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: "Service healthy"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: "ok" }
+                  time:   { type: string, format: date-time }
+
+  /readyz:
+    get:
+      operationId: readyz
+      summary: "Readiness probe"
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: "Service ready"
+        "503":
+          description: "Dependencies not initialised"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters: {}
+
+  responses:
+    InvalidBody:
+      description: "Validation error"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    MethodNotAllowed:
+      description: "Method not allowed (POST only)"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: "Resource not found"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InternalError:
+      description: "Internal server error"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:    { type: string, example: "GUARDRAIL_INVALID_BODY" }
+        message: { type: string, example: "agent_id is required" }
+
+    ScreenRequest:
+      type: object
+      required: [agent_id, content, content_type, intent, risk_tier]
+      properties:
+        agent_id:
+          type: string
+          description: "Logical agent identifier (e.g., chora-creation-author-mcq)"
+          example: "chora-creation-author-mcq"
+        tenant_id:
+          type: string
+          description: |
+            Optional in body. Canonical source is the `X-Tenant-Id` header set
+            by the BFF — body value is ignored if it disagrees.
+        gcid:
+          type: string
+          description: |
+            Optional in body. Canonical source is the `gcid` header set by
+            the BFF — body value is ignored if it disagrees.
+        content:
+          type: string
+          maxLength: 10000
+          description: "Content to screen. Hard limit 4000 chars before refuse."
+          example: "What if Waterfall is better than Agile?"
+        content_type:
+          type: string
+          enum: [user_prompt, model_output]
+        intent:
+          type: string
+          enum: [atom_authoring, consumption, moderation]
+        risk_tier:
+          type: string
+          enum: [low, medium, high, critical]
+          description: |
+            Per-agent risk classification. `critical` auto-refuses on any flag;
+            `low` allows even with bias flag (warning only).
+
+    ScreenResponse:
+      type: object
+      required: [decision, explanation, flags, guardrail_chain]
+      properties:
+        decision:
+          type: string
+          enum: [allow, rewrite, refuse]
+        explanation:
+          type: string
+          description: "Human-readable rationale for the decision (shield-icon copy)."
+          example: "Detected opinionated stance — substituted with a balanced comparison question."
+        rewritten_content:
+          type: string
+          description: "Present iff decision=rewrite. Comic Ch6 P13 balanced-comparison phrasing."
+          example: "Compare the strengths of Waterfall and Agile in regulated industries."
+        flags:
+          type: array
+          items:
+            type: string
+            enum: [bias, pii, profanity, length, opinion_stance]
+        guardrail_chain:
+          type: array
+          items:
+            type: string
+            example: "regex.bias_detector"
+          description: "Ordered list of rule modules that ran (transparency requirement)."
+        imda_dimension:
+          type: string
+          description: "IMDA Model AI Governance Framework dimension this verdict maps to."
+          enum:
+            - "Operations Management"
+            - "Cost / Monitoring / Safety"
+
+    EvaluateRequest:
+      type: object
+      required: [agent_id, input_text, direction]
+      properties:
+        agent_id:   { type: string }
+        input_text: { type: string }
+        direction:
+          type: string
+          enum: [input, output]
+
+    GuardrailEvaluation:
+      type: object
+      required: [id, tenant_id, gcid, agid, evaluation_tier, decision, evaluated_at]
+      properties:
+        id:               { type: string, format: uuid }
+        tenant_id:        { type: string, format: uuid }
+        gcid:             { type: string, format: uuid }
+        agid:             { type: string, format: uuid }
+        agent_id:         { type: string }
+        input_text_hash:  { type: string }
+        evaluation_tier:
+          type: string
+          enum: [regex, dlp, model_armor, output_validator]
+        decision:
+          type: string
+          enum: [allowed, redacted, blocked]
+        redactions:
+          type: array
+          items:
+            $ref: "#/components/schemas/Redaction"
+        reason:           { type: string }
+        direction:
+          type: string
+          enum: [input, output]
+        evaluated_at:     { type: string, format: date-time }
+
+    Redaction:
+      type: object
+      required: [start, end, replacement]
+      properties:
+        start:       { type: integer }
+        end:         { type: integer }
+        replacement: { type: string }
+
+    GuardrailConfig:
+      type: object
+      required: [tenant_id, agent_id, applied_tiers, risk_tier, version]
+      properties:
+        tenant_id:     { type: string }
+        agent_id:      { type: string }
+        applied_tiers:
+          type: array
+          items:
+            type: string
+            enum: [regex, dlp, model_armor, output_validator]
+        regex_patterns:
+          type: array
+          items: { type: string }
+        regex_action:
+          type: string
+          enum: [deny, redact]
+        dlp_inspect_templates:
+          type: array
+          items: { type: string }
+        risk_tier:
+          type: string
+          enum: [low, medium, high, critical]
+        version:    { type: integer }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    CreateConfigRequest:
+      type: object
+      required: [agent_id, applied_tiers, risk_tier]
+      properties:
+        agent_id:      { type: string }
+        applied_tiers:
+          type: array
+          items: { type: string, enum: [regex, dlp, model_armor, output_validator] }
+        regex_patterns:
+          type: array
+          items: { type: string }
+        dlp_inspect_templates:
+          type: array
+          items: { type: string }
+        regex_action:
+          type: string
+          enum: [deny, redact]
+        risk_tier:
+          type: string
+          enum: [low, medium, high, critical]
+
+    RegexPattern:
+      type: object
+      required: [id, pattern, action]
+      properties:
+        id:         { type: string, format: uuid }
+        pattern:    { type: string }
+        action:
+          type: string
+          enum: [deny, redact]
+        category:   { type: string }
+        created_at: { type: string, format: date-time }
+
+    CreateRegexPatternRequest:
+      type: object
+      required: [pattern, action]
+      properties:
+        pattern:  { type: string }
+        action:
+          type: string
+          enum: [deny, redact]
+        category: { type: string }

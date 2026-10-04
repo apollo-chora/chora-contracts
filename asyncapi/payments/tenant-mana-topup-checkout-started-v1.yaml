@@ -1,0 +1,60 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Payments — TenantManaTopUpCheckoutStarted
+  version: 1.0.0
+  description: |
+    chora-payments created a Stripe Checkout Session for a
+    tenant_admin's mana-pool top-up via the H+ Setup-Tenant flow.
+
+    - Domain: Payments (`chora_payments` DB)
+    - Topic: `chora.payments.tenant_mana_topup.checkout_started.v1`
+    - Source proto: `proto/events/payments/tenant_mana_topup.proto`
+       message `chora.payments.v1.TenantManaTopUpCheckoutStarted`
+    - Aggregate: TenantManaTopUp
+    - Per ADR-164 (chora-payments service + 13th DB).
+    - IMDA: envelope.chora_imda_dimension = "accountability"
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  tenantManaTopUpCheckoutStarted:
+    address: chora.payments.tenant_mana_topup.checkout_started.v1
+    messages:
+      tenantManaTopUpCheckoutStarted:
+        $ref: '#/components/messages/TenantManaTopUpCheckoutStarted'
+
+operations:
+  publishTenantManaTopUpCheckoutStarted:
+    action: send
+    channel:
+      $ref: '#/channels/tenantManaTopUpCheckoutStarted'
+    messages:
+      - $ref: '#/channels/tenantManaTopUpCheckoutStarted/messages/tenantManaTopUpCheckoutStarted'
+
+  consumeTenantManaTopUpCheckoutStarted:
+    action: receive
+    channel:
+      $ref: '#/channels/tenantManaTopUpCheckoutStarted'
+    messages:
+      - $ref: '#/channels/tenantManaTopUpCheckoutStarted/messages/tenantManaTopUpCheckoutStarted'
+
+components:
+  messages:
+    TenantManaTopUpCheckoutStarted:
+      name: TenantManaTopUpCheckoutStarted
+      title: Stripe Checkout Session created for a tenant mana pool top-up
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/payments/tenant_mana_topup.proto#/chora.payments.v1.TenantManaTopUpCheckoutStarted'

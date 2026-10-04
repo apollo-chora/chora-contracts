@@ -1,0 +1,432 @@
+// =============================================================================
+// Chora Transaction History Service (gRPC) — Contextual Transaction History
+// =============================================================================
+//
+// Source-of-truth: docs/architecture/adrs/adr-208-contextual-transaction-history.md
+//   + docs/CONTEXTUAL-TRANSACTION-HISTORY-PLAN-2026-06-29.md (sec 3, 4, 7 row A1)
+//   + .claude/rules/ddd-enforcement.md
+//
+// Read surface for the unified, per-scope transaction ledger (ADR-208). The
+// ledger is a CQRS read projection (`transaction_ledger`) owned by the
+// Tenancy + Billing domain (chora_tenancy database), event-fed from
+// chora_payments / chora_identity (user_mana) / chora_observability
+// (token_usage) — see the A2 source-event protos. Cross-DB queries are
+// FORBIDDEN; the projection NEVER joins those DBs, it subscribes to their
+// events. This service only READS the projection.
+//
+// One contract serves all three ADR-208 scopes (D1), each mapped to an
+// EXISTING isolation mechanism — scope is explicit, never an accident of the
+// roles a JWT happens to carry:
+//   - LEARNER (A+ /a/transactions)  — own GCID, RLS by learner_gcid.
+//   - TENANT  (H+ /h/transactions)  — own tenant, set chora.tenant_id GUC.
+//   - MASTER  (= PLATFORM_OPERATOR, ADR-165) — cross-franchisee span-all via
+//     WithRLSBypass(ctx) + mandatory governance audit BEFORE SQL, OR a single
+//     franchisee via TransactionFilters.managed_tenant_id.
+//
+// The caller's binding identity (learner_gcid for LEARNER, tenant_id for
+// TENANT) is injected server-side from the authenticated ChoraSession — it is
+// NOT client-supplied. The only identity-shaped request fields are the
+// deliberate operator/admin choices managed_tenant_id (MASTER selector)
+// and the learner_gcid drill filter (TENANT/MASTER).
+//
+// Deployed in chora-tenancy (Team 3 / Platform). mTLS via Cloud Service Mesh;
+// SPIFFE identity in mesh; W3C trace context in gRPC metadata. The
+// chora-gateway BFF fronts this with the REST surface in
+// openapi/transaction-history.yaml (learner /me + admin /admin).
+//
+// Per ADR-208 ACCEPTED 2026-06-29 — supersedes the payments-admin
+// ListPurchaseHistory read path (CHO-1931 won't-fix).
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.services.tenancy.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/tenancy/v1;tenancyv1";
+
+import "google/protobuf/timestamp.proto";
+
+// -----------------------------------------------------------------------------
+// Service
+// -----------------------------------------------------------------------------
+
+service TransactionHistoryService {
+  // ListTransactions returns one chronological page of unified ledger rows
+  // (purchases + mana top-ups + per-day mana-spend rollups) for the given
+  // scope, honouring the filters + cursor. Default window is server-bounded
+  // (ADR-208 D5: ~90d) when filters.from is unset.
+  rpc ListTransactions(ListTransactionsRequest)
+      returns (ListTransactionsResponse);
+
+  // GetTransactionDetail drills a single MANA_SPEND_DAILY rollup row open
+  // into its per-call detail rows (transaction_ledger_detail). For other
+  // kinds it returns the parent row with an empty detail list.
+  rpc GetTransactionDetail(GetTransactionDetailRequest)
+      returns (GetTransactionDetailResponse);
+
+  // GetSummary returns server-computed KPIs (counts + totals by currency /
+  // kind / status, mana topped-up vs spent) over the same filtered window —
+  // the summary-first panel above the paginated table (ADR-208 D5).
+  rpc GetSummary(GetSummaryRequest) returns (GetSummaryResponse);
+
+  // StreamTransactionEvents is a long-lived live tail: each new/changed
+  // ledger row matching the scope + kind filter is pushed as it is
+  // projected. from/to are ignored (live only). Backs the SSE surface.
+  rpc StreamTransactionEvents(StreamTransactionEventsRequest)
+      returns (stream TransactionEvent);
+
+  // CreateTransactionExport enqueues an async export of the scope+filter
+  // result set (ADR-208 D5.6 — large sets would time out a synchronous
+  // stream). Returns the freshly-created job (status=PENDING) immediately;
+  // a background worker builds the file, uploads it to GCS, and flips the
+  // job to READY with a signed download URL. The scope authorisation +
+  // (for MASTER) the cross-tenant audit are applied here, BEFORE the job is
+  // persisted — identical to the read RPCs.
+  rpc CreateTransactionExport(CreateTransactionExportRequest)
+      returns (TransactionExportJob);
+
+  // GetTransactionExport polls one export job (own jobs only, scope-checked).
+  // status READY carries the signed download_url + expires_at; FAILED carries
+  // a short error. Backs the BFF poll endpoint
+  // GET /api/v1/{me,admin}/transactions/export/jobs/{job_id}.
+  rpc GetTransactionExport(GetTransactionExportRequest)
+      returns (TransactionExportJob);
+
+  // ListFranchisees returns the franchisee tenants a MASTER (PLATFORM_OPERATOR)
+  // may narrow the ledger to — the children of the platform-root chora-master
+  // tenant, name-searchable. Backs the O+/H+ franchisee multi-select filter
+  // (BFF GET /api/v1/admin/transactions/franchisees). Operator-only; the
+  // tenants registry is RLS-free (no cross-DB, no GUC dance).
+  rpc ListFranchisees(ListFranchiseesRequest)
+      returns (ListFranchiseesResponse);
+}
+
+// -----------------------------------------------------------------------------
+// Shared enums
+// -----------------------------------------------------------------------------
+
+// TransactionScope — the explicit ADR-208 D1 scope. Selected per surface;
+// the binding identity is resolved server-side from the ChoraSession, never
+// inferred from which roles the JWT carries.
+enum TransactionScope {
+  TRANSACTION_SCOPE_UNSPECIFIED = 0;
+  // Learner's own rows (A+). Bound to the caller GCID + active tenant.
+  TRANSACTION_SCOPE_LEARNER = 1;
+  // A tenant admin's own tenant, all members (H+). Bound to JWT tenant_id.
+  TRANSACTION_SCOPE_TENANT = 2;
+  // chora-master super admin (PLATFORM_OPERATOR, ADR-165): cross-franchisee
+  // span-all by default, or one franchisee via filters.managed_tenant_id.
+  TRANSACTION_SCOPE_MASTER = 3;
+}
+
+// TransactionKind — the unified row kind (ADR-208 D3 / plan sec 3.1).
+enum TransactionKind {
+  TRANSACTION_KIND_UNSPECIFIED = 0;
+  // A Stripe-backed purchase (any of the chora_payments aggregates that is
+  // not a mana top-up): course / application / companion-egg / subscription /
+  // KYC / tenant add-on.
+  TRANSACTION_KIND_PURCHASE = 1;
+  // A mana top-up (replenish) — a purchase whose effect is mana credit.
+  TRANSACTION_KIND_MANA_TOPUP = 2;
+  // A per-day rollup of mana SPEND (debits per AI action). Drill open via
+  // GetTransactionDetail for the per-call breakdown.
+  TRANSACTION_KIND_MANA_SPEND_DAILY = 3;
+}
+
+// TransactionStatus — normalised surface status across both fiat purchases
+// and mana movements (ADR-208 plan sec 3.1). POSTED is the terminal status
+// for mana movements, which have no Stripe payment-phase FSM.
+enum TransactionStatus {
+  TRANSACTION_STATUS_UNSPECIFIED = 0;
+  TRANSACTION_STATUS_CAPTURED = 1;
+  TRANSACTION_STATUS_REFUNDED = 2;
+  TRANSACTION_STATUS_FAILED = 3;
+  TRANSACTION_STATUS_EXPIRED = 4;
+  // Mana credit/debit movement recorded (no payment FSM).
+  TRANSACTION_STATUS_POSTED = 5;
+}
+
+// -----------------------------------------------------------------------------
+// Core ledger shapes
+// -----------------------------------------------------------------------------
+
+// TransactionAmount — a row carries EITHER a fiat amount (currency +
+// amount_minor) OR a mana amount (mana_units), never both. The unused leg is
+// zero/empty. mana_units is signed: positive = credit/top-up, negative =
+// spend.
+message TransactionAmount {
+  // ISO-4217 3-letter currency code (lowercase). Empty for mana-only rows.
+  string currency = 1;
+  // Fiat amount in minor units (cents). 0 for mana-only rows.
+  int64 amount_minor = 2;
+  // Signed mana units. 0 for fiat-only rows.
+  int64 mana_units = 3;
+}
+
+// TransactionLedgerItem — one unified timeline row (the `transaction_ledger`
+// projection shape, ADR-208 D3 / plan sec 3.1). All rows carry tenant_id so
+// the MASTER view can conditionally render the tenant/franchisee column.
+message TransactionLedgerItem {
+  // UUIDv7 primary key of the projection row.
+  string ledger_id = 1;
+  // When the underlying financial event occurred (sort key).
+  google.protobuf.Timestamp occurred_at = 2;
+  // Tenant scope. Always emitted.
+  string tenant_id = 3;
+  // Buyer / spender GCID. Empty for tenant-level rows with no learner.
+  string learner_gcid = 4;
+  TransactionKind kind = 5;
+  // Originating domain: "payments" | "identity" | "observability".
+  string source_domain = 6;
+  // Soft reference into the source domain: purchase_id, mana txn id, or the
+  // day-key for a MANA_SPEND_DAILY rollup. No cross-DB FK.
+  string source_ref_id = 7;
+  // Human-readable label (e.g. "Course: Intro to X", "Mana top-up",
+  // "Mana spent — 2026-06-29").
+  string label = 8;
+  TransactionAmount amount = 9;
+  TransactionStatus status = 10;
+  // True when kind=MANA_SPEND_DAILY and per-call detail rows exist — the FE
+  // renders an expand affordance only then.
+  bool has_detail = 11;
+  // Free-form projection metadata as a JSON string (aggregate-specific, e.g.
+  // course_id / sku / plan_sku). Mirrors the payments PaymentEvent idiom.
+  string metadata_json = 12;
+}
+
+// TransactionDetailItem — one per-call mana-spend row under a
+// MANA_SPEND_DAILY parent (the `transaction_ledger_detail` companion). Highest
+// cardinality data; only returned on an explicit single-row drill-down.
+message TransactionDetailItem {
+  // UUIDv7 of the detail row.
+  string detail_id = 1;
+  // Parent MANA_SPEND_DAILY ledger_id.
+  string ledger_id = 2;
+  string tenant_id = 3;
+  string learner_gcid = 4;
+  google.protobuf.Timestamp occurred_at = 5;
+  // AI action code that spent the mana (e.g. "question_generation",
+  // "oe_grading", "image_generation").
+  string action_code = 6;
+  // Mana spent by this call (positive magnitude).
+  int64 mana_units = 7;
+  // Model the call resolved to (e.g. "gemini-2.5-flash").
+  string model = 8;
+  // W3C trace id for cross-referencing Cloud Trace.
+  string trace_id = 9;
+  string metadata_json = 10;
+}
+
+// TransactionFilters — shared filter set across list / summary / stream
+// (ADR-208 plan sec 4). UNSPECIFIED enum values mean "no filter on this axis".
+message TransactionFilters {
+  // Restrict to a single kind. UNSPECIFIED = all kinds.
+  TransactionKind kind = 1;
+  // Restrict to a single status. UNSPECIFIED = any status.
+  TransactionStatus status = 2;
+  // Inclusive lower bound on occurred_at. Unset => server default window
+  // (ADR-208 D5 bounded first paint, ~90d).
+  google.protobuf.Timestamp from = 3;
+  // Exclusive upper bound on occurred_at. Unset => now.
+  google.protobuf.Timestamp to = 4;
+  // Sort spec: "occurred_at:desc" (default) | "occurred_at:asc" |
+  // "amount:desc" | "amount:asc". Keyset-compatible fields only.
+  string sort = 5;
+  // MASTER scope only: narrow the cross-franchisee span-all to a SET of
+  // franchisee tenants (OR semantics — a row matches if its tenant_id is in
+  // the set). Each element must be a tenant UUID. Empty = span all franchisees.
+  // A single id keeps the RLS-GUC single-franchisee path (back-compat with the
+  // former singular `managed_tenant_id`); 2+ engages span-all + a tenant_id
+  // predicate. Ignored for LEARNER / TENANT scope. (Same field number 6; a
+  // repeated string is wire-compatible with the singular string it replaces.)
+  repeated string managed_tenant_ids = 6;
+  // TENANT / MASTER scope only: drill into a SET of learners' rows (OR
+  // semantics — a row matches if its learner_gcid is in the set). Each element
+  // must be a learner GCID (UUID). Empty = no learner filter. Ignored for
+  // LEARNER scope (the caller is already the only learner). A single id is a
+  // 1-element set — back-compat with the former singular `learner_gcid`
+  // (same field number 7; a repeated string is wire-compatible with the
+  // singular string it replaces).
+  repeated string learner_gcids = 7;
+}
+
+// -----------------------------------------------------------------------------
+// ListTransactions
+// -----------------------------------------------------------------------------
+
+message ListTransactionsRequest {
+  // REQUIRED. The explicit ADR-208 scope (D1).
+  TransactionScope scope = 1;
+  // Optional filters; an unset message means "defaults" (bounded window, all
+  // kinds/statuses, occurred_at:desc).
+  TransactionFilters filters = 2;
+  // Opaque cursor from a prior next_page_token. Empty on the first call.
+  string page_token = 3;
+  // 10 | 20 | 50 | 100. Default 20 when unset (=0).
+  int32 page_size = 4;
+}
+
+message ListTransactionsResponse {
+  repeated TransactionLedgerItem items = 1;
+  // Opaque cursor for the next page. Empty on the final page.
+  string next_page_token = 2;
+  // True iff next_page_token != "".
+  bool has_more = 3;
+}
+
+// -----------------------------------------------------------------------------
+// GetTransactionDetail (mana_spend_daily drill-down)
+// -----------------------------------------------------------------------------
+
+message GetTransactionDetailRequest {
+  // REQUIRED. Scope under which the parent row is authorised + read.
+  TransactionScope scope = 1;
+  // The MANA_SPEND_DAILY (or other) parent row to expand.
+  string ledger_id = 2;
+  // Opaque cursor over the detail rows. Empty on the first call.
+  string page_token = 3;
+  // 10 | 20 | 50 | 100. Default 50 when unset (=0) — detail pages are denser.
+  int32 page_size = 4;
+}
+
+message GetTransactionDetailResponse {
+  // The parent ledger row (echoed for context).
+  TransactionLedgerItem parent = 1;
+  // Per-call detail rows for this page (empty for non-rollup kinds).
+  repeated TransactionDetailItem details = 2;
+  string next_page_token = 3;
+  bool has_more = 4;
+}
+
+// -----------------------------------------------------------------------------
+// GetSummary (summary-first KPIs)
+// -----------------------------------------------------------------------------
+
+message GetSummaryRequest {
+  TransactionScope scope = 1;
+  TransactionFilters filters = 2;
+}
+
+message TransactionSummary {
+  // Total ledger rows in the filtered window.
+  int64 total_count = 1;
+  // Net fiat captured (captured minus refunded) in minor units, keyed by
+  // ISO-4217 currency — cross-currency is NOT summed (ADR-208: deferred).
+  map<string, int64> amount_minor_by_currency = 2;
+  // Total mana credited (top-ups) over the window.
+  int64 total_mana_topped_up = 3;
+  // Total mana spent (sum of daily rollups) over the window.
+  int64 total_mana_spent = 4;
+  // Row counts by kind (key = TransactionKind enum name).
+  map<string, int64> count_by_kind = 5;
+  // Row counts by status (key = TransactionStatus enum name).
+  map<string, int64> count_by_status = 6;
+  // The effective window the KPIs were computed over (after server defaults).
+  google.protobuf.Timestamp window_from = 7;
+  google.protobuf.Timestamp window_to = 8;
+}
+
+message GetSummaryResponse {
+  TransactionSummary summary = 1;
+}
+
+// -----------------------------------------------------------------------------
+// StreamTransactionEvents (live tail)
+// -----------------------------------------------------------------------------
+
+message StreamTransactionEventsRequest {
+  TransactionScope scope = 1;
+  // Only kind / managed_tenant_ids / learner_gcids are honoured; the
+  // from/to window is ignored for a live tail.
+  TransactionFilters filters = 2;
+}
+
+message TransactionEvent {
+  // The new or updated ledger row.
+  TransactionLedgerItem item = 1;
+  // Change type for the live row. The ledger is idempotent upsert-only, so
+  // this is "upsert" today; reserved for future "void"/"correct" semantics.
+  string change_type = 2;
+  // When the change was observed (server time).
+  google.protobuf.Timestamp observed_at = 3;
+}
+
+// -----------------------------------------------------------------------------
+// Async export (ADR-208 D5.6) — CreateTransactionExport / GetTransactionExport
+// -----------------------------------------------------------------------------
+
+// ExportFormat — the serialisation of the exported result set.
+enum ExportFormat {
+  EXPORT_FORMAT_UNSPECIFIED = 0;
+  EXPORT_FORMAT_CSV = 1;
+  EXPORT_FORMAT_JSON = 2;
+}
+
+// ExportStatus — the async job lifecycle. A worker advances
+// PENDING → BUILDING → READY (signed URL present) or → FAILED (error set).
+enum ExportStatus {
+  EXPORT_STATUS_UNSPECIFIED = 0;
+  EXPORT_STATUS_PENDING = 1;
+  EXPORT_STATUS_BUILDING = 2;
+  EXPORT_STATUS_READY = 3;
+  EXPORT_STATUS_FAILED = 4;
+}
+
+// TransactionExportJob — the async export handle (the OpenAPI ExportJob shape).
+message TransactionExportJob {
+  // UUID of the export job.
+  string job_id = 1;
+  ExportStatus status = 2;
+  ExportFormat format = 3;
+  // When the job was requested (server time).
+  google.protobuf.Timestamp created_at = 4;
+  // Signed GCS download URL. Set only when status = READY.
+  string download_url = 5;
+  // Signed-URL expiry. Set only when status = READY.
+  google.protobuf.Timestamp expires_at = 6;
+  // Short failure reason. Set only when status = FAILED.
+  string error = 7;
+}
+
+message CreateTransactionExportRequest {
+  // REQUIRED. The ADR-208 scope the export runs under (same authorisation +
+  // MASTER audit as the read RPCs).
+  TransactionScope scope = 1;
+  // The same filter set as ListTransactions — the export covers exactly the
+  // filtered window (no cursor; the worker paginates internally).
+  TransactionFilters filters = 2;
+  // REQUIRED. CSV or JSON.
+  ExportFormat format = 3;
+}
+
+message GetTransactionExportRequest {
+  // REQUIRED. Scope under which the job was created + is polled.
+  TransactionScope scope = 1;
+  // The job to poll.
+  string job_id = 2;
+}
+
+// -----------------------------------------------------------------------------
+// ListFranchisees — the MASTER's franchisee directory for the filter picker.
+// -----------------------------------------------------------------------------
+
+message ListFranchiseesRequest {
+  // Optional case-insensitive name substring filter (empty = all franchisees).
+  string q = 1;
+  // Page size (server-clamped; 0 = default).
+  int32 page_size = 2;
+  // Opaque forward cursor from a prior response (empty = first page).
+  string page_token = 3;
+}
+
+// Franchisee is one tenant the MASTER may narrow the ledger to.
+message Franchisee {
+  string tenant_id = 1;
+  string name = 2;
+}
+
+message ListFranchiseesResponse {
+  repeated Franchisee franchisees = 1;
+  // Empty when this is the last page.
+  string next_page_token = 2;
+}

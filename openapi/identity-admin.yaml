@@ -1,0 +1,1143 @@
+openapi: "3.2.0"
+info:
+  title: "Chora Identity Admin API"
+  version: "1.7.0"
+  description: |
+    Admin-only REST API for the Identity supporting domain.
+
+    Covers GCID/AGID lookup, tenancy membership management, and account
+    lifecycle transitions (federated closure saga).
+
+    Owning domain : Identity (`chora_identity` database)
+    Owning team   : Team 3 (Platform)
+    Surface       : H+ Hub+ (admin) + O+ Observability+ (auditor read-only)
+
+    AP-01: This contract exists BEFORE implementation. No GraphQL —
+    admin-only.
+
+    Authorization: Bearer JWT issued by Identity Platform. Auditor role gets
+    read-only access to all endpoints; only OWNER/ADMIN may mutate.
+  contact:
+    name: "Chora Platform Team (Team 3)"
+  license:
+    name: "Proprietary"
+
+servers:
+  - url: "https://api.chora.app"
+    description: "Production"
+  - url: "http://localhost:8080"
+    description: "Local development"
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: GCID
+    description: "Global Chora ID admin operations"
+  - name: AGID
+    description: "Agent Identity admin operations"
+  - name: TenantMembership
+    description: "GCID-Tenant membership management"
+  - name: AccountLifecycle
+    description: "Account lifecycle (federated closure saga)"
+  - name: TenantIdpProvider
+    description: "Per-tenant identity-provider configuration (OIDC/SAML/Singpass — Setup Wizard step 3 + re-entry hydration)"
+  - name: Health
+    description: "Health check"
+
+paths:
+  /api/v1/admin/gcid/{gcid}:
+    parameters:
+      - $ref: "#/components/parameters/GcidPath"
+    get:
+      operationId: getGcid
+      summary: "Look up a GCID record"
+      description: "Returns the GlobalChoraID record. Soft-deleted records are not returned."
+      tags: [GCID]
+      responses:
+        "200":
+          description: "GCID found"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GlobalChoraID"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/gcid/{gcid}/links:
+    parameters:
+      - $ref: "#/components/parameters/GcidPath"
+    get:
+      operationId: listGcidLinks
+      summary: "List IdP links for a GCID"
+      tags: [GCID]
+      responses:
+        "200":
+          description: "Links listed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GcidLinkListResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/admin/agid/{agid}:
+    parameters:
+      - $ref: "#/components/parameters/AgidPath"
+    get:
+      operationId: getAgid
+      summary: "Look up an AGID record"
+      description: |
+        Returns the AgentIdentity record. AGIDs are distinct from GCIDs;
+        agents CANNOT hold TenantMembership.
+      tags: [AGID]
+      responses:
+        "200":
+          description: "AGID found"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentIdentity"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: revokeAgid
+      summary: "Revoke an AGID"
+      description: "Soft-deletes the AgentIdentity. Emits chora.identity.agid.revoked.v1."
+      tags: [AGID]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RevokeAgidRequest"
+      responses:
+        "204":
+          description: "AGID revoked"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/admin/agid:
+    post:
+      operationId: issueAgid
+      summary: "Issue a new AGID"
+      description: |
+        Mints a new Agent Identity (AGID). For EXTERNAL_PARTNER and BYOA
+        agents only — CHORA_INTERNAL_CREW AGIDs are provisioned platform-side.
+      tags: [AGID]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IssueAgidRequest"
+      responses:
+        "201":
+          description: "AGID issued"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentIdentity"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /api/v1/admin/tenant-memberships:
+    get:
+      operationId: listTenantMemberships
+      summary: "List tenant memberships (filtered)"
+      tags: [TenantMembership]
+      parameters:
+        - $ref: "#/components/parameters/TenantIdQuery"
+        - $ref: "#/components/parameters/GcidQuery"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: "Memberships listed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantMembershipListResponse"
+    post:
+      operationId: grantTenantMembership
+      summary: "Grant a tenant membership to a GCID"
+      tags: [TenantMembership]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GrantTenantMembershipRequest"
+      responses:
+        "201":
+          description: "Membership granted"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantMembership"
+        "409":
+          description: "Active membership already exists for GCID + tenant"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /api/v1/admin/tenant-memberships/{membershipId}:
+    parameters:
+      - name: membershipId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    delete:
+      operationId: revokeTenantMembership
+      summary: "Revoke a tenant membership"
+      tags: [TenantMembership]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RevokeTenantMembershipRequest"
+      responses:
+        "204":
+          description: "Membership revoked"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/admin/tenant-members:
+    get:
+      operationId: searchTenantMembers
+      summary: "Search active members of the caller's tenant (picker UX)"
+      description: |
+        Returns USERS who hold an active TenantMembership in the caller's tenant,
+        optionally filtered by free-text query against email substring +
+        display_name substring (case-insensitive). Distinct from
+        `listTenantMemberships` — that returns membership-row admin records;
+        this returns enriched USER projection (gcid + email + display_name + roles)
+        for picker UX (e.g., assessment `invited_gcids[]` per ADR-155 §D9).
+
+        **Authorization**: TRAINING_ADMIN or TENANT_ADMIN role required for the
+        default (own-tenant) search.
+
+        **Operator cross-tenant read (S4 / CHO-2000)**: a `PLATFORM_OPERATOR`
+        may instead pass `managed_tenant_id` to search a TARGET franchisee's
+        members cross-tenant (backs the H+ master transaction-history
+        learner-by-name filter). RLS stays ENFORCED — the target becomes the
+        `chora.tenant_id` GUC (NOT an RLS bypass) — and a fail-closed IMDA-D1
+        `cross_tenant_members_viewed` accountability record is emitted BEFORE
+        the read (a failed emit aborts the read). Non-operators passing
+        `managed_tenant_id` are rejected 403.
+
+        **Exclusions**:
+          - SUSPENDED / CLOSING / PSEUDONYMIZED / CRYPTO_SHREDDED accounts (per closure saga state)
+          - Members of OTHER tenants (RLS-enforced via `SET LOCAL chora.tenant_id`; for the operator path the GUC is the selected `managed_tenant_id`)
+          - Self-membership entries with `revoked_at != null`
+
+        **Sort**: results ordered by `last_active_at` DESC (most recently
+        active first); deterministic tiebreak by `display_name` ASC.
+
+        **Pagination**: cursor-based via `page_token`. `next_page_token` is
+        null at end-of-list.
+      tags: [TenantMembership]
+      parameters:
+        - name: q
+          in: query
+          required: false
+          description: "Free-text search; matches email substring OR display_name substring (case-insensitive). Empty/missing returns recent members."
+          schema:
+            type: string
+            minLength: 2
+            maxLength: 64
+        - name: role
+          in: query
+          required: false
+          description: "Filter by required role membership"
+          schema:
+            type: string
+            enum: [LEARNER, INSTRUCTOR, ADMIN, AUDITOR, OWNER, SUPPORT_AGENT, TRAINING_ADMIN, TENANT_ADMIN, PROCTOR, PLATFORM_OPERATOR]
+        - name: managed_tenant_id
+          in: query
+          required: false
+          description: |
+            PLATFORM_OPERATOR-only cross-tenant selector (S4 / CHO-2000). When
+            present, the read targets THIS franchisee tenant instead of the
+            caller's own — the operator's mesh tenant header is ignored. RLS
+            stays enforced (target = `chora.tenant_id` GUC); a fail-closed
+            IMDA-D1 audit fires before the read. Non-operators → 403; a
+            malformed (non-UUID) value → 422.
+          schema:
+            type: string
+            format: uuid
+        - name: page_size
+          in: query
+          required: false
+          schema:
+            type: integer
+            enum: [10, 20, 50, 100]
+            default: 20
+        - name: page_token
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 512
+      responses:
+        "200":
+          description: "Page of tenant members"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantMemberSearchResponse"
+              examples:
+                default:
+                  value:
+                    items:
+                      - gcid: "00000000-0000-7000-8000-000000001999"
+                        email: "daleleung76@gmail.com"
+                        display_name: "Dale (multi-role test)"
+                        roles: [ADMIN, INSTRUCTOR]
+                        last_active_at: "2026-05-16T01:32:00Z"
+                    next_page_token: null
+                    total: 1
+        "403":
+          description: "Caller lacks the required role — TRAINING_ADMIN/TENANT_ADMIN for the own-tenant search, or PLATFORM_OPERATOR when `managed_tenant_id` is supplied."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: "Invalid query parameter (malformed `managed_tenant_id`, `q` length, `page_size`, or `page_token`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    post:
+      operationId: addTenantMemberByEmail
+      summary: "Add a member to the caller's tenant by email (L1 Tenant lane)"
+      description: |
+        Resolves `email` to an existing User (FindByEmail), rejects AGID-shaped
+        identities, and creates a TenantMembership with the given role in the
+        CALLER'S tenant. The tenant id comes from the propagated trust header
+        (`chora-tenant-id`, legacy `X-Tenant-Id`) — NEVER from the request
+        body (contrast `grantTenantMembership`, the platform-operator
+        endpoint that takes an explicit tenant_id).
+
+        **Authorization**: TRAINING_ADMIN or TENANT_ADMIN role required
+        (same gate as `searchTenantMembers`).
+
+        Email-invite-with-acceptance (pending state + email delivery) is a
+        named follow-up — this endpoint adds EXISTING users directly.
+      tags: [TenantMembership]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddTenantMemberByEmailRequest"
+      responses:
+        "201":
+          description: "Membership created; enriched member projection returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantMemberSummary"
+        "400":
+          description: "Invalid body / AGID rejected (IDENTITY_AGID_REJECTED)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: "Caller lacks TRAINING_ADMIN/TENANT_ADMIN role"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: "No user with that email (IDENTITY_USER_NOT_FOUND)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: "Membership already exists for (gcid, tenant) (IDENTITY_MEMBERSHIP_DUPLICATE)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/admin/tenant-members/{gcid}/role:
+    parameters:
+      - name: gcid
+        in: path
+        required: true
+        description: "Member's GCID; with the caller's tenant (trust header) it uniquely identifies the membership row."
+        schema:
+          type: string
+          format: uuid
+    patch:
+      operationId: changeTenantMemberRole
+      summary: "Change a member's role within the caller's tenant (L1 Tenant lane)"
+      description: |
+        Updates the single-role TenantMembership identified by
+        (path gcid, header tenant). Cross-tenant membership ids are never
+        confirmable — a membership outside the caller's tenant returns 404.
+
+        **Authorization**: TRAINING_ADMIN or TENANT_ADMIN role required.
+      tags: [TenantMembership]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangeTenantMemberRoleRequest"
+      responses:
+        "200":
+          description: "Role changed; enriched member projection returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantMemberSummary"
+        "400":
+          description: "Invalid role"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: "Caller lacks TRAINING_ADMIN/TENANT_ADMIN role"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: "No membership for (gcid, caller tenant)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/admin/tenant-members/{gcid}:
+    parameters:
+      - name: gcid
+        in: path
+        required: true
+        description: "Member's GCID; with the caller's tenant (trust header) it identifies the member to remove."
+        schema:
+          type: string
+          format: uuid
+    delete:
+      operationId: removeTenantMember
+      summary: "Remove a member from the caller's tenant — soft-delete all roles (WS2b)"
+      description: |
+        Member-centric revoke (CHO-1869 WS2b). SOFT-DELETES every live role row
+        for (path gcid, header tenant) in BOTH the authoritative
+        chora_tenancy.members store and the chora_identity mirror, so the member
+        can no longer log in to this tenant. NEVER hard-deletes (soft-delete +
+        the closure saga own erasure). Removing a member from a non-master
+        tenant leaves their chora-master baseline intact (ADR-182); at next
+        resolve a zero-membership GCID is re-auto-enrolled into chora-master
+        only. A member with no live membership for the caller's tenant — already
+        removed, or cross-tenant (never confirmable) — returns 404.
+
+        Distinct from `revokeTenantMembership`
+        (DELETE /tenant-memberships/{membershipId}), which targets one membership
+        ROW by id. The H+ roster is gcid-keyed (no membership_id surfaced), so
+        this is the path the FE uses to remove a member.
+
+        **Authorization**: TRAINING_ADMIN or TENANT_ADMIN role required.
+      tags: [TenantMembership]
+      responses:
+        "204":
+          description: "Member removed (all roles for the caller's tenant soft-deleted)"
+        "403":
+          description: "Caller lacks TRAINING_ADMIN/TENANT_ADMIN role"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: "No live membership for (gcid, caller tenant)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/admin/accounts/{accountId}/lifecycle:
+    parameters:
+      - name: accountId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getAccountLifecycle
+      summary: "Get current account lifecycle state + saga history"
+      tags: [AccountLifecycle]
+      responses:
+        "200":
+          description: "Lifecycle state retrieved"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountLifecycleState"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      operationId: transitionAccountLifecycle
+      summary: "Transition an account to a new lifecycle state"
+      description: |
+        Drives the federated closure saga. Valid transitions:
+        ACTIVE -> CLOSING (learner-initiated grace), CLOSING -> SUSPENDED,
+        SUSPENDED -> ACTIVE (reactivate), SUSPENDED -> PSEUDONYMIZED,
+        PSEUDONYMIZED -> COLD_ARCHIVED, COLD_ARCHIVED -> CRYPTO_SHREDDED.
+        Emits chora.identity.account.lifecycle_changed.v1.
+      tags: [AccountLifecycle]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransitionAccountLifecycleRequest"
+      responses:
+        "200":
+          description: "Transition accepted"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountLifecycleState"
+        "409":
+          description: "Invalid state transition for current state"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /api/v1/tenants/me/idp-providers:
+    get:
+      operationId: listMyTenantIdpProviders
+      summary: "List active identity providers for the calling tenant (Setup Wizard re-entry hydration)"
+      description: |
+        Setup Wizard re-entry hydration (CHO-1692). Returns the active
+        `tenant_idp_providers` rows for the caller's tenant so the
+        wizard can pre-fill step 3 (Identity) on re-visit instead of
+        showing a blank form. A fresh tenant with no rows returns 200
+        + empty `items` array (NOT 404) — un-configured IdP is a
+        normal pre-configuration state, not a missing resource.
+
+        `client_secret` is NEVER returned by this endpoint (write-only
+        on POST; lives in Secret Manager). `client_secret_name` is
+        passed through for diagnostic parity.
+
+        The same path serves POST for upsert (see below) — both share
+        the JWT gate + 3-layer route table entry.
+      tags: [TenantIdpProvider]
+      responses:
+        "200":
+          description: "List (possibly empty) of active IdP rows for the caller's tenant"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantIdpProviderListResponse"
+        "401":
+          description: "X-Tenant-Id missing (gateway did not stamp the header)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    post:
+      operationId: upsertMyTenantIdpProvider
+      summary: "Upsert the calling tenant's identity-provider configuration (Setup Wizard step 3)"
+      description: |
+        Setup Wizard Phase C (CHO-1682) step 3 — persists the OIDC /
+        SAML / Singpass configuration the tenant admin completed in
+        the wizard. Identity-domain primitive: the row lives in
+        `chora_identity.tenant_idp_providers` (NOT chora-tenancy).
+
+        **Semantics: idempotent upsert** keyed on
+        `(tenant_id, provider_type)`. Re-applying with the same
+        provider_type updates the existing row in place (no duplicate
+        rows). To switch from `oidc` to `singpass` (or back), call
+        this endpoint with the new `provider_type` — the previous row
+        is soft-deleted, the new one inserted.
+
+        **Secret handling**: `client_secret` is NEVER stored in the
+        DB. On a successful request, chora-identity mints a Secret
+        Manager secret named
+        `idp-client-secret-{tenant_id}-{idp_id}` (CMEK-encrypted),
+        writes the caller-supplied value as a new version, and
+        stores ONLY the resource name in the DB row. The OIDC
+        handshake reads the secret at sign-in time via Workload
+        Identity Federation. `client_secret` is OMITTED from the
+        response. For `provider_type=singpass`, `client_secret`
+        MUST be absent (Singpass NDI uses public key auth).
+
+        On success, the service emits
+        `chora.identity.tenant_idp_provider_configured.v1` via the
+        outbox publisher so chora-tenancy can audit the change and
+        the sign-in flow knows a new IdP is live.
+      tags: [TenantIdpProvider]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpsertTenantIdpProviderRequest"
+      responses:
+        "200":
+          description: "IdP configured; response is the persisted row (without client_secret)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantIdpProviderResponse"
+        "400":
+          description: "Malformed JSON / unknown provider_type / non-http(s) discovery_url / Singpass row supplied a client_secret / OIDC row missing client_id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: "X-Tenant-Id missing (gateway did not stamp the header) or JWT invalid"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: "Secret Manager write failed; no DB row created (atomic — caller may safely retry)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/tenants/me/idp-providers/{providerType}:
+    parameters:
+      - name: providerType
+        in: path
+        required: true
+        description: "Provider type to soft-delete."
+        schema:
+          type: string
+          enum: [oidc, saml, singpass]
+    delete:
+      operationId: deleteMyTenantIdpProvider
+      summary: "Soft-delete the IdP provider config for the calling tenant + provider_type (CHO-1694)"
+      description: |
+        H+ IdP Federation Disconnect CTA (CHO-1694). Soft-deletes the
+        active row for the calling tenant + provider_type. The Secret
+        Manager entry is INTENTIONALLY NOT destroyed — soft-delete is
+        reversible by a future Upsert that reuses the same
+        `client_secret_name`. A hard-purge sweep is a future concern.
+
+        Idempotency: not idempotent. A second DELETE returns 404. The
+        FE should hide / disable the Disconnect button after a success.
+      tags: [TenantIdpProvider]
+      responses:
+        "204":
+          description: "Soft-deleted; no content."
+        "400":
+          description: "providerType segment missing or unknown."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: "X-Tenant-Id missing (gateway did not stamp the header) or JWT invalid."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: "No active row for the (tenant, provider_type) pair (already deleted or never configured)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /healthz:
+    get:
+      operationId: healthCheck
+      summary: "Health check"
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: "Healthy"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: "JWT issued by Identity Platform"
+
+  parameters:
+    GcidPath:
+      name: gcid
+      in: path
+      required: true
+      description: "Global Chora ID (UUIDv7)"
+      schema:
+        type: string
+        format: uuid
+    AgidPath:
+      name: agid
+      in: path
+      required: true
+      description: "Agent Identity (UUIDv7)"
+      schema:
+        type: string
+        format: uuid
+    TenantIdQuery:
+      name: tenant_id
+      in: query
+      required: false
+      schema:
+        type: string
+        format: uuid
+    GcidQuery:
+      name: gcid
+      in: query
+      required: false
+      schema:
+        type: string
+        format: uuid
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      schema:
+        type: string
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+
+  responses:
+    NotFound:
+      description: "Resource not found"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    InternalError:
+      description: "Internal server error"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ValidationError:
+      description: "Validation failed"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    GlobalChoraID:
+      type: object
+      required: [gcid, account_state, created_at]
+      properties:
+        gcid:
+          type: string
+          format: uuid
+        account_state:
+          type: string
+          enum: [ACTIVE, CLOSING, SUSPENDED, PSEUDONYMIZED, COLD_ARCHIVED, CRYPTO_SHREDDED]
+        identity_provider:
+          type: string
+          enum: [IDENTITY_PLATFORM_NATIVE, MICROSOFT, GOOGLE, SINGPASS, SAML_GENERIC, OIDC_GENERIC]
+        created_at:
+          type: string
+          format: date-time
+
+    GcidLink:
+      type: object
+      required: [identity_provider, provider_subject, linked_at]
+      properties:
+        identity_provider:
+          type: string
+          enum: [IDENTITY_PLATFORM_NATIVE, MICROSOFT, GOOGLE, SINGPASS, SAML_GENERIC, OIDC_GENERIC]
+        provider_subject:
+          type: string
+        linked_at:
+          type: string
+          format: date-time
+
+    GcidLinkListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/GcidLink"
+        next_cursor:
+          type: string
+          nullable: true
+
+    AgentIdentity:
+      type: object
+      required: [agid, owner_org_id, agent_kind, display_name, issued_at]
+      properties:
+        agid:
+          type: string
+          format: uuid
+        owner_org_id:
+          type: string
+        agent_kind:
+          type: string
+          enum: [CHORA_INTERNAL_CREW, EXTERNAL_PARTNER, BYOA]
+        display_name:
+          type: string
+          maxLength: 128
+        issued_at:
+          type: string
+          format: date-time
+        revoked_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    IssueAgidRequest:
+      type: object
+      required: [owner_org_id, agent_kind, display_name]
+      properties:
+        owner_org_id:
+          type: string
+        agent_kind:
+          type: string
+          enum: [EXTERNAL_PARTNER, BYOA]
+        display_name:
+          type: string
+          maxLength: 128
+
+    RevokeAgidRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          maxLength: 512
+
+    TenantMembership:
+      type: object
+      required: [membership_id, gcid, tenant_id, roles, granted_at]
+      properties:
+        membership_id:
+          type: string
+          format: uuid
+        gcid:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        roles:
+          type: array
+          items:
+            type: string
+            enum: [LEARNER, INSTRUCTOR, ADMIN, AUDITOR, OWNER, SUPPORT_AGENT, TRAINING_ADMIN, TENANT_ADMIN, PROCTOR, PLATFORM_OPERATOR]
+        granted_at:
+          type: string
+          format: date-time
+        revoked_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    TenantMembershipListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/TenantMembership"
+        next_cursor:
+          type: string
+          nullable: true
+
+    TenantMemberSummary:
+      type: object
+      description: |
+        Enriched USER projection for picker UX — joins TenantMembership +
+        chora_identity.users.email + display_name. Distinct from the bare
+        `TenantMembership` row (which is membership-record-shaped). Used by
+        `searchTenantMembers` (B6.1 / ADR-155 §D9 cohort scoping picker).
+      required: [gcid, email, roles]
+      properties:
+        gcid:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+          description: "Active email; nullable if account is in PSEUDONYMIZED state (we'd typically exclude such accounts but the schema permits null for forward-compat)."
+          nullable: true
+        display_name:
+          type: string
+          maxLength: 256
+          nullable: true
+        avatar_url:
+          type: string
+          format: uri
+          nullable: true
+        roles:
+          type: array
+          items:
+            type: string
+            enum: [LEARNER, INSTRUCTOR, ADMIN, AUDITOR, OWNER, SUPPORT_AGENT, TRAINING_ADMIN, TENANT_ADMIN, PROCTOR, PLATFORM_OPERATOR]
+        last_active_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: "Best-effort recency timestamp from latest session/activity. Null for never-active accounts."
+
+    TenantMemberSearchResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/TenantMemberSummary"
+        next_page_token:
+          type: string
+          nullable: true
+          description: "Cursor for the next page; null at end-of-list."
+        total:
+          type: integer
+          description: "Optional total count (omitted for very large tenants to avoid expensive count queries)."
+
+    GrantTenantMembershipRequest:
+      type: object
+      required: [gcid, tenant_id, roles]
+      properties:
+        gcid:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        roles:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            enum: [LEARNER, INSTRUCTOR, ADMIN, AUDITOR, OWNER, SUPPORT_AGENT, TRAINING_ADMIN, TENANT_ADMIN, PROCTOR, PLATFORM_OPERATOR]
+
+    RevokeTenantMembershipRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          maxLength: 512
+
+    AddTenantMemberByEmailRequest:
+      type: object
+      required: [email, role]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 320
+          description: "Email of an EXISTING user; resolved via FindByEmail."
+        role:
+          type: string
+          enum: [LEARNER, AUTHOR, INSTRUCTOR, ADMIN, AUDITOR, TRAINING_ADMIN]
+          description: "Single membership role (the tenant_memberships row holds one role; uppercase canonical form, stored lowercase). TRAINING_ADMIN is a label alias resolved server-side to the membership_role `instructor` (role_catalog mig 0014); it is never stored verbatim."
+
+    ChangeTenantMemberRoleRequest:
+      type: object
+      required: [role]
+      properties:
+        role:
+          type: string
+          enum: [LEARNER, AUTHOR, INSTRUCTOR, ADMIN, AUDITOR, TRAINING_ADMIN]
+          description: "New membership role. TRAINING_ADMIN is a label alias resolved server-side to `instructor` (role_catalog mig 0014)."
+
+    AccountLifecycleState:
+      type: object
+      required: [account_id, gcid, current_state]
+      properties:
+        account_id:
+          type: string
+          format: uuid
+        gcid:
+          type: string
+          format: uuid
+        current_state:
+          type: string
+          enum: [ACTIVE, CLOSING, SUSPENDED, PSEUDONYMIZED, COLD_ARCHIVED, CRYPTO_SHREDDED]
+        saga_id:
+          type: string
+          format: uuid
+          nullable: true
+        history:
+          type: array
+          items:
+            $ref: "#/components/schemas/AccountLifecycleHistoryEntry"
+
+    AccountLifecycleHistoryEntry:
+      type: object
+      required: [prior_state, new_state, transitioned_at]
+      properties:
+        prior_state:
+          type: string
+        new_state:
+          type: string
+        reason:
+          type: string
+        transitioned_at:
+          type: string
+          format: date-time
+
+    TransitionAccountLifecycleRequest:
+      type: object
+      required: [target_state, reason]
+      properties:
+        target_state:
+          type: string
+          enum: [CLOSING, SUSPENDED, ACTIVE, PSEUDONYMIZED, COLD_ARCHIVED, CRYPTO_SHREDDED]
+        reason:
+          type: string
+          maxLength: 512
+
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [healthy, degraded]
+        version:
+          type: string
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            correlation_id:
+              type: string
+              format: uuid
+            details:
+              type: object
+
+    UpsertTenantIdpProviderRequest:
+      type: object
+      required: [provider_type]
+      description: |
+        Setup Wizard step 3 request body (CHO-1682). `provider_type`
+        decides which other fields are required:
+          - `oidc`: `client_id` + `client_secret` + `discovery_url` required
+          - `saml`: `discovery_url` required (entity / metadata URL); no
+            secret (SAML uses signing certs, out of scope for this story)
+          - `singpass`: only `singpass_enabled` matters; `client_id` /
+            `client_secret` / `discovery_url` MUST be absent (NDI public
+            key auth — discovery is platform-owned, not tenant-owned).
+      properties:
+        provider_type:
+          type: string
+          enum: [oidc, saml, singpass]
+        client_id:
+          type: string
+          description: "OAuth/OIDC client ID issued by the IdP. Required for `oidc`."
+          maxLength: 256
+        client_secret:
+          type: string
+          description: |
+            OAuth/OIDC client secret. Never stored in the DB — chora-identity
+            writes it to Secret Manager as a new version and stores the
+            resource name. Required for `oidc`; FORBIDDEN for `singpass`.
+            Absent in responses (write-only).
+          maxLength: 1024
+          writeOnly: true
+        discovery_url:
+          type: string
+          format: uri
+          description: |
+            OIDC discovery URL (`.../.well-known/openid-configuration`)
+            for `oidc`, or SAML metadata URL for `saml`. Must be
+            http(s). Forbidden for `singpass`.
+          maxLength: 2048
+        singpass_enabled:
+          type: boolean
+          description: |
+            Only meaningful when `provider_type=singpass`. The wizard
+            persists the choice; the actual Singpass NDI handshake is a
+            separate story.
+          default: false
+
+    TenantIdpProviderResponse:
+      type: object
+      required: [id, tenant_id, provider_type, created_at, updated_at]
+      description: |
+        Persisted state of the tenant's IdP provider row. `client_secret`
+        is intentionally OMITTED — it lives in Secret Manager, referenced
+        only by `client_secret_name` for chora-identity's internal use.
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: "UUIDv7 of the IdP row."
+        tenant_id:
+          type: string
+          format: uuid
+        provider_type:
+          type: string
+          enum: [oidc, saml, singpass]
+        client_id:
+          type: string
+        discovery_url:
+          type: string
+          format: uri
+        singpass_enabled:
+          type: boolean
+        client_secret_name:
+          type: string
+          description: |
+            Secret Manager resource name (e.g.
+            `projects/{n}/secrets/idp-client-secret-{tenant_id}-{idp_id}`).
+            Returned for diagnostic / admin parity ONLY; the value is
+            never exposed by this API.
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    TenantIdpProviderListResponse:
+      type: object
+      required: [items]
+      description: |
+        GET response envelope (CHO-1692). `items` is ALWAYS a non-nil
+        array even when empty so FE hydration code can iterate without
+        null-checks — an un-configured IdP is a normal pre-configuration
+        state, not a missing resource.
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/TenantIdpProviderResponse"

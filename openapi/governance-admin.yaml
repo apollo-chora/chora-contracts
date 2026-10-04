@@ -1,0 +1,1224 @@
+openapi: "3.2.0"
+info:
+  title: "Chora Governance Admin API"
+  version: "1.3.0"
+  description: |
+    Admin-only REST API for the Governance supporting domain.
+
+    Covers Policy CRUD (content moderation, AI usage, retention, RBAC,
+    IMDA / GDPR / PDPA / CCPA), audit log queries, IMDA evidence
+    retrieval, federated closure saga state inspection.
+
+    v1.1.0 (2026-05-08): IMDA dimension labels reconciled to the
+    AssessorFlow o-plus-dashboard gold standard per ADR-141 — canonical
+    enum is now `accountability` / `transparency` / `safety_and_robustness`
+    / `fairness_and_human_oversight`. Deprecated v1 aliases (`risk_levels`,
+    `operations_management`, `internal_governance`,
+    `stakeholder_interaction`) remain accepted on input for one release.
+
+    v1.2.0 (2026-05-26): backfill the O+ hydration HTTP endpoints —
+    `GET /api/hitl/pending` (HITL queue feed for the O+ Governance >
+    Oversight tab) + `GET /api/imda/dimensions/{name}/rubric` (rubric
+    drilldown that powers the O+ /dimensions surface). Both routes live
+    at the `/api/*` prefix (NOT `/api/v1/admin/*`) to match the Phase-B
+    hydration plan and the chora-gateway BFF upstream client paths.
+
+    v1.3.0 (2026-06-01): document the HITL verdict endpoints
+    `POST /api/hitl/decisions/{id}/{approve|reject}` (served by
+    `oplus_handlers.go` hitlDecisionRouter; the chora-gateway BFF proxies
+    them as `/bff/oplus/governance/hitl/{id}/{approve|reject}`). Verdicts are
+    APPEND-only (migration 0009 blocks in-place decision UPDATE) and accept an
+    optional `note` rationale. Contract catch-up per AP-01 — the handlers
+    already ship; claim/release remain undocumented here pending their own
+    contract pass.
+
+    Owning domain : Governance (`chora_governance` database)
+    Owning team   : Team 3 (Platform)
+    Surface       : O+ Observability+ (admin + auditor read-only)
+
+    Auditor role gets read-only access on every endpoint.
+  contact:
+    name: "Chora Platform Team (Team 3)"
+  license:
+    name: "Proprietary"
+
+servers:
+  - url: "https://api.chora.app"
+    description: "Production"
+  - url: "http://localhost:8080"
+    description: "Local development"
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Policy
+    description: "Policy CRUD"
+  - name: Audit
+    description: "Audit log queries"
+  - name: IMDA
+    description: "IMDA evidence + attestation"
+  - name: Closure
+    description: "Federated closure saga state"
+  - name: HITL
+    description: |
+      Human-In-The-Loop queue feed for the O+ Governance > Oversight tab.
+      Read-only — the chora-gateway BFF `/bff/oplus/governance` aggregator
+      pulls the pending queue here. Per ADR-141 Level 3 autonomy is
+      PROHIBITED; AutonomyLevel is one of `hootl|hotl|hitl_l0|hitl_l1|hitl_l2`.
+  - name: Rubric
+    description: |
+      IMDA dimension rubric drilldown for the O+ /dimensions surface.
+      The chora-gateway BFF `/bff/oplus/dimensions` fans out 4 of these
+      requests (one per ADR-141 canonical dimension).
+  - name: Health
+    description: "Health check"
+
+paths:
+  /api/v1/admin/policies:
+    get:
+      operationId: listPolicies
+      summary: "List policies (filtered)"
+      tags: [Policy]
+      parameters:
+        - $ref: "#/components/parameters/PolicyKindQuery"
+        - $ref: "#/components/parameters/TenantIdQuery"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: "Policies listed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyListResponse"
+    post:
+      operationId: createPolicy
+      summary: "Create a policy (DRAFT)"
+      tags: [Policy]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePolicyRequest"
+      responses:
+        "201":
+          description: "Policy created"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Policy"
+
+  /api/v1/admin/policies/{policyId}:
+    parameters:
+      - $ref: "#/components/parameters/PolicyIdPath"
+    get:
+      operationId: getPolicy
+      summary: "Get a policy"
+      tags: [Policy]
+      responses:
+        "200":
+          description: "Policy found"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Policy"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updatePolicy
+      summary: "Update a policy revision"
+      tags: [Policy]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdatePolicyRequest"
+      responses:
+        "200":
+          description: "Policy updated"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Policy"
+
+  /api/v1/admin/policies/{policyId}/publish:
+    parameters:
+      - $ref: "#/components/parameters/PolicyIdPath"
+    post:
+      operationId: publishPolicy
+      summary: "Publish a DRAFT policy"
+      tags: [Policy]
+      responses:
+        "200":
+          description: "Policy published"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Policy"
+
+  /api/v1/admin/policies/{policyId}/retire:
+    parameters:
+      - $ref: "#/components/parameters/PolicyIdPath"
+    post:
+      operationId: retirePolicy
+      summary: "Retire a policy"
+      tags: [Policy]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RetirePolicyRequest"
+      responses:
+        "200":
+          description: "Policy retired"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Policy"
+
+  /api/v1/admin/audit:
+    get:
+      operationId: queryAuditLog
+      summary: "Query the audit log (immutable; append-only)"
+      tags: [Audit]
+      parameters:
+        - $ref: "#/components/parameters/ActorGcidQuery"
+        - $ref: "#/components/parameters/ResourceUriQuery"
+        - $ref: "#/components/parameters/ActionQuery"
+        - $ref: "#/components/parameters/AuditResultQuery"
+        - $ref: "#/components/parameters/FromQuery"
+        - $ref: "#/components/parameters/ToQuery"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: "Audit entries listed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditEntryListResponse"
+
+  /api/v1/admin/imda/evidence:
+    get:
+      operationId: listImdaEvidence
+      summary: "List IMDA evidence records"
+      tags: [IMDA]
+      parameters:
+        - $ref: "#/components/parameters/ImdaDimensionQuery"
+        - $ref: "#/components/parameters/TenantIdQuery"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: "Evidence listed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImdaEvidenceListResponse"
+    post:
+      operationId: gatherImdaEvidence
+      summary: "Record gathered IMDA evidence"
+      tags: [IMDA]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GatherImdaEvidenceRequest"
+      responses:
+        "201":
+          description: "Evidence recorded"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImdaEvidence"
+
+  /api/v1/admin/imda/attestations:
+    get:
+      operationId: listImdaAttestations
+      summary: "List IMDA dimension attestations"
+      tags: [IMDA]
+      parameters:
+        - $ref: "#/components/parameters/ImdaDimensionQuery"
+        - $ref: "#/components/parameters/TenantIdQuery"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: "Attestations listed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImdaAttestationListResponse"
+    post:
+      operationId: attestImdaDimension
+      summary: "Sign an IMDA dimension attestation"
+      tags: [IMDA]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AttestImdaDimensionRequest"
+      responses:
+        "201":
+          description: "Attestation signed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImdaAttestation"
+
+  /api/v1/admin/closure/sagas:
+    get:
+      operationId: listClosureSagas
+      summary: "List closure sagas (active + recent terminal)"
+      tags: [Closure]
+      parameters:
+        - $ref: "#/components/parameters/GcidQuery"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: "Sagas listed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClosureSagaListResponse"
+
+  /api/v1/admin/closure/sagas/{sagaId}:
+    parameters:
+      - name: sagaId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getClosureSaga
+      summary: "Get full saga state with per-domain step history"
+      tags: [Closure]
+      responses:
+        "200":
+          description: "Saga state"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClosureSagaState"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/hitl/pending:
+    get:
+      operationId: listHITLPending
+      summary: "List HITL gates awaiting review (Phase B hydration)"
+      description: |
+        Read-only feed of `hitl_decision_log` rows filtered by HITL
+        verdict status. Tenant scope from the `X-Tenant-Id` header (set
+        by the tenantContext middleware); required.
+
+        Per ADR-141 — Level 3 autonomy is PROHIBITED. The `autonomy_level`
+        field on each row is one of `hootl | hotl | hitl_l0 | hitl_l1 |
+        hitl_l2`.
+
+        "pending" semantics: the canonical `hitl_decision_log` is
+        append-only and records verdicts at decision time. The
+        `pending` filter matches rows whose `decision` is either empty
+        or the literal sentinel `pending` (i.e. gates raised but not yet
+        decided). The other accepted filter tokens are `approve`,
+        `reject`, `edit` (matching the canonical `HitlVerdict` values).
+      tags: [HITL]
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: "Max rows to return. Defaults to 20; capped server-side at 100."
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: offset
+          in: query
+          required: false
+          description: "Offset for pagination (post-filter)."
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: status
+          in: query
+          required: false
+          description: |
+            Status filter token. Defaults to `pending`. Lowercase.
+          schema:
+            type: string
+            enum: [pending, approve, reject, edit]
+            default: pending
+      responses:
+        "200":
+          description: "HITL queue page"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HITLPendingResponse"
+        "400":
+          description: "Missing X-Tenant-Id header"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/hitl/decisions/{id}/approve:
+    post:
+      operationId: approveHITLDecision
+      summary: "Record an APPROVE verdict on a HITL gate"
+      description: |
+        Records an `approve` verdict on the named `hitl_decision_log` gate.
+        APPEND-only: chora_governance migration 0009 blocks an in-place UPDATE
+        of a recorded decision, so the verdict appends a NEW row rather than
+        mutating the pending one. The handler also writes an audit row before
+        responding 200 (`oplus_handlers.go`).
+
+        Tenant scope from the `X-Tenant-Id` header (tenantContext middleware).
+        `operator_gcid` is the auditor's own GCID; `note` is an optional
+        verdict rationale. A verdict by a non-assignee returns 403; a gate that
+        already carries a terminal verdict returns 409.
+      tags: [HITL]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: "HITL decision id (UUIDv7)"
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HITLVerdictRequest"
+      responses:
+        "200":
+          description: "Verdict recorded; body is the appended HITLDecision row"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HITLDecision"
+        "403":
+          description: "Caller is not the current assignee of the gate"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: "Decision not found (cross-tenant ⇒ same — no leak)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: "Terminal verdict already recorded — gate no longer actionable"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: "Invalid body (blank operator_gcid OR malformed JSON)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/hitl/decisions/{id}/reject:
+    post:
+      operationId: rejectHITLDecision
+      summary: "Record a REJECT verdict on a HITL gate"
+      description: |
+        Records a `reject` verdict on the named `hitl_decision_log` gate.
+        Identical semantics + body shape to the approve endpoint above
+        (append-only verdict + audit row, optional `note`, assignee
+        enforcement). Tenant scope from the `X-Tenant-Id` header.
+      tags: [HITL]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: "HITL decision id (UUIDv7)"
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HITLVerdictRequest"
+      responses:
+        "200":
+          description: "Verdict recorded; body is the appended HITLDecision row"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HITLDecision"
+        "403":
+          description: "Caller is not the current assignee of the gate"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: "Decision not found (cross-tenant ⇒ same — no leak)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: "Terminal verdict already recorded — gate no longer actionable"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: "Invalid body (blank operator_gcid OR malformed JSON)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/imda/dimensions/{name}/rubric:
+    get:
+      operationId: getDimensionRubric
+      summary: "Rubric drilldown for one IMDA dimension"
+      description: |
+        Returns the rubric resolver output for the named dimension.
+        `{name}` is canonicalised on input via `imda.Canonicalise()` so
+        v1 aliases (`risk_levels` / `stakeholder_interaction` /
+        `internal_governance` / `operations_management`) are accepted
+        alongside the ADR-141 canonical labels.
+
+        The BFF `/bff/oplus/dimensions` fans out 4 of these calls in
+        parallel (one per canonical dimension) and reshapes the result
+        to the FE-canonical view per the O+ hydration plan.
+      tags: [Rubric]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          description: |
+            ADR-141 canonical dimension label, OR a deprecated v1 alias
+            still accepted on input for one release.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "Rubric items for the dimension"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DimensionRubricResponse"
+        "400":
+          description: |
+            Invalid dimension name (after v1-alias canonicalisation) or
+            missing X-Tenant-Id header.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /healthz:
+    get:
+      operationId: healthCheck
+      summary: "Health check"
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: "Healthy"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    PolicyIdPath:
+      name: policyId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    PolicyKindQuery:
+      name: policy_kind
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [CONTENT_MODERATION, AI_USAGE, DATA_RETENTION, ACCESS_CONTROL, COMPLIANCE_IMDA, COMPLIANCE_GDPR, COMPLIANCE_PDPA, COMPLIANCE_CCPA]
+    TenantIdQuery:
+      name: tenant_id
+      in: query
+      required: false
+      schema:
+        type: string
+        format: uuid
+    GcidQuery:
+      name: gcid
+      in: query
+      required: false
+      schema:
+        type: string
+        format: uuid
+    ActorGcidQuery:
+      name: actor_gcid
+      in: query
+      required: false
+      schema:
+        type: string
+        format: uuid
+    ResourceUriQuery:
+      name: resource_uri
+      in: query
+      required: false
+      schema:
+        type: string
+    ActionQuery:
+      name: action
+      in: query
+      required: false
+      schema:
+        type: string
+    AuditResultQuery:
+      name: result
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [ALLOWED, DENIED, ANOMALY]
+    ImdaDimensionQuery:
+      name: dimension
+      in: query
+      required: false
+      description: |
+        IMDA Model AI Governance Framework v2 dimension (per ADR-141, gold
+        standard from o-plus-dashboard reference).
+
+        Canonical values:
+          - accountability                — D1 (AI Verify #8 Data Governance, #9 Accountability)
+          - transparency                  — D2 (AI Verify #1 Transparency, #2 Explainability)
+          - safety_and_robustness         — D3 (AI Verify #3-#6 Repeatability, Safety, Security, Robustness)
+          - fairness_and_human_oversight  — D4 (AI Verify #7 Fairness, #10 Human Agency, #11 Inclusive Growth)
+
+        DEPRECATED v1 aliases still accepted on input for one release (server
+        normalises to canonical via `imda.Canonicalise()`):
+        risk_levels → accountability;
+        stakeholder_interaction → transparency;
+        internal_governance → safety_and_robustness;
+        operations_management → fairness_and_human_oversight.
+      schema:
+        type: string
+        enum:
+          - accountability
+          - transparency
+          - safety_and_robustness
+          - fairness_and_human_oversight
+    FromQuery:
+      name: from
+      in: query
+      required: false
+      schema:
+        type: string
+        format: date-time
+    ToQuery:
+      name: to
+      in: query
+      required: false
+      schema:
+        type: string
+        format: date-time
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      schema:
+        type: string
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+
+  responses:
+    NotFound:
+      description: "Resource not found"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    ImdaDimension:
+      type: string
+      description: |
+        IMDA Model AI Governance Framework v2 dimension (per ADR-141, gold
+        standard from o-plus-dashboard reference). Aligned with IMDA MGF v2 +
+        AI Verify Testing Framework.
+
+        Canonical values:
+          - accountability                — D1 (AI Verify #8 Data Governance, #9 Accountability)
+          - transparency                  — D2 (AI Verify #1 Transparency, #2 Explainability)
+          - safety_and_robustness         — D3 (AI Verify #3 Repeatability, #4 Safety, #5 Security, #6 Robustness)
+          - fairness_and_human_oversight  — D4 (AI Verify #7 Fairness, #10 Human Agency, #11 Inclusive Growth)
+
+        DEPRECATED v1 aliases still accepted on input for one release (server
+        normalises to canonical via `imda.Canonicalise()`):
+        risk_levels → accountability;
+        stakeholder_interaction → transparency;
+        internal_governance → safety_and_robustness;
+        operations_management → fairness_and_human_oversight.
+      enum:
+        - accountability
+        - transparency
+        - safety_and_robustness
+        - fairness_and_human_oversight
+
+    Policy:
+      type: object
+      required: [policy_id, policy_kind, title, version, status]
+      properties:
+        policy_id:
+          type: string
+          format: uuid
+        policy_kind:
+          type: string
+          enum: [CONTENT_MODERATION, AI_USAGE, DATA_RETENTION, ACCESS_CONTROL, COMPLIANCE_IMDA, COMPLIANCE_GDPR, COMPLIANCE_PDPA, COMPLIANCE_CCPA]
+        title:
+          type: string
+          maxLength: 256
+        version:
+          type: string
+        status:
+          type: string
+          enum: [DRAFT, PUBLISHED, RETIRED]
+        policy_uri:
+          type: string
+          format: uri
+        scope_tenant_id:
+          type: string
+          format: uuid
+          nullable: true
+        published_at:
+          type: string
+          format: date-time
+          nullable: true
+        retired_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    PolicyListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Policy"
+        next_cursor:
+          type: string
+          nullable: true
+
+    CreatePolicyRequest:
+      type: object
+      required: [policy_kind, title, version, policy_uri]
+      properties:
+        policy_kind:
+          type: string
+          enum: [CONTENT_MODERATION, AI_USAGE, DATA_RETENTION, ACCESS_CONTROL, COMPLIANCE_IMDA, COMPLIANCE_GDPR, COMPLIANCE_PDPA, COMPLIANCE_CCPA]
+        title:
+          type: string
+          maxLength: 256
+        version:
+          type: string
+        policy_uri:
+          type: string
+          format: uri
+        scope_tenant_id:
+          type: string
+          format: uuid
+          nullable: true
+
+    UpdatePolicyRequest:
+      type: object
+      properties:
+        title:
+          type: string
+          maxLength: 256
+        version:
+          type: string
+        policy_uri:
+          type: string
+          format: uri
+        changed_sections:
+          type: array
+          items:
+            type: string
+
+    RetirePolicyRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          maxLength: 512
+        successor_policy_id:
+          type: string
+          format: uuid
+          nullable: true
+
+    AuditEntry:
+      type: object
+      required: [audit_id, actor_gcid, target_resource_uri, action, result, occurred_at]
+      properties:
+        audit_id:
+          type: string
+          format: uuid
+        actor_gcid:
+          type: string
+        target_resource_uri:
+          type: string
+        action:
+          type: string
+        result:
+          type: string
+          enum: [ALLOWED, DENIED, ANOMALY]
+        annotation:
+          type: string
+        source_ip:
+          type: string
+        user_agent:
+          type: string
+        occurred_at:
+          type: string
+          format: date-time
+
+    AuditEntryListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuditEntry"
+        next_cursor:
+          type: string
+          nullable: true
+
+    ImdaEvidence:
+      type: object
+      required: [evidence_id, dimension, evidence_uri, gathered_at]
+      properties:
+        evidence_id:
+          type: string
+          format: uuid
+        dimension:
+          $ref: "#/components/schemas/ImdaDimension"
+        evidence_uri:
+          type: string
+          format: uri
+        caption:
+          type: string
+          maxLength: 256
+        scope_tenant_id:
+          type: string
+          format: uuid
+          nullable: true
+        gathered_at:
+          type: string
+          format: date-time
+
+    ImdaEvidenceListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImdaEvidence"
+        next_cursor:
+          type: string
+          nullable: true
+
+    GatherImdaEvidenceRequest:
+      type: object
+      required: [dimension, evidence_uri, caption]
+      properties:
+        dimension:
+          $ref: "#/components/schemas/ImdaDimension"
+        evidence_uri:
+          type: string
+          format: uri
+        caption:
+          type: string
+          maxLength: 256
+        scope_tenant_id:
+          type: string
+          format: uuid
+          nullable: true
+
+    ImdaAttestation:
+      type: object
+      required: [attestation_id, dimension, period, attested_at]
+      properties:
+        attestation_id:
+          type: string
+          format: uuid
+        dimension:
+          $ref: "#/components/schemas/ImdaDimension"
+        scope_tenant_id:
+          type: string
+          format: uuid
+          nullable: true
+        period:
+          type: string
+        evidence_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+        attestation_uri:
+          type: string
+          format: uri
+        attested_at:
+          type: string
+          format: date-time
+
+    ImdaAttestationListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImdaAttestation"
+        next_cursor:
+          type: string
+          nullable: true
+
+    AttestImdaDimensionRequest:
+      type: object
+      required: [dimension, period, evidence_ids, attestation_uri]
+      properties:
+        dimension:
+          $ref: "#/components/schemas/ImdaDimension"
+        scope_tenant_id:
+          type: string
+          format: uuid
+          nullable: true
+        period:
+          type: string
+        evidence_ids:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            format: uuid
+        attestation_uri:
+          type: string
+          format: uri
+
+    ClosureSagaSummary:
+      type: object
+      required: [saga_id, gcid, status, started_at]
+      properties:
+        saga_id:
+          type: string
+          format: uuid
+        gcid:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [IN_PROGRESS, COMPLETED, FAILED]
+        target_state:
+          type: string
+          enum: [PSEUDONYMIZED, COLD_ARCHIVED, CRYPTO_SHREDDED]
+        started_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    ClosureSagaListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClosureSagaSummary"
+        next_cursor:
+          type: string
+          nullable: true
+
+    ClosureSagaState:
+      allOf:
+        - $ref: "#/components/schemas/ClosureSagaSummary"
+        - type: object
+          properties:
+            participating_domains:
+              type: array
+              items:
+                type: string
+            steps:
+              type: array
+              items:
+                $ref: "#/components/schemas/ClosureSagaStep"
+
+    ClosureSagaStep:
+      type: object
+      required: [domain, step_state, completed_at]
+      properties:
+        domain:
+          type: string
+        step_state:
+          type: string
+          enum: [ACTIVE, CLOSING, SUSPENDED, PSEUDONYMIZED, COLD_ARCHIVED, CRYPTO_SHREDDED]
+        records_affected:
+          type: integer
+          format: int64
+        completed_at:
+          type: string
+          format: date-time
+        failed:
+          type: boolean
+        failure_reason:
+          type: string
+
+    # -- HITL queue (Phase B hydration) --
+    HITLVerdictRequest:
+      type: object
+      description: |
+        Request body for `POST /api/hitl/decisions/{id}/{approve|reject}`.
+        `operator_gcid` is the auditor's own GCID (NOT a FE-picked field).
+        `note` is an OPTIONAL free-text verdict rationale; the chora-gateway
+        BFF trims it and forwards it only when non-empty.
+      required: [operator_gcid]
+      properties:
+        operator_gcid:
+          type: string
+          format: uuid
+          description: |
+            UUIDv7 of the auditor recording the verdict. Blank string is
+            rejected with 422.
+        note:
+          type: string
+          description: "Optional operator verdict rationale (free text)."
+
+    HitlVerdict:
+      type: string
+      description: |
+        Canonical HITL operator verdict. `pending` is a non-canonical
+        sentinel surfaced when a gate has been raised but the operator
+        has not yet recorded a final verdict.
+      enum:
+        - pending
+        - approve
+        - reject
+        - edit
+
+    AutonomyLevel:
+      type: string
+      description: |
+        ADR-141 autonomy ladder. Level 3 PROHIBITED — not present in this
+        enum. `hootl` = Human-Out-Of-The-Loop, `hotl` = Human-On-The-Loop,
+        `hitl_l0..l2` = Human-In-The-Loop at the named gate level.
+      enum:
+        - hootl
+        - hotl
+        - hitl_l0
+        - hitl_l1
+        - hitl_l2
+
+    LifecycleStage:
+      type: string
+      description: |
+        IMDA 4-stage lifecycle classifier per envelope.proto field 15.
+      enum:
+        - ci_pre_merge
+        - pre_deploy
+        - runtime
+        - post_deploy
+
+    HITLDecision:
+      type: object
+      description: |
+        Per-row projection of `hitl_decision_log` for the O+ HITL queue.
+        The handler emits this as `hitlPendingItem` in
+        `services/chora-governance/internal/adapter/http/oplus_handlers.go`.
+
+        `operator_gcid` vs `assignee_gcid` — SEMANTICALLY DISTINCT:
+          - `operator_gcid` is the auditor who DECIDED the gate (verdict-time).
+          - `assignee_gcid` is the auditor currently RESPONSIBLE for a
+            pending gate (NULL = unassigned; default at creation).
+        See `evidence.HITLDecision` godoc for the full contract.
+      required:
+        - decision_id
+        - run_id
+        - decision
+        - autonomy_level
+        - lifecycle_stage
+      properties:
+        decision_id:
+          type: string
+          format: uuid
+        run_id:
+          type: string
+          format: uuid
+        operator_gcid:
+          type: string
+          format: uuid
+          description: |
+            Auditor GCID who recorded the verdict. Empty/omitted while
+            the gate is still pending (the field is `omitempty` on the
+            wire).
+        assignee_gcid:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            Auditor GCID currently responsible for the pending gate.
+            `null` = unassigned (default at creation). Set when a
+            reviewer claims the gate via the (deferred to wave N+1)
+            `POST /api/hitl/decisions/{id}/claim` endpoint. NEVER
+            backfilled with `operator_gcid` per
+            [[feedback-no-stubs-real-wiring]].
+        decision:
+          $ref: "#/components/schemas/HitlVerdict"
+        autonomy_level:
+          $ref: "#/components/schemas/AutonomyLevel"
+        edit_payload:
+          type: object
+          additionalProperties: true
+          nullable: true
+          description: |
+            Operator-supplied edits when `decision == "edit"`. Omitted
+            on the wire when nil.
+        lifecycle_stage:
+          $ref: "#/components/schemas/LifecycleStage"
+        decided_at:
+          type: string
+          format: date-time
+          description: "RFC3339 verdict timestamp (empty for pending rows)."
+
+    HITLPendingResponse:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/HITLDecision"
+        total:
+          type: integer
+          minimum: 0
+          description: "Total rows matching the filter (pre-pagination)."
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+        offset:
+          type: integer
+          minimum: 0
+
+    # -- Rubric drilldown (Phase B hydration) --
+    RubricItem:
+      type: object
+      description: |
+        One row of the rubric resolver output for an IMDA dimension.
+        Mirrors `rubric.RubricItem` in the chora-governance domain.
+      required: [id, ref, title, status]
+      properties:
+        id:
+          type: string
+          description: "Rubric item stable id (config-defined)."
+        ref:
+          type: string
+          description: "External reference key (e.g. AI Verify item id)."
+        title:
+          type: string
+        evidence_source:
+          type: string
+          description: |
+            Plain-text description of the evidence source (e.g.
+            "Cloud Trace + AgentDecisionLog"). The BFF derives a
+            `tools[]` slug list from this string.
+        evidence_source_url:
+          type: string
+          format: uri
+        status:
+          type: string
+          description: "Lowercase status: `pass` / `partial` / `fail`."
+        derivation_mode:
+          type: string
+          description: "How the status was derived (e.g. `automated`, `manual`)."
+
+    DimensionRubricResponse:
+      type: object
+      required: [dimension, items, total, pass_rate]
+      properties:
+        dimension:
+          $ref: "#/components/schemas/ImdaDimension"
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/RubricItem"
+        total:
+          type: integer
+          minimum: 0
+        pass_rate:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          description: "Share of items in `pass` status (0.0 .. 1.0)."
+
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            correlation_id:
+              type: string
+              format: uuid

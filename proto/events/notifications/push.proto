@@ -1,0 +1,97 @@
+// =============================================================================
+// chora.notifications.v1 — Push notification events
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 4 D16
+//   (tablet-first; FCM for push to A+ Reader / C+ Connect+ install variants)
+//
+// Owning domain : Notifications (chora_notifications database)
+// Owning team   : Team 3 (Platform)
+// Topic prefix  : chora.notifications.push.*
+//
+// Push notifications use Firebase Cloud Messaging (FCM). Because FCM tokens
+// are PII-adjacent, this proto carries only a SHA-256 hash of the token.
+// The plaintext token lives in chora_notifications.fcm_tokens with RLS.
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.notifications.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/notifications/v1;notificationsv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// PushQueued — chora.notifications.push.queued.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a push notification is enqueued for FCM dispatch
+// (transactional outbox).
+message PushQueued {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — Push aggregate root identifier.
+  string push_id = 2;
+
+  string recipient_gcid = 3;
+
+  // SHA-256 hash of the FCM device token. Plaintext token NEVER leaves
+  // chora_notifications.
+  string fcm_token_hash = 4;
+
+  // SHA-256 hash of the rendered payload (for dedup + audit).
+  string payload_hash = 5;
+
+  // Free-text title (max 80 chars). May be template-rendered.
+  string title = 6;
+
+  google.protobuf.Timestamp queued_at = 7;
+}
+
+// -----------------------------------------------------------------------------
+// PushSent — chora.notifications.push.sent.v1
+// -----------------------------------------------------------------------------
+//
+// Published when FCM accepts the push for dispatch (FCM HTTP API success).
+message PushSent {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string push_id = 2;
+  string recipient_gcid = 3;
+  string fcm_token_hash = 4;
+  string payload_hash = 5;
+
+  // FCM message ID returned in the dispatch response.
+  string fcm_message_id = 6;
+
+  google.protobuf.Timestamp sent_at = 7;
+}
+
+// -----------------------------------------------------------------------------
+// PushFailed — chora.notifications.push.failed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when FCM rejects the push (invalid token, quota exceeded,
+// payload too large). Persistent INVALID_ARGUMENT / UNREGISTERED failures
+// should mark the FCM token as inactive in chora_notifications.
+message PushFailed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string push_id = 2;
+  string recipient_gcid = 3;
+  string fcm_token_hash = 4;
+  string payload_hash = 5;
+
+  // FCM error code (e.g., "UNREGISTERED", "INVALID_ARGUMENT",
+  // "QUOTA_EXCEEDED", "INTERNAL").
+  string failure_code = 6;
+
+  // Free-text failure detail (max 512 chars).
+  string failure_detail = 7;
+
+  google.protobuf.Timestamp failed_at = 8;
+}

@@ -1,0 +1,60 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Payments — ApplicationPaymentRefunded
+  version: 1.0.0
+  description: |
+    Stripe `charge.refunded` — chora-delivery revokes the
+    application enrolment + downstream effects.
+
+    - Domain: Payments (`chora_payments` DB)
+    - Topic: `chora.payments.application_payment.refunded.v1`
+    - Source proto: `proto/events/payments/application_payment.proto`
+       message `chora.payments.v1.ApplicationPaymentRefunded`
+    - Aggregate: ApplicationPayment
+    - Per ADR-164 (chora-payments service + 13th DB).
+    - IMDA: envelope.chora_imda_dimension = "accountability"
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  applicationPaymentRefunded:
+    address: chora.payments.application_payment.refunded.v1
+    messages:
+      applicationPaymentRefunded:
+        $ref: '#/components/messages/ApplicationPaymentRefunded'
+
+operations:
+  publishApplicationPaymentRefunded:
+    action: send
+    channel:
+      $ref: '#/channels/applicationPaymentRefunded'
+    messages:
+      - $ref: '#/channels/applicationPaymentRefunded/messages/applicationPaymentRefunded'
+
+  consumeApplicationPaymentRefunded:
+    action: receive
+    channel:
+      $ref: '#/channels/applicationPaymentRefunded'
+    messages:
+      - $ref: '#/channels/applicationPaymentRefunded/messages/applicationPaymentRefunded'
+
+components:
+  messages:
+    ApplicationPaymentRefunded:
+      name: ApplicationPaymentRefunded
+      title: Stripe refund issued for a course-application payment
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/payments/application_payment.proto#/chora.payments.v1.ApplicationPaymentRefunded'

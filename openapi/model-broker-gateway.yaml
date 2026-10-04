@@ -1,0 +1,269 @@
+openapi: "3.2.0"
+info:
+  title: "Chora Model Broker Gateway API"
+  version: "1.0.0"
+  description: |
+    REST API for the Gateway arm of the 3-service Model Broker
+    (Router + Gateway + Classifier per Tier 2 D6).
+
+    Owning domain : AI Kernel (`chora_ai_kernel` database)
+    Owning team   : Team 3 (Platform)
+    Project       : `chora-489812` (platform host)
+    Surface       : O+ Observability+ (admin only)
+
+    AP-01: This contract exists BEFORE implementation.
+
+    The Gateway sits in front of the Router and Classifier:
+
+      1. Receives request → validates body + headers (AP-01)
+      2. Authorizes the caller (Bearer JWT + X-Tenant-Id + gcid)
+      3. Enforces a per-tenant rate-limit budget (token-bucket)
+      4. Forwards to the Classifier Service for intent + tier
+      5. Forwards to the Router for deterministic model selection
+      6. Returns the unified routing decision
+
+    Per Tier 2 D6 the Gateway also owns retry, fallback, semantic + exact
+    cache (Valkey + pgvector), and atomic TokenUsageLedger writes — those
+    capabilities are deferred to M14 (BLANKET migration). This skeleton
+    establishes only the request validation + budget + downstream forward.
+
+    Authorization: Bearer JWT (mesh internal mTLS) + X-Tenant-Id +
+    gcid headers.
+  contact:
+    name: "Chora Platform Team (Team 3)"
+  license:
+    name: "Proprietary"
+
+servers:
+  - url: "https://api.chora.app"
+    description: "Production"
+  - url: "http://localhost:8080"
+    description: "Local development"
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Health
+    description: "Health + readiness"
+  - name: Broker
+    description: "Unified broker entry — /broker/route + budget"
+
+paths:
+  /healthz:
+    get:
+      operationId: healthz
+      summary: "Liveness probe"
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          $ref: "#/components/responses/Healthy"
+
+  /readyz:
+    get:
+      operationId: readyz
+      summary: "Readiness probe — checks repo + downstream wiring"
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          $ref: "#/components/responses/Healthy"
+        "503":
+          description: "Repos or downstream uninitialised"
+
+  /broker/route:
+    post:
+      operationId: brokerRoute
+      summary: "Validate + budget-check + forward to Classifier + Router"
+      description: |
+        Single-call entry-point for callers (Python orchestrator,
+        BFF gateway). Performs:
+
+          1. Body validation against the BrokerRouteRequest schema
+          2. Auth check (Bearer JWT + tenant + gcid headers)
+          3. Tenant rate-limit token-bucket consume (1 token per call)
+          4. Classifier call → intent + tier
+          5. Router call → selected_model + endpoint + reason
+          6. Returns merged BrokerRouteResponse
+
+        On budget exhaustion → 429 GATEWAY_BUDGET_EXHAUSTED.
+        On classifier failure → 502 GATEWAY_CLASSIFIER_DOWNSTREAM.
+        On router failure → 502 GATEWAY_ROUTER_DOWNSTREAM.
+      tags: [Broker]
+      parameters:
+        - $ref: "#/components/parameters/TenantHeader"
+        - $ref: "#/components/parameters/GcidHeader"
+        - $ref: "#/components/parameters/Traceparent"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BrokerRouteRequest"
+      responses:
+        "200":
+          description: "Routing decision returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BrokerRouteResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /broker/budget:
+    get:
+      operationId: brokerBudget
+      summary: "Tenant rate-limit budget status"
+      description: |
+        Returns the current token-bucket state for the tenant identified
+        by X-Tenant-Id. Capacity + remaining + refill_rate_per_sec.
+      tags: [Broker]
+      parameters:
+        - $ref: "#/components/parameters/TenantHeader"
+        - $ref: "#/components/parameters/GcidHeader"
+      responses:
+        "200":
+          description: "Budget snapshot"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BudgetStatus"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    TenantHeader:
+      name: X-Tenant-Id
+      in: header
+      required: true
+      description: "Tenant UUID propagated from edge (mesh-injected)."
+      schema: { type: string, format: uuid }
+    GcidHeader:
+      name: gcid
+      in: header
+      required: true
+      description: "Global Chora ID UUIDv7 (caller's identity)."
+      schema: { type: string, format: uuid }
+    Traceparent:
+      name: traceparent
+      in: header
+      required: false
+      description: "W3C traceparent header for cross-service trace stitching."
+      schema: { type: string }
+  responses:
+    Healthy:
+      description: "OK"
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              status: { type: string }
+              time: { type: string, format: date-time }
+    BadRequest:
+      description: "Invalid request body or headers"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: "Missing or invalid bearer token"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    RateLimited:
+      description: "Tenant budget exhausted"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    BadGateway:
+      description: "Downstream classifier or router failure"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string, example: "GATEWAY_INVALID_BODY" }
+        message: { type: string }
+    BrokerRouteRequest:
+      type: object
+      required: [agent_intent_hint, prompt_token_count_est, max_tokens, max_cost_usd_micros, risk_tier]
+      properties:
+        agid:
+          type: string
+          format: uuid
+          description: "Optional caller agent identity."
+        agent_intent_hint:
+          type: string
+          description: "Caller-provided intent hint; classifier may override."
+          example: "atom_authoring"
+        prompt_excerpt:
+          type: string
+          description: "Optional first ~512 chars of the prompt; used by classifier."
+        prompt_token_count_est: { type: integer, minimum: 0 }
+        max_tokens: { type: integer, minimum: 0 }
+        max_cost_usd_micros: { type: integer, format: int64, minimum: 0 }
+        risk_tier:
+          type: string
+          enum: [low, medium, high]
+    BrokerRouteResponse:
+      type: object
+      required: [request_id, intent, tier, agent_id, selected_model_id, routed_endpoint, decided_at]
+      properties:
+        request_id: { type: string, format: uuid }
+        intent:
+          $ref: "#/components/schemas/Intent"
+        tier:
+          $ref: "#/components/schemas/Tier"
+        agent_id: { type: string, example: "chora-creation-author-mcq" }
+        selected_model_id: { type: string }
+        routed_endpoint:
+          type: string
+          enum: [vertex-ai, cloud-run-gpu, autopilot-gpu]
+        reason: { type: string }
+        decided_at: { type: string, format: date-time }
+        traceparent: { type: string }
+        budget_remaining: { type: integer }
+    Intent:
+      type: string
+      description: "Canonical Model Broker intent (Classifier-aligned)."
+      enum:
+        - atom_authoring
+        - consumption_query
+        - moderation_check
+        - delivery_admin
+        - sharing_social
+        - a2a_handoff
+        - generic_chat
+    Tier:
+      type: integer
+      description: "Recommended tier (1=fast, 2=balanced, 3=premium)."
+      enum: [1, 2, 3]
+    BudgetStatus:
+      type: object
+      required: [tenant_id, capacity, remaining, refill_rate_per_sec, snapshot_at]
+      properties:
+        tenant_id: { type: string, format: uuid }
+        capacity: { type: integer }
+        remaining: { type: integer }
+        refill_rate_per_sec: { type: number, format: double }
+        snapshot_at: { type: string, format: date-time }

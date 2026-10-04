@@ -1,0 +1,589 @@
+openapi: 3.2.0
+info:
+  title: "Chora Content Delivery — Live Classroom (LiveQuiz + LiveQuizSession) API"
+  version: "1.2.0"
+  description: |
+    Instructor + learner REST API for the Live Classroom in the
+    Content Delivery domain (`chora_delivery`). Covers the **LiveQuiz**
+    authoring aggregate and the ephemeral **LiveQuizSession** realtime
+    aggregate (ADR-168 + ADR-179, CHO-1704).
+
+    This contract back-fills the previously un-spec'd `/api/v1/live-quizzes`
+    + `/api/v1/classroom-sessions` surface (AP-01) and adds the L5.2
+    Live Classroom stage endpoints: join-by-code, nickname join/lobby, the
+    extended learner-safe snapshot (`open_question` / `scoreboard` / `me` /
+    `reveal` / `podium`), and the server-enforced answer window.
+
+    **Errors (v1.1.0)** — every stage 4xx from the session endpoints carries
+    the pinned `StageError` envelope `{error, message, code}`; the FE switches
+    inline copy on the machine `code` (see the schema for the full enum).
+
+    **Security model (ADR-179 D3)** — learner-reachable payloads NEVER carry
+    `is_correct` / `explainer` pre-reveal:
+      - `GET /live-quizzes/{quizId}` is role-forked: admin/instructor roles
+        get the full DTO; learner roles get the learner-safe projection.
+      - The session snapshot carries a learner-safe `open_question` block, so
+        the learner stage never needs the quiz endpoint at all.
+      - A submitter's own grade returns only on their `201` (`your_result`);
+        the WS `answer_graded` broadcast is correctness-stripped.
+      - Reveal payloads obey the quiz's `explainer_mode`.
+
+    **Ephemerality (ADR-179 D4)** — scoreboard/podium derive from the session
+    aggregate (JSONB row); no durable results tables. The durable side-effect
+    is the unchanged-shape Pub/Sub event
+    `chora.delivery.live_quiz_session.score_awarded.v1` (carries `atom_id`;
+    `awarded_points` is bonus-inclusive from this version).
+
+    **Realtime**: `GET /api/v1/live-quizzes/{sessionId}/ws` upgrades to a
+    WebSocket (auth via `?access_token=` query param — browser WS cannot set
+    headers; the gateway proxies the upgrade). Frames
+    (`snapshot|participant_joined|question_advanced|answer_graded|session_closed`)
+    each embed the coherent `SessionSnapshot`. WS frame schema is documented
+    here via `SessionSnapshot` — the frame envelope is
+    `{type, payload: SessionSnapshot}`.
+
+    Cloud Armor note: all mutating routes live under
+    `/api/v1/(live-quizzes|classroom-sessions)/...` — covered by the rule-994
+    WAF bypass; do NOT introduce new top-level prefixes.
+servers:
+  - url: https://api.chora.site
+security:
+  - bearerAuth: []
+
+paths:
+  /api/v1/live-quizzes:
+    post:
+      operationId: createLiveQuiz
+      summary: Create a live-quiz draft (instructor)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LiveQuizWrite" }
+      responses:
+        "201":
+          description: Draft created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LiveQuizFull" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+    get:
+      operationId: listLiveQuizzes
+      summary: List live quizzes for the tenant (instructor)
+      responses:
+        "200":
+          description: Quiz list (role-forked — learner roles receive learner-safe items).
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/LiveQuizFull" }
+
+  /api/v1/live-quizzes/{quizId}:
+    parameters:
+      - { name: quizId, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: getLiveQuiz
+      summary: Fetch one quiz — ROLE-FORKED DTO
+      description: |
+        Callers with a live-quiz admin role (instructor / admin /
+        training-admin) receive `LiveQuizFull` (options include `is_correct`
+        + `explainer`). All other roles receive `LiveQuizLearnerSafe` —
+        identical shape with `is_correct` and `explainer` STRIPPED from every
+        option (ADR-179 D3 leak closure #1).
+      responses:
+        "200":
+          description: The quiz (projection depends on caller role).
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - { $ref: "#/components/schemas/LiveQuizFull" }
+                  - { $ref: "#/components/schemas/LiveQuizLearnerSafe" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      operationId: patchLiveQuiz
+      summary: Edit the draft (full title+questions replace) + authoring config
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LiveQuizWrite" }
+      responses:
+        "200":
+          description: Updated draft.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LiveQuizFull" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/live-quizzes/{quizId}/publish:
+    post:
+      operationId: publishLiveQuiz
+      summary: Publish the draft to the Live Classroom presenter
+      parameters:
+        - { name: quizId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: Published. }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: Not publishable (validation / state). }
+
+  /api/v1/live-quizzes/{quizId}/sessions:
+    post:
+      operationId: createClassroomSession
+      summary: Launch an ARMED LiveQuizSession from a published quiz
+      description: |
+        Generates the session's ephemeral 6-char `join_code`
+        (alphabet `23456789ABCDEFGHJKMNPQRSTUVWXYZ`; collision-regenerated)
+        and returns the snapshot. The presenter navigates to
+        `/r/classroom?session_id=<id>`; learners join via
+        `chora.site/play/<join_code>`.
+      parameters:
+        - { name: quizId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "201":
+          description: ARMED session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionSnapshot" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/classroom-sessions/by-code/{code}:
+    get:
+      operationId: resolveSessionByCode
+      summary: Resolve a join code to its live session (learner entry)
+      description: |
+        `code` is normalised (uppercase, spaces/dashes stripped). Matches only
+        ARMED or LIVE sessions in the caller's tenant (newest first).
+        `by-code` is a reserved path segment — session ids are UUIDv7 and can
+        never collide with it.
+      parameters:
+        - { name: code, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9 -]{4,12}$" } }
+      responses:
+        "200":
+          description: Session located.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [session_id, live_quiz_id, state]
+                properties:
+                  session_id: { type: string, format: uuid }
+                  live_quiz_id: { type: string, format: uuid }
+                  quiz_title: { type: string }
+                  state: { $ref: "#/components/schemas/SessionState" }
+                  participant_count: { type: integer }
+        "404": { description: No ARMED/LIVE session with that code in this tenant. }
+
+  /api/v1/classroom-sessions/{sessionId}:
+    get:
+      operationId: getSessionSnapshot
+      summary: Poll the session snapshot (presenter + learner stage, 2s cadence)
+      description: |
+        `me` and `reveal` are computed per-caller from the `gcid` and OMITTED
+        when the caller has no gcid (header-only callers) — never an error.
+      parameters:
+        - { name: sessionId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Coherent snapshot.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionSnapshot" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/classroom-sessions/{sessionId}/join:
+    post:
+      operationId: joinSession
+      summary: Claim a nickname and join the lobby (learner; ARMED or LIVE)
+      description: |
+        Idempotent per gcid — re-join returns the existing participant;
+        nickname rename allowed only while ARMED. Nicknames are sanitised
+        in-domain (trim/collapse, 2–20 runes, control chars rejected,
+        leet-folded profanity wordlist). Everyone may join, including the
+        instructor (ADR-179 D2 ruling 5).
+      parameters:
+        - { name: sessionId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nickname]
+              properties:
+                nickname: { type: string, minLength: 2, maxLength: 20 }
+      responses:
+        "200":
+          description: Joined (or already joined). Snapshot incl. roster.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionSnapshot" }
+        "400":
+          description: "Nickname rejected — `code` ∈ `nickname_required` / `nickname_too_long` / `nickname_invalid` / `nickname_profane`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StageError" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: "`code` = `nickname_taken` (case-insensitive, other gcid) or `session_closed`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StageError" }
+
+  /api/v1/classroom-sessions/{sessionId}/start:
+    post:
+      operationId: startSession
+      summary: ARMED → LIVE (instructor)
+      parameters:
+        - { name: sessionId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: LIVE. Snapshot returned. }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: Invalid state. }
+
+  /api/v1/classroom-sessions/{sessionId}/advance:
+    post:
+      operationId: advanceToQuestion
+      summary: Present a question (instructor) — opens its answer window
+      description: |
+        Stamps `current_question_opened_at`; appends to the asked-question
+        log. Re-presenting an already-asked question → 409
+        `question_already_asked` (the window can never re-open — protects
+        streaks + first-write-wins). Advancing while the previous question is
+        still open implicitly locks it.
+      parameters:
+        - { name: sessionId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [question_id]
+              properties:
+                question_id: { type: string }
+      responses:
+        "200": { description: Question open. Snapshot returned. }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: "Not LIVE (`session_not_live`), unknown question, or `question_already_asked`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StageError" }
+
+  /api/v1/classroom-sessions/{sessionId}/responses:
+    post:
+      operationId: submitResponse
+      summary: Submit an answer (learner) — server-enforced window
+      description: |
+        `choice` is the option LABEL text. Checks, in order: session LIVE →
+        `question_id` == current question (`question_not_open`) → window open
+        (`question_locked`: now < opened_at + timer_seconds + 2s grace;
+        timer 0 never locks) → first-write-wins per (gcid, question)
+        (`duplicate_response`). Grading composes TimeDecay × double-points +
+        streak bonus; publishes `score_awarded.v1` (atom_id seam) and credits
+        the realtime leaderboard. The response embeds the submitter's own
+        `your_result` — the ONLY pre-reveal correctness channel.
+      parameters:
+        - { name: sessionId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [question_id, choice]
+              properties:
+                question_id: { type: string }
+                choice: { type: string, description: "Option LABEL text, not the A/B/C/D marker." }
+      responses:
+        "201":
+          description: Recorded + graded.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SessionSnapshot" }
+                  - type: object
+                    properties:
+                      your_result: { $ref: "#/components/schemas/YourResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: "`code` ∈ `question_not_open` | `question_locked` | `duplicate_response` | `session_not_live`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StageError" }
+
+  /api/v1/classroom-sessions/{sessionId}/close:
+    post:
+      operationId: closeSession
+      summary: LIVE → CLOSED (instructor) — freezes the final scoreboard / podium
+      parameters:
+        - { name: sessionId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: CLOSED. Snapshot (with `podium` + `final_scoreboard`) returned. }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: Invalid state. }
+
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+
+  responses:
+    BadRequest: { description: Validation failure. }
+    NotFound: { description: Unknown id in this tenant (or soft-deleted). }
+
+  schemas:
+    SessionState:
+      type: string
+      enum: [ARMED, LIVE, CLOSED]
+
+    ExplainerMode:
+      type: string
+      enum: [NEVER, IMMEDIATE, END_OF_QUESTION, END_OF_SESSION]
+
+    StageError:
+      type: object
+      description: |
+        Pinned stage 4xx envelope (v1.1.0). `code` is the machine
+        discriminator the FE play-stage switches inline copy on (profane vs
+        taken vs closed); `message` is the human text; `error` is the HTTP
+        status text. Codes are wire contract — renaming one is a breaking
+        change.
+      required: [error, message, code]
+      properties:
+        error: { type: string, description: "HTTP status text." }
+        message: { type: string, description: "Human-readable cause." }
+        code:
+          type: string
+          enum:
+            - session_not_found
+            - duplicate_response
+            - session_not_live
+            - question_not_open
+            - question_locked
+            - question_already_asked
+            - nickname_taken
+            - session_closed
+            - nickname_required
+            - nickname_too_long
+            - nickname_invalid
+            - nickname_profane
+            - bad_request
+
+    LiveQuizOptionFull:
+      type: object
+      required: [label, is_correct]
+      properties:
+        label: { type: string }
+        is_correct: { type: boolean }
+        explainer: { type: string }
+
+    LiveQuizOptionLearnerSafe:
+      type: object
+      required: [label]
+      properties:
+        label: { type: string }
+      description: ADR-179 D3 — no is_correct, no explainer.
+
+    LiveQuizQuestionBase:
+      type: object
+      required: [question_id, prompt, timer_seconds, points]
+      properties:
+        question_id: { type: string }
+        prompt: { type: string }
+        timer_seconds: { type: integer, minimum: 0, maximum: 600 }
+        points: { type: integer, minimum: 1, maximum: 100 }
+        double_points: { type: boolean, default: false, description: "L5.2 — ×2 round (builder flag)." }
+        atom_id: { type: string, format: uuid, description: "C3 seam — set when composed from a LearningAtom." }
+        topic_tags: { type: array, items: { type: string } }
+
+    LiveQuizFull:
+      type: object
+      required: [id, title, questions]
+      properties:
+        id: { type: string, format: uuid }
+        course_id: { type: string }
+        title: { type: string }
+        state: { type: string, enum: [DRAFT, PUBLISHED] }
+        quiz_time_limit_seconds: { type: integer }
+        explainer_mode: { $ref: "#/components/schemas/ExplainerMode" }
+        questions:
+          type: array
+          items:
+            allOf:
+              - { $ref: "#/components/schemas/LiveQuizQuestionBase" }
+              - type: object
+                properties:
+                  options:
+                    type: array
+                    items: { $ref: "#/components/schemas/LiveQuizOptionFull" }
+
+    LiveQuizLearnerSafe:
+      type: object
+      required: [id, title, questions]
+      properties:
+        id: { type: string, format: uuid }
+        course_id: { type: string }
+        title: { type: string }
+        state: { type: string, enum: [DRAFT, PUBLISHED] }
+        quiz_time_limit_seconds: { type: integer }
+        explainer_mode: { $ref: "#/components/schemas/ExplainerMode" }
+        questions:
+          type: array
+          items:
+            allOf:
+              - { $ref: "#/components/schemas/LiveQuizQuestionBase" }
+              - type: object
+                properties:
+                  options:
+                    type: array
+                    items: { $ref: "#/components/schemas/LiveQuizOptionLearnerSafe" }
+
+    LiveQuizWrite:
+      type: object
+      properties:
+        title: { type: string }
+        course_id: { type: string }
+        quiz_time_limit_seconds: { type: integer }
+        explainer_mode: { $ref: "#/components/schemas/ExplainerMode" }
+        questions:
+          type: array
+          description: Full-replace semantics (EditDraft).
+          items:
+            allOf:
+              - { $ref: "#/components/schemas/LiveQuizQuestionBase" }
+              - type: object
+                properties:
+                  options:
+                    type: array
+                    items: { $ref: "#/components/schemas/LiveQuizOptionFull" }
+
+    Participant:
+      type: object
+      required: [nickname, joined_at]
+      properties:
+        nickname: { type: string }
+        joined_at: { type: string, format: date-time }
+      description: Roster entry — gcids are NEVER exposed on the roster.
+
+    OpenQuestion:
+      type: object
+      required: [question_id, prompt, options, opened_at, timer_seconds, locked]
+      properties:
+        question_id: { type: string }
+        prompt: { type: string }
+        options:
+          type: array
+          items: { $ref: "#/components/schemas/LiveQuizOptionLearnerSafe" }
+        opened_at: { type: string, format: date-time }
+        timer_seconds: { type: integer }
+        double_points: { type: boolean }
+        locks_at:
+          type: string
+          format: date-time
+          description: opened_at + timer_seconds + 2s grace; absent when timer_seconds=0 (never locks).
+        locked: { type: boolean, description: Lazily derived per read — no scheduler. }
+
+    ScoreboardEntry:
+      type: object
+      required: [nickname, score, rank]
+      properties:
+        nickname: { type: string }
+        score: { type: integer }
+        streak: { type: integer }
+        rank: { type: integer }
+
+    YourResult:
+      type: object
+      required: [question_id, correct, awarded_points]
+      properties:
+        question_id: { type: string }
+        correct: { type: boolean }
+        base_points: { type: integer }
+        streak_bonus: { type: integer }
+        awarded_points: { type: integer }
+        streak_after: { type: integer }
+
+    Reveal:
+      type: object
+      required: [question_id]
+      properties:
+        question_id: { type: string }
+        correct_label: { type: string }
+        explainer: { type: string }
+      description: Present only when RevealAllowed(explainer_mode, ...) — per-caller.
+
+    RevealEntry:
+      type: object
+      required: [question_id, prompt]
+      properties:
+        question_id: { type: string }
+        prompt: { type: string }
+        correct_label: { type: string }
+        explainer: { type: string }
+        your_choice: { type: string, description: "Caller's submitted label — omitted when the caller skipped this question." }
+        your_correct: { type: boolean }
+      description: |
+        One row of the post-close answer review (v1.2.0). Per-caller — carries
+        the caller's own choice/grade alongside the answer key.
+
+    Me:
+      type: object
+      properties:
+        nickname: { type: string }
+        score: { type: integer }
+        rank: { type: integer }
+        streak: { type: integer }
+        last_result: { $ref: "#/components/schemas/YourResult" }
+
+    SessionSnapshot:
+      type: object
+      required: [id, tenant_id, live_quiz_id, state, joined_learners, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        live_quiz_id: { type: string, format: uuid }
+        instructor_gcid: { type: string, format: uuid }
+        state: { $ref: "#/components/schemas/SessionState" }
+        join_code: { type: string }
+        current_question_id: { type: string }
+        open_question: { $ref: "#/components/schemas/OpenQuestion" }
+        response_counts:
+          type: object
+          additionalProperties: { type: integer }
+          description: Per-choice counts for the current question (no correctness implied).
+        joined_learners: { type: integer, description: Distinct responder gcids (legacy counter). }
+        participant_count: { type: integer, description: Lobby roster size (join-based). }
+        participants:
+          type: array
+          items: { $ref: "#/components/schemas/Participant" }
+        scoreboard:
+          type: array
+          items: { $ref: "#/components/schemas/ScoreboardEntry" }
+          description: Interim ranked board (top 20), present once LIVE.
+        podium:
+          type: array
+          items: { $ref: "#/components/schemas/ScoreboardEntry" }
+          description: Top 3–5, present when CLOSED.
+        final_scoreboard:
+          type: array
+          items: { $ref: "#/components/schemas/ScoreboardEntry" }
+          description: Frozen by Close. Ephemeral — lives only in the session row.
+        me: { $ref: "#/components/schemas/Me" }
+        reveal: { $ref: "#/components/schemas/Reveal" }
+        reveals:
+          type: array
+          items: { $ref: "#/components/schemas/RevealEntry" }
+          description: |
+            Post-close full answer review (v1.2.0): one entry per asked
+            question, in presentation order, once state=CLOSED and
+            explainer_mode != NEVER. Per-caller (omitted for gcid-less
+            callers). `reveal` keeps its current-question semantics.
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        started_at: { type: string, format: date-time }
+        ended_at: { type: string, format: date-time }

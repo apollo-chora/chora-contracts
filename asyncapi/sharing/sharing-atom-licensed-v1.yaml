@@ -1,0 +1,64 @@
+asyncapi: "3.0.0"
+info:
+  title: "Chora Content Sharing — atom.licensed.v1"
+  version: "1.0.0"
+  description: |
+    Published when an AtomUsageGrant is created — a grantee receives
+    usage rights to an atom under specific license terms and scope
+    (test set, duel, live quiz, collection, unlimited). Carries the
+    grant ID, owner, grantee, atom, scope, and license/royalty snapshot.
+
+    Owning team   : Team 1 (Content)
+    Owning domain : Content Sharing (chora_sharing database)
+    Surface       : C+ Connect+
+  contact:
+    name: "Chora Platform Team — Content Track"
+  license:
+    name: "Proprietary"
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  production:
+    host: "pubsub.googleapis.com"
+    protocol: googlepubsub
+    description: "Google Cloud Pub/Sub (production)"
+  emulator:
+    host: "localhost:8085"
+    protocol: googlepubsub
+    description: "Cloud Pub/Sub Emulator (local dev)"
+
+channels:
+  atomLicensed:
+    address: "chora.sharing.atom.licensed.v1"
+    messages:
+      atomLicensed:
+        $ref: "#/components/messages/AtomLicensed"
+
+operations:
+  publishAtomLicensed:
+    action: send
+    channel:
+      $ref: "#/channels/atomLicensed"
+    summary: "Publish an atom licensed event"
+    description: |
+      Producer: chora-sharing service (grant creation).
+      Consumers: Consumption (royalty accrual on usage),
+                 Notifications (grant notification to grantee),
+                 Observability (grant ledger).
+    messages:
+      - $ref: "#/channels/atomLicensed/messages/atomLicensed"
+
+components:
+  messages:
+    AtomLicensed:
+      name: "AtomLicensed"
+      title: "Atom Licensed"
+      summary: "An atom usage grant was created"
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf;version=3
+      payload:
+        schemaFormat: "application/vnd.google.protobuf;version=3"
+        schema:
+          protoFile: "proto/events-flat/sharing/atom/licensed.proto"
+          messageName: "chora.sharing.v1.AtomLicensed"

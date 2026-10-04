@@ -1,0 +1,81 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Sharing - duel round atoms (request + result)
+  version: 1.0.0
+  description: |
+    ADR-254 D1/D4 (R1): a duel's atoms are smithed by the duel_atom_smith agent through
+    the kennel (duel_atoms lane). On a match chora-sharing persists the duel as
+    preparing with the request in the same transaction, pushes `preparing` on the duel
+    WebSocket, and on the result applies the picks and pushes `ready`. JSON-wire;
+    envelope.idempotency_key = round_id. Source proto:
+    `proto/events/sharing/duel_round_atoms.proto`.
+  contact:
+    name: Chora Content Team (Team 1)
+  license:
+    name: Proprietary
+
+defaultContentType: application/json
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  duelRoundAtomsRequested:
+    address: chora.sharing.duel_round_atoms.requested.v1
+    messages:
+      duelRoundAtomsRequested:
+        $ref: '#/components/messages/DuelRoundAtomsRequested'
+  duelRoundAtomsCompleted:
+    address: chora.sharing.duel_round_atoms.completed.v1
+    messages:
+      duelRoundAtomsCompleted:
+        $ref: '#/components/messages/DuelRoundAtomsCompleted'
+
+operations:
+  publishDuelRoundAtomsRequested:
+    action: send
+    channel:
+      $ref: '#/channels/duelRoundAtomsRequested'
+    description: chora-sharing outbox, same transaction as the preparing duel.
+    messages:
+      - $ref: '#/channels/duelRoundAtomsRequested/messages/duelRoundAtomsRequested'
+  consumeDuelRoundAtomsRequested:
+    action: receive
+    channel:
+      $ref: '#/channels/duelRoundAtomsRequested'
+    description: the kennel generic workflow (subscription chora-ai-kernel-orchestrator.sharing-duel-round-atoms-requested).
+    messages:
+      - $ref: '#/channels/duelRoundAtomsRequested/messages/duelRoundAtomsRequested'
+  publishDuelRoundAtomsCompleted:
+    action: send
+    channel:
+      $ref: '#/channels/duelRoundAtomsCompleted'
+    description: the kennel; status OK | FAILED | REJECTED; atoms ordered one per round.
+    messages:
+      - $ref: '#/channels/duelRoundAtomsCompleted/messages/duelRoundAtomsCompleted'
+  consumeDuelRoundAtomsCompleted:
+    action: receive
+    channel:
+      $ref: '#/channels/duelRoundAtomsCompleted'
+    description: chora-sharing (subscription chora-sharing.duel-round-atoms-completed) starts the battle and pushes ready.
+    messages:
+      - $ref: '#/channels/duelRoundAtomsCompleted/messages/duelRoundAtomsCompleted'
+
+components:
+  messages:
+    DuelRoundAtomsRequested:
+      name: DuelRoundAtomsRequested
+      contentType: application/json
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/sharing/duel_round_atoms.proto#/chora.sharing.v1.DuelRoundAtomsRequested'
+    DuelRoundAtomsCompleted:
+      name: DuelRoundAtomsCompleted
+      contentType: application/json
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/sharing/duel_round_atoms.proto#/chora.sharing.v1.DuelRoundAtomsCompleted'

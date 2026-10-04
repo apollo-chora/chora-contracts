@@ -1,0 +1,350 @@
+# Meilisearch Index Definitions for Chora Platform
+#
+# AP-01: This contract exists BEFORE implementation.
+#
+# All indexes are tenant-scoped: the `tenant_id` field is filterable on every
+# index. The gateway search adapter MUST inject `tenant_id = {jwt_tenant_id}`
+# as a mandatory filter on every search query to enforce tenant isolation.
+#
+# Meilisearch instance: Docker Compose port 7700, master key "chora-dev-key".
+# Index updates are event-driven via Pub/Sub subscriptions to chora.creation.atom.events.v1.
+
+---
+indexes:
+  # ---------------------------------------------------------------------------
+  # user_profiles — Duel suggestion + profiler index
+  # ---------------------------------------------------------------------------
+  # Used by the duel suggestion engine to find users with similar interest
+  # tags via the /similar endpoint. Documents are upserted when a user
+  # generates or edits their profiler profile.
+  - uid: user_profiles
+    primaryKey: gcid
+    description: |
+      User interest profiles for duel challenge suggestions. Indexed from
+      the profiler page (POST /v1/me/profile/generate, PUT /v1/me/profile/tags).
+      The /similar endpoint finds users with overlapping interest tags;
+      results are re-ranked by proficiency proximity.
+
+    document_schema:
+      gcid:
+        type: string
+        format: uuid
+        description: User GCID (primary key)
+      tenant_id:
+        type: string
+        format: uuid
+        description: Owning tenant UUID (mandatory filter for RLS)
+      display_name:
+        type: string
+        description: User display name for suggestion cards
+      proficiency:
+        type: integer
+        description: |
+          Composite proficiency rating = duel_elo + min(200, courses * 20).
+          See docs/design/duel-system.md §1.
+      tags:
+        type: array
+        items:
+          type: string
+        description: |
+          Flat array of interest tag values (e.g. "inheritance", "calculus").
+          Used for facet filtering and semantic similarity.
+      tag_categories:
+        type: object
+        additionalProperties:
+          type: array
+          items:
+            type: string
+        description: |
+          Tags grouped by category (programming, mathematics, science,
+          humanities, arts, languages). See docs/design/duel-system.md §2.
+
+    filterable_attributes:
+      - tenant_id
+      - gcid
+      - tags
+
+  # ---------------------------------------------------------------------------
+  # atoms — LearningAtom search index
+  # ---------------------------------------------------------------------------
+  - uid: atoms
+    primaryKey: id
+    description: |
+      Full-text search over published LearningAtoms. Indexed from the latest
+      published AtomRevision. Updated via chora.creation.atom.events.v1 (atom.created,
+      atom.updated, atom.archived, atom.revision.published).
+
+    document_schema:
+      id:
+        type: string
+        format: uuid
+        description: LearningAtom UUID (primary key)
+      tenant_id:
+        type: string
+        format: uuid
+        description: Owning tenant UUID (mandatory filter for RLS)
+      title:
+        type: string
+        description: Atom title from the latest published revision
+      content_excerpt:
+        type: string
+        description: |
+          First 500 characters of the content JSONB body, plain-text extracted.
+          Used for search matching and result snippets.
+      atom_type:
+        type: string
+        enum:
+          - multiple_choice
+          - fill_blank
+          - true_false
+          - short_answer
+          - matching
+          - ordering
+          - code
+          - essay
+          - multimedia
+          - simulation
+        description: Type of the learning atom
+      difficulty:
+        type: integer
+        minimum: 1
+        maximum: 5
+        description: Difficulty level (1=easiest, 5=hardest)
+      labels:
+        type: array
+        items: string
+        description: Free-form hashtag labels (AtomTag values)
+      topic_names:
+        type: array
+        items: string
+        description: |
+          Names of all TopicNodes this atom belongs to.
+          Denormalized for search — updated when topic assignments change.
+      visibility_status:
+        type: string
+        enum: [draft, published, archived]
+        description: Current visibility status. Only 'published' atoms are indexed.
+      created_by:
+        type: string
+        format: uuid
+        description: GCID of the atom author
+      created_at:
+        type: integer
+        description: Unix timestamp of atom creation (for sorting)
+      updated_at:
+        type: integer
+        description: Unix timestamp of last update (for sorting)
+
+    settings:
+      searchableAttributes:
+        - title
+        - content_excerpt
+        - labels
+        - topic_names
+
+      filterableAttributes:
+        - tenant_id
+        - atom_type
+        - difficulty
+        - labels
+        - topic_names
+        - visibility_status
+        - created_by
+
+      sortableAttributes:
+        - difficulty
+        - created_at
+        - updated_at
+        - title
+
+      faceting:
+        maxValuesPerFacet: 100
+
+      pagination:
+        maxTotalHits: 1000
+
+      typoTolerance:
+        enabled: true
+        minWordSizeForTypos:
+          oneTypo: 4
+          twoTypos: 8
+
+      displayedAttributes:
+        - id
+        - title
+        - content_excerpt
+        - atom_type
+        - difficulty
+        - labels
+        - topic_names
+
+  # ---------------------------------------------------------------------------
+  # topics — TopicNode search index
+  # ---------------------------------------------------------------------------
+  - uid: topics
+    primaryKey: id
+    description: |
+      Full-text search over TopicNodes in the knowledge graph. Updated via
+      chora.creation.atom.events.v1 (topic_node.created, topic_node.moved).
+
+    document_schema:
+      id:
+        type: string
+        format: uuid
+        description: TopicNode UUID (primary key)
+      tenant_id:
+        type: string
+        format: uuid
+        description: Owning tenant UUID (mandatory filter for RLS)
+      name:
+        type: string
+        description: Topic display name
+      description:
+        type: string
+        description: Topic description text
+      path:
+        type: string
+        description: |
+          Materialized path in the knowledge graph, delimited by " > ".
+          Example: "Mathematics > Calculus > Differential Calculus"
+      parent_id:
+        type: string
+        format: uuid
+        nullable: true
+        description: Parent TopicNode UUID (null for root nodes)
+      atom_count:
+        type: integer
+        description: Number of published atoms in this topic (denormalized)
+      created_at:
+        type: integer
+        description: Unix timestamp of topic creation
+
+    settings:
+      searchableAttributes:
+        - name
+        - description
+        - path
+
+      filterableAttributes:
+        - tenant_id
+        - parent_id
+
+      sortableAttributes:
+        - name
+        - atom_count
+        - created_at
+
+      pagination:
+        maxTotalHits: 1000
+
+      typoTolerance:
+        enabled: true
+        minWordSizeForTypos:
+          oneTypo: 3
+          twoTypos: 6
+
+      displayedAttributes:
+        - id
+        - name
+        - description
+        - path
+        - atom_count
+
+  # ---------------------------------------------------------------------------
+  # paths — LockedPath search index
+  # ---------------------------------------------------------------------------
+  - uid: paths
+    primaryKey: id
+    description: |
+      Full-text search over LockedPaths (certification tracks). Updated via
+      chora.creation.atom.events.v1 (path.enrolled, path.completed) and direct indexing
+      when paths are created or modified.
+
+    document_schema:
+      id:
+        type: string
+        format: uuid
+        description: LockedPath UUID (primary key)
+      tenant_id:
+        type: string
+        format: uuid
+        description: Owning tenant UUID (mandatory filter for RLS)
+      title:
+        type: string
+        description: Path display title
+      description:
+        type: string
+        description: Path description text
+      topic_names:
+        type: array
+        items: string
+        description: |
+          Names of topics covered by this path.
+          Denormalized for search filtering.
+      total_steps:
+        type: integer
+        description: Total number of steps in the path
+      enrollment_count:
+        type: integer
+        description: Number of learners currently enrolled (approximate, updated periodically)
+      created_at:
+        type: integer
+        description: Unix timestamp of path creation
+      updated_at:
+        type: integer
+        description: Unix timestamp of last update
+
+    settings:
+      searchableAttributes:
+        - title
+        - description
+        - topic_names
+
+      filterableAttributes:
+        - tenant_id
+        - topic_names
+
+      sortableAttributes:
+        - title
+        - total_steps
+        - enrollment_count
+        - created_at
+
+      pagination:
+        maxTotalHits: 1000
+
+      typoTolerance:
+        enabled: true
+        minWordSizeForTypos:
+          oneTypo: 4
+          twoTypos: 8
+
+      displayedAttributes:
+        - id
+        - title
+        - description
+        - topic_names
+        - total_steps
+        - enrollment_count
+
+# ---------------------------------------------------------------------------
+# Event-to-Index Mapping
+# ---------------------------------------------------------------------------
+# Documents which Pub/Sub events trigger which index operations:
+#
+# chora.creation.atom.events.v1:
+#   atom.created           → atoms: upsert document (if visibility_status = published)
+#   atom.updated           → atoms: upsert document (re-index with latest data)
+#   atom.archived          → atoms: delete document
+#   atom.revision.published → atoms: upsert document (update content_excerpt, title)
+#   topic_node.created     → topics: upsert document
+#   topic_node.moved       → topics: upsert document (update path)
+#
+# Future events (not yet in AsyncAPI):
+#   path.created           → paths: upsert document
+#   path.updated           → paths: upsert document
+#   path.deleted           → paths: delete document
+#   topic_node.deleted     → topics: delete document
+#
+# Idempotency: All handlers use the IdempotencyChecker pattern from
+# chora-atomic's Pub/Sub subscriber. Event deduplication by event_id.

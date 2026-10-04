@@ -1,0 +1,72 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Content Consumption — CompanionSkinEquipped
+  version: 1.0.0
+  description: |
+    Published when a `DigitalSkin` is equipped on a `Companion` (RPG companion).
+
+    - Domain: Content Consumption (`chora_consumption` DB)
+    - Aggregate root: `Companion` (DOMAIN ENTITY)
+    - Topic: `chora.consumption.companion.skin_equipped.v1`
+    - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
+    - Source proto: `proto/events/consumption/companion.proto`
+       message `chora.consumption.v1.CompanionSkinEquipped`
+
+    Per CLAUDE.md domain vocabulary: `DigitalSkin` is **earned, never
+    purchasable** — equip events here record cosmetic adoption, not commerce.
+
+    Embeds the mandatory `chora.common.v1.EventEnvelope` as field 1.
+  contact:
+    name: Chora Platform Team (Team 3) + Team 1 (Content)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+    description: Google Cloud Pub/Sub (chora-489812 platform host)
+
+channels:
+  companionSkinEquipped:
+    address: chora.consumption.companion.skin_equipped.v1
+    description: Single-event topic for CompanionSkinEquipped.
+    messages:
+      companionSkinEquipped:
+        $ref: '#/components/messages/CompanionSkinEquipped'
+
+operations:
+  publishCompanionSkinEquipped:
+    action: send
+    channel:
+      $ref: '#/channels/companionSkinEquipped'
+    summary: Publish a CompanionSkinEquipped event
+    messages:
+      - $ref: '#/channels/companionSkinEquipped/messages/companionSkinEquipped'
+
+  consumeCompanionSkinEquipped:
+    action: receive
+    channel:
+      $ref: '#/channels/companionSkinEquipped'
+    summary: Subscribe to CompanionSkinEquipped events
+    description: |
+      Primary consumers:
+      - Sharing — social post / reaction unlock
+      - Observability — cosmetic adoption analytics
+    messages:
+      - $ref: '#/channels/companionSkinEquipped/messages/companionSkinEquipped'
+
+components:
+  messages:
+    CompanionSkinEquipped:
+      name: CompanionSkinEquipped
+      title: Companion Skin Equipped
+      summary: A DigitalSkin was equipped on a Companion
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/consumption/companion.proto#/chora.consumption.v1.CompanionSkinEquipped'

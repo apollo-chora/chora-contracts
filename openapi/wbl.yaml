@@ -1,0 +1,489 @@
+openapi: "3.2.0"
+info:
+  title: Chora Work-Based Learning API
+  version: "1.0.0"
+  description: |
+    Work-Based Learning (WBL) REST API for chora-wbl service (CHO-23).
+
+    Domains:
+      - Internship — listings + applications + matching
+      - Apprenticeship — long-term programs (>=2 months)
+      - Employer — industry partner profile + roster
+      - Milestone — competency milestones with dual sign-off (employer + student)
+      - Evidence — work-evidence submission (artifacts, reflections, reports)
+
+    WBL is a sub-context of Content Delivery (Tier 1 D1 of the locked
+    architecture) and shares chora_delivery DB at M12. The topic prefix
+    `chora.wbl.*` keeps WBL events clearly attributable.
+
+    Auth: Identity Platform JWT (Bearer). All routes are tenant-scoped via
+    the `X-Tenant-Id` header + actor `gcid` header.
+
+    Owning team   : Team 2 (Delivery)
+    Owning service: chora-wbl
+    Topic prefix  : chora.wbl.*
+
+    AP-01: This contract exists BEFORE implementation.
+  contact:
+    name: Chora Platform Team — Delivery Track
+  license:
+    name: Proprietary
+
+servers:
+  - url: https://api.chora.io
+    description: Production
+  - url: http://localhost:8080
+    description: Local development
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Internships
+    description: Internship listings + applications
+  - name: Apprenticeships
+    description: Apprenticeship programs (long-term)
+  - name: Employers
+    description: Industry partner profiles + rosters
+  - name: Milestones
+    description: Competency milestones with dual sign-off
+  - name: Evidence
+    description: Work-evidence submission + review
+  - name: Health
+    description: Service health
+
+paths:
+  /healthz:
+    get:
+      tags: [Health]
+      summary: Liveness probe
+      security: []
+      responses:
+        "200":
+          description: Service alive
+  /readyz:
+    get:
+      tags: [Health]
+      summary: Readiness probe
+      security: []
+      responses:
+        "200":
+          description: Service ready
+
+  /api/internships:
+    parameters:
+      - $ref: "#/components/parameters/TenantHeader"
+      - $ref: "#/components/parameters/GcidHeader"
+    post:
+      tags: [Internships]
+      summary: Create internship listing
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InternshipCreateBody"
+      responses:
+        "201":
+          description: Listing created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Listing"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+    get:
+      tags: [Internships]
+      summary: List tenant internship listings
+      responses:
+        "200":
+          description: Tenant listings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Listing"
+
+  /api/internships/{listing_id}/applications:
+    parameters:
+      - $ref: "#/components/parameters/TenantHeader"
+      - $ref: "#/components/parameters/GcidHeader"
+      - in: path
+        name: listing_id
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [Internships]
+      summary: Apply to a listing
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                motivation: { type: string }
+              required: [motivation]
+      responses:
+        "201":
+          description: Application submitted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Application"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/applications/{application_id}/accept:
+    parameters:
+      - $ref: "#/components/parameters/TenantHeader"
+      - $ref: "#/components/parameters/GcidHeader"
+      - in: path
+        name: application_id
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [Internships]
+      summary: Accept an application
+      responses:
+        "200":
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Application"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/applications/{application_id}/reject:
+    parameters:
+      - $ref: "#/components/parameters/TenantHeader"
+      - $ref: "#/components/parameters/GcidHeader"
+      - in: path
+        name: application_id
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [Internships]
+      summary: Reject an application
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string }
+      responses:
+        "200":
+          description: Rejected
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/apprenticeships:
+    parameters:
+      - $ref: "#/components/parameters/TenantHeader"
+      - $ref: "#/components/parameters/GcidHeader"
+    post:
+      tags: [Apprenticeships]
+      summary: Create apprenticeship program
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApprenticeshipCreateBody"
+      responses:
+        "201":
+          description: Program created
+        "400":
+          $ref: "#/components/responses/BadRequest"
+    get:
+      tags: [Apprenticeships]
+      summary: List apprenticeship programs
+      responses:
+        "200":
+          description: List
+
+  /api/employers:
+    parameters:
+      - $ref: "#/components/parameters/TenantHeader"
+      - $ref: "#/components/parameters/GcidHeader"
+    post:
+      tags: [Employers]
+      summary: Create employer profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmployerCreateBody"
+      responses:
+        "201":
+          description: Created
+    get:
+      tags: [Employers]
+      summary: List employers
+      responses:
+        "200":
+          description: List
+
+  /api/employers/{employer_id}/roster:
+    parameters:
+      - $ref: "#/components/parameters/TenantHeader"
+      - $ref: "#/components/parameters/GcidHeader"
+      - in: path
+        name: employer_id
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [Employers]
+      summary: Employer roster (active learner placements)
+      responses:
+        "200":
+          description: Roster
+
+  /api/milestones:
+    parameters:
+      - $ref: "#/components/parameters/TenantHeader"
+      - $ref: "#/components/parameters/GcidHeader"
+    post:
+      tags: [Milestones]
+      summary: Create milestone
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MilestoneCreateBody"
+      responses:
+        "201":
+          description: Created
+
+  /api/milestones/{milestone_id}/complete:
+    parameters:
+      - $ref: "#/components/parameters/TenantHeader"
+      - $ref: "#/components/parameters/GcidHeader"
+      - in: path
+        name: milestone_id
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [Milestones]
+      summary: Mark milestone complete (learner)
+      responses:
+        "200":
+          description: Marked complete
+
+  /api/milestones/{milestone_id}/sign-off-employer:
+    parameters:
+      - $ref: "#/components/parameters/TenantHeader"
+      - $ref: "#/components/parameters/GcidHeader"
+      - in: path
+        name: milestone_id
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [Milestones]
+      summary: Employer sign-off (must precede student sign-off)
+      responses:
+        "200":
+          description: Signed
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/milestones/{milestone_id}/sign-off-student:
+    parameters:
+      - $ref: "#/components/parameters/TenantHeader"
+      - $ref: "#/components/parameters/GcidHeader"
+      - in: path
+        name: milestone_id
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [Milestones]
+      summary: Student sign-off (only after employer sign-off)
+      responses:
+        "200":
+          description: Signed; milestone now SIGNED_OFF
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/evidence:
+    parameters:
+      - $ref: "#/components/parameters/TenantHeader"
+      - $ref: "#/components/parameters/GcidHeader"
+    post:
+      tags: [Evidence]
+      summary: Submit evidence (artifact / reflection / report)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EvidenceCreateBody"
+      responses:
+        "201":
+          description: Submitted
+
+  /api/evidence/{evidence_id}/approve:
+    parameters:
+      - $ref: "#/components/parameters/TenantHeader"
+      - $ref: "#/components/parameters/GcidHeader"
+      - in: path
+        name: evidence_id
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [Evidence]
+      summary: Approve evidence (supervisor)
+      responses:
+        "200":
+          description: Approved
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/evidence/{evidence_id}/reject:
+    parameters:
+      - $ref: "#/components/parameters/TenantHeader"
+      - $ref: "#/components/parameters/GcidHeader"
+      - in: path
+        name: evidence_id
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [Evidence]
+      summary: Reject evidence (supervisor)
+      responses:
+        "200":
+          description: Rejected
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+components:
+  parameters:
+    TenantHeader:
+      in: header
+      name: X-Tenant-Id
+      required: true
+      schema:
+        type: string
+        format: uuid
+    GcidHeader:
+      in: header
+      name: gcid
+      required: true
+      schema:
+        type: string
+        format: uuid
+  responses:
+    BadRequest:
+      description: Validation failed
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: Invalid state transition
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+    InternshipCreateBody:
+      type: object
+      required: [employer_id, title, duration_weeks]
+      properties:
+        employer_id: { type: string, format: uuid }
+        title: { type: string }
+        description: { type: string }
+        duration_weeks: { type: integer, minimum: 1 }
+        skills:
+          type: array
+          items: { type: string }
+    Listing:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        employer_id: { type: string, format: uuid }
+        title: { type: string }
+        description: { type: string }
+        duration_weeks: { type: integer }
+        skills:
+          type: array
+          items: { type: string }
+        status:
+          type: string
+          enum: [open, closed]
+        posted_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    Application:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        listing_id: { type: string, format: uuid }
+        gcid: { type: string, format: uuid }
+        motivation: { type: string }
+        status:
+          type: string
+          enum: [submitted, accepted, rejected]
+        submitted_at: { type: string, format: date-time }
+    ApprenticeshipCreateBody:
+      type: object
+      required: [employer_id, title, duration_months]
+      properties:
+        employer_id: { type: string, format: uuid }
+        title: { type: string }
+        description: { type: string }
+        duration_months: { type: integer, minimum: 2 }
+        focus_areas:
+          type: array
+          items: { type: string }
+    EmployerCreateBody:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        contact_email: { type: string, format: email }
+        sector: { type: string }
+    MilestoneCreateBody:
+      type: object
+      required: [placement_id, title]
+      properties:
+        placement_id: { type: string }
+        title: { type: string }
+        summary: { type: string }
+        competencies:
+          type: array
+          items: { type: string }
+    EvidenceCreateBody:
+      type: object
+      required: [milestone_id, kind, body]
+      properties:
+        milestone_id: { type: string }
+        kind:
+          type: string
+          enum: [artifact, reflection, report]
+        title: { type: string }
+        body: { type: string }
+        attachments:
+          type: array
+          items: { type: string, format: uri }

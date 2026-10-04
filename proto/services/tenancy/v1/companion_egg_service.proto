@@ -1,0 +1,108 @@
+// =============================================================================
+// Chora Tenancy — CompanionEgg Service (gRPC) — Iter G.4 PROD-C #12
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 1 D1
+//   + ADR-149 §Breed lootbox + transparency
+//   + chora-contracts/proto/events/tenancy/companion_egg.proto
+//
+// Inter-service gRPC contract for the Iter G.3 CompanionEgg catalog in
+// chora_tenancy. This file exposes the breed_distribution probability
+// table to cross-domain readers (primarily chora-consumption's
+// growth.BreedDistributionProvider port for HatchEgg + PreviewEggOdds).
+//
+// Per ddd-enforcement HARD RULE: chora-consumption MUST NOT query the
+// chora_tenancy database directly. PROD-B wired this as a REST GET
+// /api/companion-eggs/{sku}/odds call; PROD-C (this proto) is the
+// typed-RPC successor — faster, mTLS by default via Cloud Service Mesh,
+// and avoids the JSON round-trip cost.
+//
+// The REST endpoint stays mounted for backward compat + IMDA D2
+// learner-facing transparency surface; the gRPC variant is internal-only.
+//
+// CompanionEgg discipline (per CLAUDE.md): the "egg" is a Tenancy aggregate
+// (purchase + catalog SKU); breed lottery resolution at hatch-time lives in
+// chora-consumption (CompanionGrowth.HatchEgg). This proto only exposes the
+// catalog projection — never executes the roll.
+//
+// Deployed in chora-489812 team-platform pool. mTLS via Cloud Service
+// Mesh; SPIFFE identity in mesh; W3C trace context in gRPC metadata.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.services.tenancy.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/tenancy/v1;tenancyv1";
+
+import "google/protobuf/timestamp.proto";
+
+// -----------------------------------------------------------------------------
+// Service
+// -----------------------------------------------------------------------------
+
+service CompanionEgg {
+  // PreviewEggOdds returns the IMDA D2 transparency probability table for a
+  // given egg SKU. Pure read; idempotent + cacheable (TTL ~5min upstream;
+  // cache-invalidated by chora.tenancy.companion_egg.catalog_updated.v1).
+  //
+  // Tenant scoping: the SKU's tenant_id must match the caller's tenant
+  // context (mesh-trust header `chora-tenant-id` in gRPC metadata) OR
+  // tenant_id IS NULL (platform-global SKU). Cross-tenant SKU read is
+  // PERMISSION_DENIED.
+  //
+  // Errors:
+  //   - INVALID_ARGUMENT — egg_sku empty
+  //   - NOT_FOUND        — SKU does not exist OR is soft-deleted
+  //   - PERMISSION_DENIED — SKU's tenant_id != caller tenant and != NULL
+  rpc PreviewEggOdds(PreviewEggOddsRequest)
+      returns (PreviewEggOddsResponse);
+}
+
+// -----------------------------------------------------------------------------
+// PreviewEggOdds
+// -----------------------------------------------------------------------------
+
+message PreviewEggOddsRequest {
+  // Caller tenant context. Empty string is rejected as INVALID_ARGUMENT to
+  // force callers to pipe the chora-tenant-id metadata through. Platform
+  // services querying a platform-global SKU still supply a tenant_id —
+  // the server resolves "tenant_id IS NULL OR tenant_id = $1" semantics.
+  string tenant_id = 1;
+
+  // Egg SKU to fetch odds for (e.g., "egg.standard.v1"). Required.
+  string egg_sku = 2;
+}
+
+message PreviewEggOddsResponse {
+  // Echo of the requested egg_sku.
+  string egg_sku = 1;
+
+  // Probability rows, sorted DESC by probability (ties broken alphabetically
+  // by species). MIRRORS the JSON ordering of the REST endpoint so the
+  // wire-shapes are interchangeable.
+  repeated BreedOdds odds = 2;
+
+  // Total weight (should sum to 100.0 within 0.01 tolerance). Surfaced as
+  // an audit hint for IMDA D2 transparency reconciliation.
+  double total_weight = 3;
+
+  // Last-modified timestamp for the breed_distribution JSONB. Tenant admins
+  // MAY revise the table; consumers detect changes by this field +
+  // invalidate any local cache when it advances.
+  google.protobuf.Timestamp distribution_updated_at = 4;
+}
+
+// BreedOdds — one row of the IMDA D2 transparency odds table.
+message BreedOdds {
+  // Canonical lower-case species name.
+  // owl | fox | cat | dragon | phoenix | turtle | wolf | raven
+  string species = 1;
+
+  // Probability weight as a percentage (0.0..100.0).
+  double probability = 2;
+
+  // Rarity bucket per ADR-149 §Breed lootbox.
+  // common | uncommon | rare | legendary
+  string rarity = 3;
+}

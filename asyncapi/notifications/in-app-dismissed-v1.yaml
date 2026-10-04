@@ -1,0 +1,62 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Notifications — InAppNotificationDismissed
+  version: 1.0.0
+  description: |
+    Published when the recipient explicitly dismisses without reading
+    (swipe / X button). Soft-delete: notification record retained for
+    audit.
+
+    - Domain: Notifications (`chora_notifications` DB)
+    - Topic: `chora.notifications.in_app.dismissed.v1`
+    - Source proto: `proto/events/notifications/in_app.proto`
+       message `chora.notifications.v1.InAppNotificationDismissed`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  inAppDismissed:
+    address: chora.notifications.in_app.dismissed.v1
+    messages:
+      inAppDismissed:
+        $ref: '#/components/messages/InAppNotificationDismissed'
+
+operations:
+  publishInAppDismissed:
+    action: send
+    channel:
+      $ref: '#/channels/inAppDismissed'
+    messages:
+      - $ref: '#/channels/inAppDismissed/messages/inAppDismissed'
+
+  consumeInAppDismissed:
+    action: receive
+    channel:
+      $ref: '#/channels/inAppDismissed'
+    description: |
+      Consumers: All 5 surfaces' counter widgets (via WebSocket bridge),
+      Observability (dismiss-rate KPI per kind).
+    messages:
+      - $ref: '#/channels/inAppDismissed/messages/inAppDismissed'
+
+components:
+  messages:
+    InAppNotificationDismissed:
+      name: InAppNotificationDismissed
+      title: In-App Notification Dismissed
+      summary: A recipient has dismissed an in-app notification
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/notifications/in_app.proto#/chora.notifications.v1.InAppNotificationDismissed'

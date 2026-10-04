@@ -1,0 +1,172 @@
+// =============================================================================
+// chora.creation.v1 — Media domain events (uploaded asset lifecycle)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 2 D8
+// + .claude/rules/ddd-enforcement.md
+// + ADR-134 (legacy media-processor pipeline — retained as the processing
+//   model; topic taxonomy migrated to chora.creation.media.* per Tier 2 D8).
+//
+// Media is a child aggregate within the Content Creation domain. Each Media
+// entity may optionally back-reference an atom_id (cover image, embedded
+// asset). Processing is asynchronous: upload -> security scan -> moderation
+// -> metadata extraction -> variant generation. Failures emit a terminal
+// MediaProcessingFailed event and quarantine the asset.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.creation.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/creation/v1;creationv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// Shared enums
+// -----------------------------------------------------------------------------
+
+// MediaType — high-level asset class. Drives downstream variant generation
+// (e.g., IMAGE -> WebP/AVIF responsive variants; VIDEO -> HLS rendition).
+enum MediaType {
+  MEDIA_TYPE_UNSPECIFIED = 0;
+  MEDIA_TYPE_IMAGE = 1;
+  MEDIA_TYPE_VIDEO = 2;
+  MEDIA_TYPE_AUDIO = 3;
+  MEDIA_TYPE_DOCUMENT = 4;
+  MEDIA_TYPE_INTERACTIVE = 5;
+}
+
+// MediaProcessingStatus — pipeline state machine.
+// PENDING -> SCANNING -> MODERATING -> EXTRACTING -> GENERATING_VARIANTS
+//   -> READY (terminal success)
+// Any stage may transition to QUARANTINED or FAILED (terminal failures).
+enum MediaProcessingStatus {
+  MEDIA_PROCESSING_STATUS_UNSPECIFIED = 0;
+  MEDIA_PROCESSING_STATUS_PENDING = 1;
+  MEDIA_PROCESSING_STATUS_SCANNING = 2;
+  MEDIA_PROCESSING_STATUS_MODERATING = 3;
+  MEDIA_PROCESSING_STATUS_EXTRACTING = 4;
+  MEDIA_PROCESSING_STATUS_GENERATING_VARIANTS = 5;
+  MEDIA_PROCESSING_STATUS_READY = 6;
+  MEDIA_PROCESSING_STATUS_QUARANTINED = 7;
+  MEDIA_PROCESSING_STATUS_FAILED = 8;
+}
+
+// -----------------------------------------------------------------------------
+// MediaUploaded — chora.creation.media.uploaded.v1
+// -----------------------------------------------------------------------------
+//
+// Published immediately after a successful upload to the GCS staging bucket
+// (signed-URL PUT). Triggers the async processing pipeline (Cloud Run Job).
+// At this point the asset is in MEDIA_PROCESSING_STATUS_PENDING; it is NOT
+// yet safe to serve to learners.
+message MediaUploaded {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 identifier of the Media entity.
+  string media_id = 2;
+
+  // Optional FK to the parent LearningAtom (cover image, embedded asset).
+  // Empty string when the media was uploaded standalone (e.g., into the
+  // tenant's media library with no atom binding yet).
+  string atom_id = 3;
+
+  // High-level asset class.
+  MediaType media_type = 4;
+
+  // GCS URI of the uploaded raw asset (e.g.,
+  // "gs://chora-creation-media-staging/{tenant_id}/{media_id}/raw").
+  // Consumers MUST NOT serve this URI to learners — wait for the
+  // MediaProcessed event with the published variant URIs.
+  string gcs_uri = 5;
+
+  // IANA media type of the uploaded asset (e.g., "image/png", "video/mp4").
+  string mime_type = 6;
+
+  // Size of the uploaded asset in bytes (uncompressed).
+  int64 size_bytes = 7;
+
+  // Duration in milliseconds — populated for VIDEO and AUDIO; 0 otherwise.
+  int64 duration_ms = 8;
+
+  // Pipeline status at publish time — always MEDIA_PROCESSING_STATUS_PENDING
+  // for *.uploaded events.
+  MediaProcessingStatus processing_status = 9;
+
+  // GCID of the actor who uploaded the asset.
+  string uploaded_by_gcid = 10;
+
+  // When the upload completed in the producer's domain database.
+  google.protobuf.Timestamp uploaded_at = 11;
+}
+
+// -----------------------------------------------------------------------------
+// MediaProcessed — chora.creation.media.processed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when the full pipeline reaches MEDIA_PROCESSING_STATUS_READY.
+// At this point the asset is safe to serve. The published gcs_uri points to
+// the canonical processed asset (variants are addressed separately by Media
+// query APIs — emitting them all in this event would bloat the payload).
+message MediaProcessed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string media_id = 2;
+
+  string atom_id = 3;
+
+  MediaType media_type = 4;
+
+  // GCS URI of the canonical processed asset (post-pipeline).
+  string gcs_uri = 5;
+
+  string mime_type = 6;
+
+  int64 size_bytes = 7;
+
+  int64 duration_ms = 8;
+
+  // Always MEDIA_PROCESSING_STATUS_READY for *.processed events.
+  MediaProcessingStatus processing_status = 9;
+
+  google.protobuf.Timestamp processed_at = 10;
+}
+
+// -----------------------------------------------------------------------------
+// MediaProcessingFailed — chora.creation.media.processing_failed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when the pipeline reaches a terminal failure state
+// (MEDIA_PROCESSING_STATUS_QUARANTINED or MEDIA_PROCESSING_STATUS_FAILED).
+// The asset MUST NOT be served. Consumers should remove pending references
+// and notify the uploader. Distinguish QUARANTINED (security/moderation
+// rejected) from FAILED (transient pipeline error — eligible for retry).
+message MediaProcessingFailed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string media_id = 2;
+
+  string atom_id = 3;
+
+  MediaType media_type = 4;
+
+  // GCS URI of the raw uploaded asset (kept for forensic review only).
+  string gcs_uri = 5;
+
+  string mime_type = 6;
+
+  int64 size_bytes = 7;
+
+  // Either MEDIA_PROCESSING_STATUS_QUARANTINED or MEDIA_PROCESSING_STATUS_FAILED.
+  MediaProcessingStatus processing_status = 8;
+
+  // Human-readable failure reason (max 1024 chars). For QUARANTINED this is
+  // the moderation rule that triggered; for FAILED this is the pipeline-stage
+  // error message (with PII redacted).
+  string error_message = 9;
+
+  // When the terminal failure was recorded.
+  google.protobuf.Timestamp failed_at = 10;
+}

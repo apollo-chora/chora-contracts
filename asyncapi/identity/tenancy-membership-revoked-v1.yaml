@@ -1,0 +1,62 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Identity — TenantMembershipRevoked
+  version: 1.0.0
+  description: |
+    Published when a TenantMembership is soft-deleted. The GCID retains
+    its cross-tenant identity but loses entitlements within this specific
+    tenant.
+
+    - Domain: Identity (`chora_identity` DB)
+    - Topic: `chora.identity.tenancy_membership.revoked.v1`
+    - Source proto: `proto/events/identity/tenancy_membership.proto`
+       message `chora.identity.v1.TenantMembershipRevoked`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  tenantMembershipRevoked:
+    address: chora.identity.tenancy_membership.revoked.v1
+    messages:
+      tenantMembershipRevoked:
+        $ref: '#/components/messages/TenantMembershipRevoked'
+
+operations:
+  publishTenantMembershipRevoked:
+    action: send
+    channel:
+      $ref: '#/channels/tenantMembershipRevoked'
+    messages:
+      - $ref: '#/channels/tenantMembershipRevoked/messages/tenantMembershipRevoked'
+
+  consumeTenantMembershipRevoked:
+    action: receive
+    channel:
+      $ref: '#/channels/tenantMembershipRevoked'
+    description: |
+      Consumers: Tenancy (revoke entitlements), all role-gated UIs,
+      Notifications (departure summary).
+    messages:
+      - $ref: '#/channels/tenantMembershipRevoked/messages/tenantMembershipRevoked'
+
+components:
+  messages:
+    TenantMembershipRevoked:
+      name: TenantMembershipRevoked
+      title: Tenant Membership Revoked
+      summary: A GCID has lost membership in a tenant
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/identity/tenancy_membership.proto#/chora.identity.v1.TenantMembershipRevoked'

@@ -1,0 +1,67 @@
+// =============================================================================
+// GENERATED — DO NOT EDIT.
+// Source : events/sharing/atom_share.proto message AtomShared
+// Tool   : chora-contracts/internal/protoflatten
+// Why    : GCP Pub/Sub Schema Registry rejects (a) schemas with `import`
+//          statements and (b) schemas with more than one top-level message.
+//          This flat copy contains exactly ONE top-level message;
+//          EventEnvelope + Timestamp + transitive deps are nested inside.
+// Path C : see chora-contracts/CHANGELOG.md and m10-data-plane main.tf.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.sharing.v1;
+
+message AtomShared {
+  // Inlined chora.common.v1.EventEnvelope (nested for self-contained schema).
+  message Envelope {
+    string event_id = 1;
+    string idempotency_key = 2;
+    string tenant_id = 3;
+    string gcid = 4;
+    Timestamp occurred_at = 5;
+    Timestamp published_at = 6;
+    string traceparent = 7;
+    string tracestate = 8;
+    string source_project = 9;
+    string source_service = 10;
+    int32 schema_version = 11;
+    string correlation_id = 12;
+    string causation_id = 13;
+    string chora_imda_dimension = 14;
+    string imda_lifecycle_stage = 15;
+  }
+
+  // Inlined google.protobuf.Timestamp (nested; wire-compatible).
+  message Timestamp {
+    int64 seconds = 1;
+    int32 nanos = 2;
+  }
+
+  // Inlined dep: RoyaltyRate
+  message RoyaltyRate {
+    string kind = 1;
+    double value = 2;
+  }
+
+  // Inlined enum dep: LicenseTerms
+  enum LicenseTerms {
+    LICENSE_TERMS_UNSPECIFIED = 0;
+    LICENSE_TERMS_FREE = 1;
+    LICENSE_TERMS_ROYALTY_PCT = 2;
+    LICENSE_TERMS_ROYALTY_FIXED = 3;
+    LICENSE_TERMS_CC_BY_SA = 4;
+    LICENSE_TERMS_CC_ND = 5;
+  }
+
+  Envelope envelope = 1;
+  string share_entry_id = 2;
+  string author_gcid = 3;
+  string author_display_name = 4;
+  string atom_id = 5;
+  string atom_revision_id = 6;
+  string caption = 7;
+  LicenseTerms license_terms = 8;
+  RoyaltyRate royalty_rate = 9;
+}

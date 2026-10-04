@@ -1,0 +1,64 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Identity — GcidMerged
+  version: 1.0.0
+  description: |
+    Published when two GCIDs are merged into one (ADR-133 self-service or
+    admin-assisted account consolidation). The prior GCID becomes an alias
+    of the surviving GCID; child entities should be re-pointed.
+
+    - Domain: Identity (`chora_identity` DB)
+    - Topic: `chora.identity.gcid.merged.v1`
+    - Source proto: `proto/events/identity/gcid.proto`
+       message `chora.identity.v1.GcidMerged`
+
+    Embeds the mandatory `chora.common.v1.EventEnvelope` as field 1.
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  gcidMerged:
+    address: chora.identity.gcid.merged.v1
+    messages:
+      gcidMerged:
+        $ref: '#/components/messages/GcidMerged'
+
+operations:
+  publishGcidMerged:
+    action: send
+    channel:
+      $ref: '#/channels/gcidMerged'
+    messages:
+      - $ref: '#/channels/gcidMerged/messages/gcidMerged'
+
+  consumeGcidMerged:
+    action: receive
+    channel:
+      $ref: '#/channels/gcidMerged'
+    description: |
+      ALL domains holding GCID references must re-point children
+      (membership, posts, sessions, certifications, billing, notifications).
+    messages:
+      - $ref: '#/channels/gcidMerged/messages/gcidMerged'
+
+components:
+  messages:
+    GcidMerged:
+      name: GcidMerged
+      title: GCID Merged
+      summary: Two GCIDs have been merged into one
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/identity/gcid.proto#/chora.identity.v1.GcidMerged'

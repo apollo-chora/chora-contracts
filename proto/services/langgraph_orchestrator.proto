@@ -1,0 +1,205 @@
+// =============================================================================
+// Chora LangGraph Orchestrator Service (gRPC)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 2 D5,
+//   Tier 5 D20 (hybrid crew composition)
+//   + .claude/skills/langgraph-orchestrator-python/SKILL.md
+//   + .claude/skills/crew-composition/SKILL.md
+//   + memory project_chora_data_plane.md, project_chora_governance_ai.md
+//
+// Python LangGraph orchestrator's gRPC API for cross-domain crews and
+// complex multi-agent workflows. Always-on, leader-elected, stateful via
+// PostgresSaver checkpointer in chora_ai_kernel database.
+//
+// Hybrid crew composition (Tier 5 D20):
+//   - FIXED_CORE_PER_DOMAIN: each Content {verb} domain has a fixed core crew
+//     (e.g., Creation = 6-agent gate: Validator → Classifier → Web Researcher
+//      → Q&A Generator → Evaluator → Reporter)
+//   - DYNAMIC_SPECIALIST: specialist agents summoned on-demand per workflow
+//
+// Two RPC shapes:
+//   - RunCrew: kick off a crew (fixed core or dynamic specialist) — returns
+//     the final result synchronously when the workflow completes
+//   - StreamCrewProgress: observe an in-flight crew run (planning / dispatching
+//     / executing / compiling / finalizing)
+//
+// Deployed in chora-489812 team-platform (Team 3 owns kernel orchestrators);
+// per-domain orchestrators in domain projects (Team 1 / Team 2 own domain
+// orchestrators).
+//
+// mTLS via Cloud Service Mesh; SPIFFE identity in mesh.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.services.langgraph_orchestrator.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/langgraph_orchestrator/v1;langgraph_orchestratorv1";
+
+import "google/protobuf/timestamp.proto";
+
+// -----------------------------------------------------------------------------
+// Service
+// -----------------------------------------------------------------------------
+
+service LangGraphOrchestrator {
+  // Kick off a crew run. Returns when the workflow reaches a terminal state
+  // (SUCCESS / FAILED / ESCALATED — orchestrator may interrupt for HITL).
+  // Idempotent on crew_run_id (UUIDv7) — retries hit the existing checkpoint.
+  rpc RunCrew(RunCrewRequest) returns (RunCrewResponse);
+
+  // Stream progress events for a crew run. Emits CrewProgressEvents as the
+  // graph advances through nodes. Final event has is_final=true and carries
+  // the full RunCrewResponse.
+  rpc StreamCrewProgress(StreamCrewProgressRequest) returns (stream CrewProgressEvent);
+}
+
+// -----------------------------------------------------------------------------
+// Domain enum (mirrors 11-domain Chora topology)
+// -----------------------------------------------------------------------------
+
+enum Domain {
+  DOMAIN_UNSPECIFIED = 0;
+
+  // 5 core Content {verb} domains
+  DOMAIN_CREATION = 1;
+  DOMAIN_CONSUMPTION = 2;
+  DOMAIN_DELIVERY = 3;
+  DOMAIN_SHARING = 4;
+  DOMAIN_A2A = 5;
+
+  // 6 supporting / platform domains
+  DOMAIN_IDENTITY = 6;
+  DOMAIN_TENANCY = 7;
+  DOMAIN_GOVERNANCE = 8;
+  DOMAIN_OBSERVABILITY = 9;
+  DOMAIN_NOTIFICATIONS = 10;
+  DOMAIN_AI_KERNEL = 11;
+}
+
+// Crew kind — fixed core (per-domain) or dynamic specialist (on-demand).
+enum CrewKind {
+  CREW_KIND_UNSPECIFIED = 0;
+  CREW_KIND_FIXED_CORE_PER_DOMAIN = 1;
+  CREW_KIND_DYNAMIC_SPECIALIST = 2;
+}
+
+// Final state of a crew run. Mirrors agent_executor.proto's
+// ExecutionFinalState (semantically aligned but defined locally).
+enum CrewFinalState {
+  CREW_FINAL_STATE_UNSPECIFIED = 0;
+  CREW_FINAL_STATE_SUCCESS = 1;
+  CREW_FINAL_STATE_FAILED = 2;
+  CREW_FINAL_STATE_BLOCKED = 3;
+  CREW_FINAL_STATE_ESCALATED = 4;  // HITL interrupt — workflow paused
+}
+
+// Step kind — high-level orchestrator phase emitted via streaming.
+enum AgentStep {
+  AGENT_STEP_UNSPECIFIED = 0;
+  AGENT_STEP_PLANNING = 1;            // building plan / dispatch graph
+  AGENT_STEP_DISPATCHING = 2;         // dispatching work to a member agent
+  AGENT_STEP_EXECUTING_AGENT = 3;     // a member agent is executing
+  AGENT_STEP_COMPILING = 4;           // aggregating member outputs
+  AGENT_STEP_FINALIZING = 5;          // emitting final response + checkpoints
+}
+
+// -----------------------------------------------------------------------------
+// RunCrew RPC
+// -----------------------------------------------------------------------------
+
+message RunCrewRequest {
+  // UUIDv7. Idempotency key for this crew run; doubles as checkpoint thread_id
+  // suffix (per langgraph-orchestrator-python skill —
+  // thread_id = "{tenant_id}:{workflow_id}:{run_id}").
+  string crew_run_id = 1;
+
+  // Tenant scope. Required.
+  string tenant_id = 2;
+
+  // The agent (or system "platform") that requested this crew run. Required
+  // for audit trail. Use literal "system" for platform-internal triggers.
+  string requesting_agid = 3;
+
+  // Domain context for the crew (which fixed-core crew to load, or which
+  // domain a dynamic specialist serves).
+  Domain domain = 4;
+
+  // Crew kind — fixed core or dynamic specialist.
+  CrewKind crew_kind = 5;
+
+  // Goal payload — JSON-stringified workflow input (e.g., atom draft to
+  // validate, learner persona to score, course schedule to optimise).
+  string goal_payload = 6;
+
+  // Workflow constraints (timeouts, cost ceilings, sample-size caps, ...).
+  // Provider-neutral string-string map; orchestrator parses + validates.
+  map<string, string> constraints = 7;
+}
+
+message RunCrewResponse {
+  // Echo of RunCrewRequest.crew_run_id.
+  string crew_run_id = 1;
+
+  // Identifier of the crew that ran (e.g., "creation-6-agent-gate-v3",
+  // "consumption-personalisation-specialist-v1"). Versioned for replay.
+  string crew_id = 2;
+
+  // AGIDs of all member agents that participated. Preserved order = invocation
+  // order so the orchestrator's audit trail is reconstructible.
+  repeated string member_agids = 3;
+
+  // Terminal state of the run.
+  CrewFinalState final_state = 4;
+
+  // Output payload — JSON-stringified result.
+  string output_payload = 5;
+
+  // Total agent invocations across all members (for observability).
+  int32 total_invocations = 6;
+
+  // Total cost in USD micros (1e-6) across all member agent calls.
+  int64 total_cost_micros = 7;
+
+  // Completion timestamp (orchestrator clock).
+  google.protobuf.Timestamp completed_at = 8;
+
+  // When final_state != SUCCESS, human-readable explanation.
+  string error_message = 9;
+}
+
+// -----------------------------------------------------------------------------
+// StreamCrewProgress RPC
+// -----------------------------------------------------------------------------
+
+message StreamCrewProgressRequest {
+  // The crew run to observe.
+  string crew_run_id = 1;
+}
+
+message CrewProgressEvent {
+  // Echo of StreamCrewProgressRequest.crew_run_id.
+  string crew_run_id = 1;
+
+  // Current orchestrator phase.
+  AgentStep agent_step = 2;
+
+  // The member AGID currently active (set when agent_step=EXECUTING_AGENT;
+  // empty for PLANNING / FINALIZING).
+  string member_agid_active = 3;
+
+  // Partial output from the current step (JSON-stringified). May be empty
+  // for purely transitional steps.
+  string partial_output = 4;
+
+  // Event timestamp (orchestrator clock).
+  google.protobuf.Timestamp emitted_at = 5;
+
+  // True only on the FINAL event of the stream. When true, final_response is set.
+  bool is_final = 6;
+
+  // Set ONLY on the final event. Carries the complete RunCrewResponse so
+  // observers can record the terminal accounting at stream end.
+  RunCrewResponse final_response = 7;
+}

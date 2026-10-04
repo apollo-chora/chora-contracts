@@ -1,0 +1,62 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Delivery — ApplicationSubmitted
+  version: 1.0.0
+  description: |
+    Course Application submitted (Draft -> Submitted). Triggers reviewer
+    queue placement. Per `docs/design/ux_course_application.md` 7-screen UX.
+
+    - Domain: Content Delivery (`chora_delivery` DB)
+    - Topic: `chora.delivery.application.submitted.v1`
+    - Source proto: `proto/events/delivery/application.proto`
+       message `chora.delivery.v1.ApplicationSubmitted`
+  contact:
+    name: Chora Delivery Team (Team 2)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  applicationSubmitted:
+    address: chora.delivery.application.submitted.v1
+    messages:
+      applicationSubmitted:
+        $ref: '#/components/messages/ApplicationSubmitted'
+
+operations:
+  publishApplicationSubmitted:
+    action: send
+    channel:
+      $ref: '#/channels/applicationSubmitted'
+    messages:
+      - $ref: '#/channels/applicationSubmitted/messages/applicationSubmitted'
+
+  consumeApplicationSubmitted:
+    action: receive
+    channel:
+      $ref: '#/channels/applicationSubmitted'
+    description: |
+      Consumers:
+        - chora-notifications (applicant + reviewer notifications)
+        - chora-observability (application funnel KPIs)
+        - chora-bff-gateway (refresh applicant dashboard cache)
+    messages:
+      - $ref: '#/channels/applicationSubmitted/messages/applicationSubmitted'
+
+components:
+  messages:
+    ApplicationSubmitted:
+      name: ApplicationSubmitted
+      title: Course Application submitted
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/delivery/application.proto#/chora.delivery.v1.ApplicationSubmitted'

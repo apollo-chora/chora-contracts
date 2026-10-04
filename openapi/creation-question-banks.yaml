@@ -1,0 +1,686 @@
+openapi: 3.2.0
+info:
+  title: "Chora Content Creation — QuestionBank API"
+  version: "1.5.0"
+  description: |
+    Author/instructor-facing REST API for the QuestionBank aggregate of the
+    Content Creation domain (W3.B.1, 2026-06-28).
+
+    Surface (admin) : A+ Creator mode / R+ assessment authoring
+    Owning team     : Team 1 (Content)
+    Owning domain   : Content Creation (chora_creation database)
+    Topic prefix    : chora.creation.*
+
+    An **QuestionBank** is a reusable question-atom pool: a curated, ordered,
+    tagged set of question_id references used to assemble test sets (the
+    TestSet-assembly seam is built in W3.B.2 on top of this aggregate).
+    Per .claude/rules/ddd-enforcement.md Aggregate Invariant #1/#3, an
+    QuestionBank QUERIES Questions by UUID — it NEVER owns question content. The
+    referenced question's existence is validated against
+    chora_creation.questions via the (tenant-scoped) QuestionLookup domain
+    service before a membership row is written.
+
+    VISIBILITY is `PRIVATE | TENANT_INTERNAL` ONLY — there is intentionally NO
+    cross-tenant `PUBLIC` value (exam-security: a question pool is never
+    readable across tenants in v1). A referenced question must belong to the
+    bank's own tenant; a cross-tenant question_id resolves as "does not exist"
+    (404).
+
+    Mutations are owner-gated: the caller's gcid MUST equal the bank's
+    owner_gcid (otherwise 403). Soft-delete only (deleted_at) — hard delete is
+    reserved for crypto-shred / cold archive per ddd-enforcement #4.
+
+    NOTE (W3.B.1 scope): event emission is deferred. No
+    chora.creation.question_bank.* events are published yet; the EventPublisher
+    seam is unwired until the corresponding Protobuf contracts land.
+
+    All endpoints are bearer-authenticated against Identity Platform JWTs.
+    Tenant scope is derived from the JWT claim `tenant_id`; cross-tenant
+    requests are rejected at the auth interceptor.
+
+    Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 2 D8
+    + .claude/rules/ddd-enforcement.md. Mirrors the sibling Collection API in
+    creation-admin.yaml.
+  contact:
+    name: "Chora Platform Team — Content Track"
+  license:
+    name: "Proprietary"
+
+servers:
+  - url: "https://api.chora.site/creation/v1"
+    description: "Production"
+  - url: "https://api.staging.chora.site/creation/v1"
+    description: "Staging"
+  - url: "http://localhost:8081/creation/v1"
+    description: "Local dev"
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: question-banks
+    description: |
+      QuestionBank CRUD (W3.B.1, 2026-06-28) — reusable, tagged, ordered pools of
+      Question references for test-set assembly. Question banks query questions;
+      they NEVER own question content.
+
+paths:
+  # ---------------------------------------------------------------------------
+  # QuestionBanks
+  # ---------------------------------------------------------------------------
+  /question-banks:
+    post:
+      tags: [question-banks]
+      operationId: createQuestionBank
+      summary: "Create a new QuestionBank"
+      description: |
+        Creates a new QuestionBank owned by the authenticated caller (gcid from
+        Identity Platform JWT). Default visibility is PRIVATE. Visibility
+        PUBLIC is rejected (400) — exam-security. Tags are trimmed, de-duped,
+        and capped (≤20 tags, each ≤50 chars).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateQuestionBankRequest"
+      responses:
+        "201":
+          description: "QuestionBank created."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuestionBank"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /me/question-banks:
+    get:
+      tags: [question-banks]
+      operationId: listMyQuestionBanks
+      summary: "List the caller's QuestionBanks"
+      description: |
+        Returns QuestionBanks owned by the authenticated gcid in the caller's
+        tenant. Soft-deleted banks are filtered out (ddd-enforcement #4).
+
+        **Facets** (CHO-1899 — A+ bank browser search + sort):
+
+          * `q` — optional free-text needle (case-insensitive substring against
+            the bank `name`).
+          * `tag` — multi-value filter on `QuestionBank.tags` (OR within the
+            family: a bank carrying ANY of the supplied tags matches). Backed by
+            the `question_banks.tags` TEXT[] GIN index (array overlap).
+          * `sort` — `{field}:{direction}` (`asc`|`desc`), comma-separated
+            multi-key. Sortable fields: `name`, `created_at`, `updated_at`.
+            Default `created_at:desc` (newest first), with a stable
+            `question_bank_id` tiebreak. A non-whitelisted field or direction is
+            rejected 400.
+
+        **Tenant scope**: enforced at the auth interceptor + RLS at the DB layer.
+      parameters:
+        - name: q
+          in: query
+          required: false
+          description: "Optional free-text needle (case-insensitive substring against `name`)."
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 200
+        - name: tag
+          in: query
+          required: false
+          description: |
+            Multi-value filter on `QuestionBank.tags` (OR within the family).
+            Matches banks whose tags overlap any supplied value.
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+              minLength: 1
+              maxLength: 50
+        - name: sort
+          in: query
+          required: false
+          description: |
+            Canonical sort syntax `{field}:{direction}`. Comma-separated
+            multi-key sort accepted. Sortable fields: `name`, `created_at`,
+            `updated_at`. Default `created_at:desc`. A non-whitelisted field or
+            direction is rejected with 400.
+          schema:
+            type: string
+            default: "created_at:desc"
+            pattern: '^[a-z_]+:(asc|desc)(,[a-z_]+:(asc|desc))*$'
+      responses:
+        "200":
+          description: "QuestionBanks listed."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuestionBankListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /question-banks/{question_bank_id}:
+    parameters:
+      - $ref: "#/components/parameters/QuestionBankIdPath"
+    get:
+      tags: [question-banks]
+      operationId: getQuestionBank
+      summary: "Fetch a QuestionBank by ID"
+      description: |
+        Returns the QuestionBank iff it belongs to the caller's tenant (QuestionBank
+        has no cross-tenant PUBLIC read path). The response includes the
+        ordered `items` membership list.
+      responses:
+        "200":
+          description: "QuestionBank retrieved."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuestionBank"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      tags: [question-banks]
+      operationId: patchQuestionBank
+      summary: "Update QuestionBank metadata (owner only)"
+      description: |
+        Partial update of name / description / visibility / tags. Caller MUST
+        be the owner (gcid == owner_gcid); otherwise 403. Setting visibility
+        to PUBLIC is rejected (400).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchQuestionBankRequest"
+      responses:
+        "200":
+          description: "QuestionBank updated."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuestionBank"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [question-banks]
+      operationId: deleteQuestionBank
+      summary: "Soft-delete a QuestionBank (owner only)"
+      description: |
+        Soft-deletes the bank (sets deleted_at; cascades soft-delete to
+        question_bank_items child rows per Aggregate Invariant #5). Hard delete is
+        RESERVED for crypto-shred / cold archive (ddd-enforcement #4).
+      responses:
+        "204":
+          description: "QuestionBank soft-deleted."
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /question-banks/{question_bank_id}/questions:
+    parameters:
+      - $ref: "#/components/parameters/QuestionBankIdPath"
+    get:
+      tags: [question-banks]
+      operationId: listQuestionBankQuestions
+      summary: "List the questions in a QuestionBank"
+      description: |
+        Returns ONE filtered/sorted page of the bank's questions, each row
+        ENRICHED with host `atom_id` + `question_type` + `prompt`. Resolved
+        server-side via an intra-DB JOIN so a HUGE bank never loads in full.
+        Same-tenant access only.
+      parameters:
+        - name: q
+          in: query
+          required: false
+          description: "Case-insensitive keyword filter on the question prompt."
+          schema:
+            type: string
+        - name: question_type
+          in: query
+          required: false
+          description: "Filter by question type (repeatable: ?question_type=mcq&question_type=oe)."
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+              enum: [mcq, oe]
+        - name: sort
+          in: query
+          required: false
+          description: "`field:dir` over position | added_at | prompt (e.g. prompt:asc). Unknown ⇒ position asc."
+          schema:
+            type: string
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: page_size
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        "200":
+          description: "Questions listed."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuestionBankItemListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      tags: [question-banks]
+      operationId: addQuestionBankQuestion
+      summary: "Add a question to a QuestionBank (owner only)"
+      description: |
+        Appends the supplied question_id to the bank. The question is
+        validated for existence in chora_creation.questions via the
+        (tenant-scoped) QuestionLookup domain service (ddd-enforcement #3) —
+        a missing or cross-tenant question returns 404. Duplicate active
+        questions return 409; exceeding the 1000-question cap returns 422.
+        Caller MUST be the owner (else 403).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddQuestionRequest"
+      responses:
+        "201":
+          description: "Question added; the updated QuestionBank is returned."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuestionBank"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+
+  /question-banks/{question_bank_id}/questions/{question_id}:
+    parameters:
+      - $ref: "#/components/parameters/QuestionBankIdPath"
+      - $ref: "#/components/parameters/QuestionIdPath"
+    delete:
+      tags: [question-banks]
+      operationId: removeQuestionBankQuestion
+      summary: "Remove a question from a QuestionBank (owner only)"
+      description: |
+        Soft-deletes the membership row + compacts the remaining positions.
+        Caller MUST be the owner (else 403). A question not in the bank
+        returns 404.
+      responses:
+        "204":
+          description: "Question removed."
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /question-banks/{question_bank_id}/reorder:
+    parameters:
+      - $ref: "#/components/parameters/QuestionBankIdPath"
+    post:
+      tags: [question-banks]
+      operationId: reorderQuestionBankItems
+      summary: "Reorder the questions in a QuestionBank (owner only)"
+      description: |
+        Reassigns item positions to match `question_ids` (CHO-1899 Wave 2).
+        `question_ids` MUST be a permutation of the bank's CURRENT member
+        questions — same set, no additions / removals / duplicates — else 400.
+        Caller MUST be the owner (else 403); a soft-deleted bank returns 410.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReorderQuestionBankRequest"
+      responses:
+        "200":
+          description: "Reordered. Returns the updated QuestionBank."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuestionBank"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: "Identity Platform JWT; tenant scope from the `tenant_id` claim."
+
+  parameters:
+    QuestionBankIdPath:
+      name: question_bank_id
+      in: path
+      required: true
+      description: "QuestionBank UUID (UUIDv7)."
+      schema:
+        type: string
+        format: uuid
+    QuestionIdPath:
+      name: question_id
+      in: path
+      required: true
+      description: "Question UUID referenced by the membership row."
+      schema:
+        type: string
+        format: uuid
+
+  schemas:
+    Visibility:
+      type: string
+      description: |
+        QuestionBank visibility scope. PRIVATE = owner only; TENANT_INTERNAL = any
+        GCID in the same tenant. There is NO PUBLIC value (exam-security).
+      enum: [PRIVATE, TENANT_INTERNAL]
+      default: PRIVATE
+
+    QuestionBank:
+      type: object
+      required:
+        - question_bank_id
+        - tenant_id
+        - owner_gcid
+        - name
+        - visibility
+        - tags
+        - created_at
+        - updated_at
+        - items
+      properties:
+        question_bank_id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        owner_gcid:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          type: string
+          maxLength: 2000
+        visibility:
+          $ref: "#/components/schemas/Visibility"
+        tags:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            maxLength: 50
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        deleted_at:
+          type: string
+          format: date-time
+          nullable: true
+        items:
+          type: array
+          description: "Ordered question membership list."
+          items:
+            $ref: "#/components/schemas/QuestionBankItem"
+
+    QuestionBankItem:
+      type: object
+      required:
+        - question_bank_id
+        - question_id
+        - tenant_id
+        - position
+        - added_at
+      properties:
+        question_bank_id:
+          type: string
+          format: uuid
+        question_id:
+          type: string
+          format: uuid
+          description: "Cross-aggregate reference to Question (no FK; validated via QuestionLookup)."
+        tenant_id:
+          type: string
+          format: uuid
+        position:
+          type: integer
+          minimum: 0
+          description: "0-based ordering within the bank."
+        added_at:
+          type: string
+          format: date-time
+
+    EnrichedQuestionBankItem:
+      type: object
+      description: |
+        A membership row as served by GET /question-banks/{id}/questions for the
+        A+ workbench: the question reference PLUS its resolved host `atom_id` and
+        `question_type`. The bank persists only `question_id` (cross-aggregate
+        ref); `atom_id` is resolved at READ time via QuestionLookup so the
+        workbench can address /api/atoms/{atom_id} for its row-level conveniences
+        (preview / edit / tags / clone). Resolution is tenant-scoped — a row that
+        cannot resolve fails the request loud (never returned bare).
+      required:
+        - question_id
+        - atom_id
+        - question_type
+        - prompt
+        - position
+        - added_at
+      properties:
+        question_id:
+          type: string
+          format: uuid
+          description: "Cross-aggregate reference to Question (the bank's membership key)."
+        atom_id:
+          type: string
+          format: uuid
+          description: "Host LearningAtom of the question (resolved via QuestionLookup; addresses /api/atoms/{atom_id})."
+        question_type:
+          type: string
+          description: "Canonical question type (e.g. mcq, oe), resolved alongside atom_id."
+        prompt:
+          type: string
+          description: "The question stem/prompt, resolved off the same lookup — the human-readable workbench-row label (the row would otherwise show only the opaque question_id)."
+        position:
+          type: integer
+          minimum: 0
+          description: "0-based ordering within the bank."
+        added_at:
+          type: string
+          format: date-time
+
+    CreateQuestionBankRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          type: string
+          maxLength: 2000
+        visibility:
+          $ref: "#/components/schemas/Visibility"
+        tags:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            maxLength: 50
+
+    PatchQuestionBankRequest:
+      type: object
+      description: "Partial update; only present fields are applied."
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          type: string
+          maxLength: 2000
+        visibility:
+          $ref: "#/components/schemas/Visibility"
+        tags:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            maxLength: 50
+
+    AddQuestionRequest:
+      type: object
+      required: [question_id]
+      properties:
+        question_id:
+          type: string
+          format: uuid
+          description: "Must reference an active question in the caller's tenant."
+
+    ReorderQuestionBankRequest:
+      type: object
+      required: [question_ids]
+      properties:
+        question_ids:
+          type: array
+          minItems: 1
+          description: |
+            The full ordered list of member question UUIDs. MUST be a
+            permutation of the bank's current questions (same set) — the new
+            position of each question is its index in this array.
+          items:
+            type: string
+            format: uuid
+
+    QuestionBankListResponse:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/QuestionBank"
+        total:
+          type: integer
+
+    QuestionBankItemListResponse:
+      type: object
+      required: [items, total, page, page_size]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/EnrichedQuestionBankItem"
+        total:
+          type: integer
+          description: "Total questions matching the filter (across all pages) — drives the pagination UI."
+        page:
+          type: integer
+          minimum: 1
+          description: "The 1-based page returned (echoes the request)."
+        page_size:
+          type: integer
+          description: "The page size used (clamped server-side; echoes the request)."
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: "Machine-readable error code (e.g. CREATION_QUESTION_BANK_NOT_FOUND)."
+        message:
+          type: string
+          description: "Human-readable error detail."
+
+  responses:
+    BadRequest:
+      description: "Invalid request (validation error, e.g. empty name / PUBLIC visibility / bad tags)."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: "Missing or invalid tenant/identity context."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: "Caller is not the QuestionBank owner."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: "QuestionBank or referenced question not found."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Conflict:
+      description: "Question already present in the bank."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    UnprocessableEntity:
+      description: "Question cap exceeded."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"

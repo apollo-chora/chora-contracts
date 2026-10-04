@@ -1,0 +1,828 @@
+// =============================================================================
+// chora.delivery.v1 — Assessment grading lifecycle events
+// =============================================================================
+//
+// Source-of-truth: docs/architecture/adrs/adr-155-assessment-grading-dispatch.md
+// + docs/architecture/qgen-crew-composition-2026-05-12.md §2.4 + §8.5
+// + .claude/rules/ddd-enforcement.md (Pub/Sub is the ONLY cross-domain mechanism)
+// + .claude/skills/event-driven/SKILL.md
+//
+// Owning domain  : Content Delivery (chora_delivery database)
+// Owning team    : Team 2 (Delivery)
+// Topic prefix   : chora.delivery.grading.*
+//
+// -----------------------------------------------------------------------------
+// LOCKED ARCHITECTURAL RULE — agentic dispatch is event-driven, not RPC
+// -----------------------------------------------------------------------------
+//
+// Any LLM/agent invocation in Chora goes through Pub/Sub events,
+// orchestrator-managed. Direct sync RPC to a reasoning engine is anti-pattern.
+// This is the canonical pattern across qgen_question (ADR-153), Companion chat
+// (ADR-154), and grading (this ADR). The orchestrator (Python LangGraph on
+// Vertex AI Agent Engine) is responsible for: invoking the agent, managing
+// retries, capturing observability, emitting completion events.
+//
+// -----------------------------------------------------------------------------
+// Two distinct grading paths
+// -----------------------------------------------------------------------------
+//
+// 1. MCQ → DETERMINISTIC (in-process Go inside chora-delivery)
+//    - Zero LLM calls. Sub-200ms p99.
+//    - chora-delivery's submission handler scores MCQs in-process when the
+//      submission finalises.
+//    - Emits `mcq_completed.v1` as an observability/audit marker so downstream
+//      subscribers (R+ monitoring, IMDA D2 evidence trail) can react.
+//
+// 2. OE → BATCHED LLM EVALUATOR (event-driven; orchestrator-managed)
+//    - chora-delivery emits `oe_batch_requested.v1` with full batch payload
+//      (rubric + model_answer + per-submission learner_responses[]).
+//    - `grading_orchestrator` (Python LangGraph on Vertex AI Agent Engine)
+//      subscribes to `oe_batch_requested.v1`. It invokes the `oe_grader`
+//      reasoning engine (NEW ADK Go agent, M14.x deliverable — P1 single-agent
+//      crew per qgen-crew-composition §8.5; T1 gemini-3.1-pro-preview for
+//      LLM-as-judge).
+//    - One LLM call per batch — NOT per learner. chora-delivery accumulates
+//      ALL OE answers for a given (assessment × question) into one batched
+//      payload, dispatched on submission-finalise OR on a batch saturation
+//      timer (configurable; default 50 submissions or 60s window).
+//    - Orchestrator emits `oe_batch_completed.v1` with per-submission scores
+//      + LLM provenance (model_id, response_id) for IMDA D2 transparency.
+//    - chora-delivery subscribes to `oe_batch_completed.v1`, persists grades
+//      to `chora_delivery.grading_jobs.per_question_grades_jsonb`, and emits
+//      `finalized.v1` once both MCQ + OE grades for a submission are persisted.
+//
+// -----------------------------------------------------------------------------
+// Five topics defined here
+// -----------------------------------------------------------------------------
+//
+// chora.delivery.grading.requested.v1
+//   Fired by chora-delivery when a submission finalises (the SubmissionSubmitted
+//   handler creates a grading job + immediately publishes this event). Marks
+//   the start of the grading lifecycle. Consumers: Observability + O+
+//   (per-tenant grading-volume metric), R+ instructor monitoring dashboard.
+//
+// chora.delivery.grading.mcq_completed.v1
+//   Fired by chora-delivery's in-process deterministic MCQ scorer after MCQ
+//   answers have been graded (the FAST path; usually within ~1s of
+//   .requested.v1). Consumers: R+ monitoring (partial-progress UI),
+//   Observability (latency histogram bucket).
+//
+// chora.delivery.grading.oe_batch_requested.v1
+//   Fired by chora-delivery's batched dispatcher when an OE batch is ready
+//   for the evaluator agent. Carries the full batched payload (rubric +
+//   model_answer + per-submission learner_responses[]). Subscribed by the
+//   `grading_orchestrator` (Python LangGraph on Vertex AI Agent Engine).
+//
+// chora.delivery.grading.oe_batch_completed.v1
+//   Fired by the `grading_orchestrator` after `oe_grader` returns per-
+//   submission scores + feedback. Carries per-submission scoring detail +
+//   LLM provenance (model_id, response_id). Subscribed by chora-delivery
+//   (to persist grades) + Observability + O+ + chora-governance (IMDA D2
+//   evidence — every LLM grade is auditable).
+//
+// chora.delivery.grading.finalized.v1
+//   Fired by chora-delivery after BOTH MCQ + OE grades for a submission are
+//   persisted to grading_jobs.per_question_grades_jsonb. Marks the
+//   submission's grading job as terminal. Consumers: chora-consumption
+//   (XP credit pending release), Notifications (instructor "grading complete"
+//   email), R+ monitoring (release-results CTA enabled). The grade itself
+//   is NOT released to the learner until the instructor calls
+//   `POST /assessments/{id}/release-results` (delivery-assessments.yaml) OR
+//   if `grading_config.auto_release=true`.
+//
+// chora.delivery.grading.failed.v1
+//   Fired by chora-delivery when a grading job reaches terminal FAILED state
+//   that cannot be auto-recovered. Today the load-bearing producer is the
+//   OE-batch completion-event subscriber (services/chora-delivery/internal/
+//   adapter/subscribers/grading_inbox.go): when the orchestrator returns
+//   batch_outcome != "ok" the subscriber records the failure here so
+//   downstream subscribers can react. Consumers: O+ governance (IMDA D1
+//   accountability — every grading failure is auditable with full failure
+//   category + provenance), R+ monitoring (display "Re-run grading" CTA on
+//   the dashboard), Observability (alerting on failure-rate spikes). NOT a
+//   replay of the OE batch input — this is the *grading-job-level* failure
+//   marker independent of the batch-level oe_batch_completed.v1 (which
+//   already carries failure_category for the BATCH dispatch path).
+//
+// EVERY event carries the full chora.common.v1.EventEnvelope as field 1 per
+// chora-contracts CLAUDE.md §2 + envelope.proto.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.delivery.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/delivery/v1;deliveryv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// GradingDispatch — discriminator for per-question grading path
+// -----------------------------------------------------------------------------
+//
+// Mirrors GradingDispatch in delivery-grading-results read-models. Lives here
+// in the proto layer so subscribers can fan-out per-dispatch.
+enum GradingDispatch {
+  GRADING_DISPATCH_UNSPECIFIED = 0;
+  GRADING_DISPATCH_DETERMINISTIC = 1;  // MCQ — in-process Go scorer
+  GRADING_DISPATCH_LLM_EVALUATOR = 2;  // OE — batched evaluator agent
+}
+
+// -----------------------------------------------------------------------------
+// GradingJobStatus — high-level lifecycle of the grading job aggregate
+// -----------------------------------------------------------------------------
+//
+// FSM:
+//   REQUESTED → RUNNING → MCQ_DETERMINISTIC_DONE
+//                          ├─→ (no OE)  SCORED → FINALIZED
+//                          └─→ (has OE) OE_BATCH_PENDING → OE_BATCH_COMPLETE
+//                                       → SCORED → FINALIZED
+//   any → FAILED (terminal)
+//
+// SCORED + FINALIZED differ: SCORED = all per-question grades computed but
+// not yet persisted to Submission.result_jsonb. FINALIZED = grades persisted
+// (and `chora.delivery.grading.finalized.v1` has been emitted).
+enum GradingJobStatus {
+  GRADING_JOB_STATUS_UNSPECIFIED            = 0;
+  GRADING_JOB_STATUS_REQUESTED              = 1;
+  GRADING_JOB_STATUS_RUNNING                = 2;
+  GRADING_JOB_STATUS_MCQ_DETERMINISTIC_DONE = 3;
+  GRADING_JOB_STATUS_OE_BATCH_PENDING       = 4;
+  GRADING_JOB_STATUS_OE_BATCH_COMPLETE      = 5;
+  GRADING_JOB_STATUS_SCORED                 = 6;
+  GRADING_JOB_STATUS_FINALIZED              = 7;
+  GRADING_JOB_STATUS_FAILED                 = 8;
+}
+
+// -----------------------------------------------------------------------------
+// GradingFailureCategory — short category for FAILED events
+// -----------------------------------------------------------------------------
+enum GradingFailureCategory {
+  GRADING_FAILURE_CATEGORY_UNSPECIFIED         = 0;
+  GRADING_FAILURE_CATEGORY_VERTEX_AI_5XX       = 1;
+  GRADING_FAILURE_CATEGORY_MODEL_ARMOR_BLOCKED = 2;
+  GRADING_FAILURE_CATEGORY_TIMEOUT             = 3;
+  GRADING_FAILURE_CATEGORY_QUOTA_EXCEEDED      = 4;
+  GRADING_FAILURE_CATEGORY_INSUFFICIENT_TENANT_MANA = 5;
+  GRADING_FAILURE_CATEGORY_INTERNAL_ERROR      = 6;
+}
+
+// -----------------------------------------------------------------------------
+// Shared sub-messages
+// -----------------------------------------------------------------------------
+
+// QuestionGradeBatchEntry — a single learner's submission to be graded by
+// the batched OE evaluator. Carried inside oe_batch_requested.v1's
+// `batch_submissions[]`.
+message QuestionGradeBatchEntry {
+  // UUIDv7 of the parent submission row (chora_delivery.submissions).
+  string submission_id = 1;
+
+  // UUIDv7 of the test_set_question row (per-inclusion identifier).
+  string test_set_question_id = 2;
+
+  // UUIDv7 of the underlying chora_creation question.
+  string question_id = 3;
+
+  // GCID of the learner whose answer is being graded.
+  string learner_gcid = 4;
+
+  // The learner's free-text OE response.
+  string response_text = 5;
+
+  // Optional learner-supplied context (e.g., assistive accommodations
+  // annotations). Free-form JSON string for forward-compat.
+  string accommodations_json = 6;
+}
+
+// QuestionGradeBatchResult — per-submission scoring output from the OE
+// evaluator. Carried inside oe_batch_completed.v1's `graded[]`.
+message QuestionGradeBatchResult {
+  string submission_id = 1;
+  string test_set_question_id = 2;
+  string question_id = 3;
+  string learner_gcid = 4;
+
+  // Composite score (0..points_possible). Float — supports rubric-weighted
+  // partial credit.
+  float points_earned = 5;
+
+  // Points possible (snapshot of TestSetQuestion.points at grading time).
+  int32 points_possible = 6;
+
+  // Per-rubric-criterion sub-scores (JSON-encoded for forward-compat —
+  // criterion_id / title / score / max_score / feedback).
+  string criterion_scores_json = 7;
+
+  // Markdown-formatted human-facing feedback from the evaluator. Surfaced
+  // to learners only after the parent assessment is RELEASED.
+  string llm_evaluator_feedback = 8;
+
+  // Vendor model_id used (e.g., "gemini-3.1-pro-preview"). Pinned per
+  // request for IMDA D2 transparency.
+  string grading_model_id = 9;
+
+  // Vendor response_id for provenance auditing (IMDA D2).
+  string grading_response_id = 10;
+
+  // Per-criterion or per-axis decisions (free JSON for evaluator-specific
+  // shape). Forward-compat hook.
+  string grader_metadata_json = 11;
+}
+
+// -----------------------------------------------------------------------------
+// GradingRequested — chora.delivery.grading.requested.v1
+// -----------------------------------------------------------------------------
+//
+// Fired by chora-delivery when a submission finalises (POST .../submit lands
+// in delivery-assessments.yaml). Marks the start of the grading lifecycle.
+//
+// Consumers:
+//   - Observability + O+ (per-tenant grading-volume metric)
+//   - R+ instructor monitoring dashboard (in-progress count → graded count)
+//   - chora-governance (IMDA D1 accountability — record that grading was
+//     attempted for every finalised submission)
+message GradingRequested {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 of the grading job (1:1 with submission attempt; new job on regrade).
+  string grading_job_id = 2;
+
+  // UUIDv7 of the parent submission (chora_delivery.submissions).
+  string submission_id = 3;
+
+  // UUIDv7 of the assessment (chora_delivery.assessments).
+  string assessment_id = 4;
+
+  // UUIDv7 of the test-set the assessment instantiated (chora_delivery.test_sets).
+  string test_set_id = 5;
+
+  // GCID of the learner whose submission is being graded.
+  string learner_gcid = 6;
+
+  // Total question count + total points (snapshot at grading time).
+  int32 question_count = 7;
+  int32 total_points_possible = 8;
+
+  // Question-type mix (informational; helps subscribers pre-allocate).
+  int32 mcq_count = 9;
+  int32 oe_count = 10;
+
+  // Configured passing threshold (0..100 percent).
+  int32 passing_threshold_percent = 11;
+
+  // Whether this job is a regrade (force_regrade flag from the trigger).
+  bool force_regrade = 12;
+
+  // When the grading job was created at the producer's domain database.
+  google.protobuf.Timestamp requested_at = 13;
+}
+
+// -----------------------------------------------------------------------------
+// GradingMcqCompleted — chora.delivery.grading.mcq_completed.v1
+// -----------------------------------------------------------------------------
+//
+// Fired by chora-delivery's in-process deterministic MCQ scorer after MCQ
+// answers for a submission have been graded. Carries per-question MCQ
+// outcomes for observability + the R+ partial-progress UI.
+//
+// This event is a MARKER — chora-delivery has already persisted the MCQ
+// grades inline; consumers read them via gRPC GetGradingJob if they need
+// detail. The list of per_question_grades inline here is the OBSERVABILITY
+// projection (full per-rubric detail is in the in-DB record).
+//
+// Consumers:
+//   - R+ monitoring (partial-progress UI — show "MCQ scored, OE pending")
+//   - Observability (latency histogram bucket — submit → mcq_completed
+//     should be sub-200ms p99)
+//   - chora-governance (audit trail — deterministic grades have ZERO LLM
+//     evidence, only the deterministic compare-to-key event)
+message GradingMcqCompleted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string grading_job_id = 2;
+  string submission_id = 3;
+  string assessment_id = 4;
+  string learner_gcid = 5;
+
+  // Aggregate MCQ scoring outcome.
+  int32 mcq_correct_count = 6;
+  int32 mcq_incorrect_count = 7;
+  float mcq_points_earned = 8;
+  int32 mcq_points_possible = 9;
+
+  // True when there are no OE questions on the assessment — implies the
+  // job transitions directly to SCORED + (per finalize flow) FINALIZED.
+  bool no_oe_pending = 10;
+
+  google.protobuf.Timestamp mcq_completed_at = 11;
+}
+
+// -----------------------------------------------------------------------------
+// GradingOeBatchRequested — chora.delivery.grading.oe_batch_requested.v1
+// -----------------------------------------------------------------------------
+//
+// Fired by chora-delivery's batched OE dispatcher when an OE batch is ready
+// for the evaluator agent. Carries the full payload the orchestrator needs
+// to invoke `oe_grader`.
+//
+// Subscribed by `grading_orchestrator` (Python LangGraph on Vertex AI Agent
+// Engine). The orchestrator:
+//   1. Picks up the event via Pub/Sub subscription
+//   2. Validates schema + TenantManaPool balance (gRPC to chora-tenancy)
+//   3. Invokes `oe_grader` reasoning engine with the batched payload
+//   4. Emits `oe_batch_completed.v1` on agent return
+//
+// Cost-optimised: ONE event per (assessment × question × batch-window) —
+// not per learner. Batch window = max 50 submissions or 60s elapsed
+// (configurable per tenant).
+message GradingOeBatchRequested {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 of the batch (shared by all submissions in the batch).
+  string oe_batch_id = 2;
+
+  // UUIDv7 of the assessment the batch belongs to.
+  string assessment_id = 3;
+
+  // UUIDv7 of the test_set_question being graded (one batch = one question
+  // shared across N learners' submissions).
+  string test_set_question_id = 4;
+
+  // UUIDv7 of the underlying chora_creation question.
+  string question_id = 5;
+
+  // Rubric (JSON-encoded — per-criterion id + title + weight; matches
+  // creation-questions.yaml `OEPayload.rubric` shape). Snapshot at grading
+  // time — later edits in chora_creation do NOT mutate this batch.
+  string rubric_json = 6;
+
+  // Reference model answer (free text, ≤8000 chars).
+  string model_answer = 7;
+
+  // Question prompt (so the grader can reason about the prompt-answer
+  // alignment without an extra fetch).
+  string prompt = 8;
+
+  // Points possible per submission (uniform across the batch).
+  int32 points_possible_per_submission = 9;
+
+  // Tier of the evaluator model (T1 = gemini-3.1-pro-preview default).
+  // Mirrors GradingConfig.llm_evaluator_model_tier (delivery-test-sets.yaml).
+  string model_tier = 10;
+
+  // Whether per-question feedback is to be generated (false = score-only,
+  // cost-saving mode; per_question_feedback_enabled in GradingConfig).
+  bool per_question_feedback_enabled = 11;
+
+  // The batched submissions to grade. Up to 50 entries per batch.
+  repeated QuestionGradeBatchEntry batch_submissions = 12;
+
+  // Estimated TenantManaPool debit for this batch (informational — actual
+  // debit happens on oe_batch_completed.v1).
+  int32 estimated_mana_units = 13;
+
+  google.protobuf.Timestamp dispatched_at = 14;
+}
+
+// -----------------------------------------------------------------------------
+// GradingOeBatchCompleted — chora.delivery.grading.oe_batch_completed.v1
+// -----------------------------------------------------------------------------
+//
+// Fired by `grading_orchestrator` (Python LangGraph) after `oe_grader`
+// (ADK Go reasoning engine) returns per-submission scores. Carries the full
+// per-submission result list + LLM provenance fields.
+//
+// Subscribed by:
+//   - chora-delivery (writes per_question_grades_jsonb into grading_jobs;
+//     transitions job status → SCORED → FINALIZED; emits finalized.v1)
+//   - Observability + O+ (per-batch latency + cost; runtime stage of
+//     IMDA D2 transparency evidence)
+//   - chora-governance (records per-submission LLM grade evidence with
+//     full model_id + response_id provenance for IMDA D2 audit)
+message GradingOeBatchCompleted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string oe_batch_id = 2;
+  string assessment_id = 3;
+  string test_set_question_id = 4;
+  string question_id = 5;
+
+  // Per-submission scoring outcomes — one entry per submission in the
+  // original batch_submissions[] of oe_batch_requested.v1.
+  repeated QuestionGradeBatchResult graded = 6;
+
+  // Vendor model_id used (same across all entries in the batch — single LLM
+  // call per batch). Duplicated from `graded[].grading_model_id` for
+  // filter-friendly subscribers.
+  string grading_model_id = 7;
+
+  // Aggregate TenantManaPool units debited for this batch.
+  int32 mana_debited = 8;
+
+  // Aggregate token telemetry (input + output, informational).
+  int64 total_input_tokens = 9;
+  int64 total_output_tokens = 10;
+
+  // Orchestrator-level outcome — was the batch successful end-to-end?
+  // SUCCESS / PARTIAL (some submissions failed individual grading) / FAILED.
+  string batch_outcome = 11;
+
+  // On batch_outcome != "SUCCESS" — short category for failure.
+  GradingFailureCategory failure_category = 12;
+  string failure_message = 13;
+
+  google.protobuf.Timestamp completed_at = 14;
+}
+
+// -----------------------------------------------------------------------------
+// GradingFinalized — chora.delivery.grading.finalized.v1
+// -----------------------------------------------------------------------------
+//
+// Fired by chora-delivery after BOTH MCQ + OE grades for a submission are
+// persisted to `chora_delivery.grading_jobs.per_question_grades_jsonb` and
+// the parent `chora_delivery.submissions.result_jsonb`. Marks the grading
+// lifecycle terminal.
+//
+// Note: terminal-of-grading-job ≠ released-to-learner. The grade is
+// invisible to the learner until the parent Assessment is RELEASED (via
+// instructor /release-results in delivery-assessments.yaml) OR
+// auto-released per GradingConfig.auto_release.
+//
+// Consumers:
+//   - chora-consumption (queue XP credit pending release)
+//   - Notifications (instructor "grading complete; ready to release" email)
+//   - R+ monitoring (enable the "Release Results" CTA on the dashboard)
+//   - delivery-assessments-yaml's submission FSM (GRADING → GRADED transition)
+message GradingFinalized {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string grading_job_id = 2;
+  string submission_id = 3;
+  string assessment_id = 4;
+  string learner_gcid = 5;
+
+  // Final aggregate totals (sum of per-question grades).
+  float total_points_earned = 6;
+  int32 total_points_possible = 7;
+  int32 passing_threshold_percent = 8;
+  bool passed = 9;
+
+  // Indicator: are results released to the learner immediately
+  // (auto_release=true) or pending instructor release?
+  bool released_to_learner = 10;
+
+  // Status of the job at finalization (always FINALIZED on success;
+  // included for filter-friendly subscribers).
+  GradingJobStatus status = 11;
+
+  google.protobuf.Timestamp finalized_at = 12;
+}
+
+// -----------------------------------------------------------------------------
+// GradingFailed — chora.delivery.grading.failed.v1
+// -----------------------------------------------------------------------------
+//
+// Fired by chora-delivery when a grading job reaches terminal FAILED state.
+// Today the load-bearing producer is the OE-batch completion-event subscriber
+// (services/chora-delivery/internal/adapter/subscribers/grading_inbox.go):
+// when the orchestrator returns batch_outcome != "ok" the subscriber records
+// the failure here so downstream subscribers can react.
+//
+// Distinct from `oe_batch_completed.v1` carrying `failure_category` — that
+// is the *batch-level* dispatch outcome (the orchestrator → executor hop).
+// This event is the *grading-job-level* terminal marker: it means the entire
+// grading job for the submission cannot make forward progress without manual
+// intervention (instructor regrade or admin remediation).
+//
+// FSM transition: any state → FAILED (GRADING_JOB_STATUS_FAILED).
+//
+// Consumers:
+//   - O+ governance (IMDA D1 accountability — every grading failure
+//     auditable with category + provenance + traceparent)
+//   - R+ monitoring (display "Grading failed; re-dispatch?" CTA + per-tenant
+//     failure-rate gauge)
+//   - Observability (alerting on failure-rate spikes; ties to D3
+//     safety_and_robustness)
+//   - chora-consumption (clear XP pending for this submission since the
+//     grade is not coming through)
+message GradingFailed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 of the grading job (1:1 with submission attempt).
+  string grading_job_id = 2;
+
+  // UUIDv7 of the parent submission (chora_delivery.submissions). Required.
+  string submission_id = 3;
+
+  // UUIDv7 of the assessment (chora_delivery.assessments).
+  string assessment_id = 4;
+
+  // GCID of the learner whose submission was being graded.
+  string learner_gcid = 5;
+
+  // Categorised failure reason (mirrors `oe_batch_completed.v1.failure_category`
+  // when the trigger was an OE batch; populated to INTERNAL_ERROR for
+  // grading-job-level failures not tied to a specific batch).
+  GradingFailureCategory failure_category = 6;
+
+  // Human-readable failure summary (≤4096 chars). Forwarded to the
+  // governance audit + the R+ admin UI.
+  string failure_message = 7;
+
+  // Status of the job at failure time (always GRADING_JOB_STATUS_FAILED;
+  // included for filter-friendly subscribers).
+  GradingJobStatus status = 8;
+
+  // Number of grading attempts before the job was marked terminal-failed
+  // (informational; 1-based counter — the orchestrator retries upstream
+  // are still captured via oe_batch_completed.v1 sequencing).
+  int32 attempt_count = 9;
+
+  // Reference to the OE batch (if any) that triggered the terminal failure;
+  // empty when the failure was grading-job-level (e.g., MCQ snapshot
+  // missing + no OE batch was dispatched).
+  string oe_batch_id = 10;
+
+  // When the terminal failure was recorded at the producer's domain database.
+  google.protobuf.Timestamp failed_at = 11;
+}
+
+// =============================================================================
+// ADR-172 — Per-submission OE grading (evaluator→moderator loop) + HITL
+// =============================================================================
+//
+// SUPERSEDES the batched OE path above (GradingOeBatchRequested /
+// GradingOeBatchCompleted are DEPRECATED — retained only for buf breaking-check
+// compatibility; no producer emits them once ADR-172 ships).
+//
+// New per-submission flow:
+//   chora-delivery  ── grading.submission_requested.v1 ──►  oe_grading_crew
+//     (whole-submission context: MCQ results + OE answers       (Python LangGraph, GKE)
+//      + rubric + model_answer + points + subject/topic)         per OE question:
+//                                                                  guardrail_pre → evaluate
+//                                                                  → guardrail_post → moderate
+//                                                                  → quality_gate (retry ≤2)
+//                                                                then assess_summary (whole sub)
+//   chora-delivery  ◄── grading.submission_completed.v1 ──   emit per-Q result + overall_comment
+//     (lands GRADED_PENDING_RELEASE, review_status=PENDING_REVIEW, provenance=AI)
+//
+// HITL (R+ grading queue, mandatory gate before release):
+//   grading.score_overridden.v1       — instructor edited a score / comment / model_answer
+//   grading.submission_approved.v1    — per-candidate one-click approve (review_status→APPROVED)
+//   grading.assessment_approved.v1    — assessment-wide bulk approve
+//   grading.model_answer_amended.v1   — model-answer correction → consumed by chora-creation
+//                                       (append-only QuestionRevision; the sole creation↔delivery
+//                                        coupling, event-mediated; cross-DB queries stay forbidden)
+// =============================================================================
+
+// SubmissionQuestionContext — one question's full grading context inside a
+// per-submission grading request. MCQ entries carry their deterministic
+// outcome (so the summarizer can reference total score); OE entries carry the
+// learner answer + rubric + model_answer the evaluator grades against.
+message SubmissionQuestionContext {
+  string test_set_question_id = 1;
+  string question_id = 2;
+  string question_type = 3;          // "mcq" | "oe"
+  int32  display_order = 4;
+  int32  points_possible = 5;
+  string prompt = 6;
+  string subject = 7;                // for summarizer theming (e.g., "science")
+  string topic = 8;                  // e.g., "photosynthesis" (free text / topic node label)
+
+  // OE-only — empty for MCQ entries.
+  string oe_response_text = 9;       // learner's free-text answer
+  string rubric_json = 10;           // mandatory weighted rubric (criteria + weights), snapshot
+  string model_answer = 11;          // reference answer (snapshot at grading time)
+
+  // MCQ-only — populated for MCQ entries so assess_summary sees full results.
+  bool   mcq_correct = 12;
+  float  mcq_points_earned = 13;
+}
+
+// OEQuestionGradeResult — per-OE-question scoring output from the
+// evaluator→moderator loop. Carried inside submission_completed.v1's graded[].
+message OEQuestionGradeResult {
+  string test_set_question_id = 1;
+  string question_id = 2;
+
+  // Weighted composite (0..points_possible). Float — rubric partial credit.
+  float  points_earned = 3;
+  int32  points_possible = 4;
+
+  // Per-rubric-criterion sub-scores (JSON: criterion_id/title/score/max/feedback).
+  string criterion_scores_json = 5;
+
+  // Per-question comment — ALWAYS present (right answer or wrong), ADR-172 §D4.
+  // Markdown; surfaced to the learner only after release.
+  string comment = 6;
+
+  // LLM provenance (IMDA D2). Pinned per request.
+  string grading_model_id = 7;
+  string grading_response_id = 8;
+
+  // True when the evaluator→moderator loop exhausted its retries without the
+  // moderator accepting — the R+ queue flags this for priority human review.
+  bool   quality_flagged = 9;
+
+  // Evaluator iterations consumed (1-based; ≤ max_iterations+1).
+  int32  attempt_count = 10;
+}
+
+// -----------------------------------------------------------------------------
+// GradingSubmissionRequested — chora.delivery.grading.submission_requested.v1
+// -----------------------------------------------------------------------------
+//
+// Fired by chora-delivery on /submit when the submission has ≥1 OE answer.
+// Carries the WHOLE submission so the crew can grade each OE answer AND write a
+// holistic overall comment that references MCQ outcomes (ADR-172 §D1, §D5).
+// Subscribed by the oe_grading_crew (Python LangGraph, GKE).
+message GradingSubmissionRequested {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string grading_job_id = 2;
+  string submission_id = 3;
+  string assessment_id = 4;
+  string test_set_id = 5;
+  string learner_gcid = 6;
+
+  int32  passing_threshold_percent = 7;
+  string model_tier = 8;                  // T1 default (LLM-as-judge)
+  bool   per_question_feedback_enabled = 9;
+  string subject = 10;                     // assessment-level subject for the summary
+
+  repeated SubmissionQuestionContext questions = 11;   // MCQ + OE, full context
+
+  int32  total_points_possible = 12;
+  float  mcq_points_earned = 13;           // deterministic MCQ total (for summary)
+  int32  estimated_mana_units = 14;        // informational; debit on completion
+
+  google.protobuf.Timestamp requested_at = 15;
+}
+
+// -----------------------------------------------------------------------------
+// GradingSubmissionCompleted — chora.delivery.grading.submission_completed.v1
+// -----------------------------------------------------------------------------
+//
+// Fired by oe_grading_crew after every OE question is graded (loop) and the
+// assess_summary mode has produced the overall comment. Subscribed by
+// chora-delivery (applies grades; lands GRADED_PENDING_RELEASE + PENDING_REVIEW)
+// + Observability/O+ + chora-governance (IMDA D2 evidence).
+message GradingSubmissionCompleted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string grading_job_id = 2;
+  string submission_id = 3;
+  string assessment_id = 4;
+  string learner_gcid = 5;
+
+  repeated OEQuestionGradeResult graded = 6;
+
+  // Overall whole-assessment narrative comment (ADR-172 §D5) — AI-drafted,
+  // instructor-editable, learner-visible. Spans MCQ + OE.
+  string overall_comment = 7;
+  string overall_comment_model_id = 8;
+  string overall_comment_response_id = 9;
+
+  // SUCCESS | PARTIAL | FAILED (PARTIAL = some OE questions failed individually).
+  string outcome = 10;
+  GradingFailureCategory failure_category = 11;
+  string failure_message = 12;
+
+  int32  mana_debited = 13;
+  int64  total_input_tokens = 14;
+  int64  total_output_tokens = 15;
+
+  google.protobuf.Timestamp completed_at = 16;
+}
+
+// -----------------------------------------------------------------------------
+// GradeOverrideField — which artifact a HITL override touched
+// -----------------------------------------------------------------------------
+enum GradeOverrideField {
+  GRADE_OVERRIDE_FIELD_UNSPECIFIED     = 0;
+  GRADE_OVERRIDE_FIELD_SCORE           = 1;
+  GRADE_OVERRIDE_FIELD_COMMENT         = 2;  // per-question grader comment
+  GRADE_OVERRIDE_FIELD_MODEL_ANSWER    = 3;  // canonical model answer (→ creation)
+  GRADE_OVERRIDE_FIELD_OVERALL_COMMENT = 4;  // submission-level narrative
+}
+
+// -----------------------------------------------------------------------------
+// GradingScoreOverridden — chora.delivery.grading.score_overridden.v1
+// -----------------------------------------------------------------------------
+//
+// Fired by chora-delivery when an instructor edits an AI grading artifact in
+// the R+ grading queue. Append-only audit (ADR-172 §D7 / ADR-170 discipline);
+// flips the artifact's provenance AI→HUMAN. Consumers: chora-governance
+// (IMDA D1 accountability + D4 human-oversight evidence), O+ audit trail.
+message GradingScoreOverridden {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string submission_id = 2;
+  string assessment_id = 3;
+  string answer_id = 4;               // submission_answer row; empty for OVERALL_COMMENT
+  string test_set_question_id = 5;
+  string question_id = 6;
+
+  GradeOverrideField field = 7;
+  string old_value = 8;               // stringified prior value (score → number string)
+  string new_value = 9;
+  string actor_gcid = 10;             // the human instructor/grader
+  string reason = 11;                 // optional override rationale
+  google.protobuf.Timestamp overridden_at = 12;
+}
+
+// -----------------------------------------------------------------------------
+// GradingSubmissionApproved — chora.delivery.grading.submission_approved.v1
+// -----------------------------------------------------------------------------
+//
+// Fired when an instructor approves a single submission's grading (per-candidate
+// one-click "approve as-is", or after edits). review_status → APPROVED.
+message GradingSubmissionApproved {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string submission_id = 2;
+  string assessment_id = 3;
+  string approver_gcid = 4;
+  bool   had_edits = 5;               // true if any score/comment was overridden first
+  google.protobuf.Timestamp approved_at = 6;
+}
+
+// -----------------------------------------------------------------------------
+// GradingAssessmentApproved — chora.delivery.grading.assessment_approved.v1
+// -----------------------------------------------------------------------------
+//
+// Fired on assessment-wide bulk approve (accept all submissions' AI grading).
+message GradingAssessmentApproved {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string assessment_id = 2;
+  string approver_gcid = 3;
+  int32  approved_submission_count = 4;
+  bool   released = 5;                // true when this was approve-and-release
+  google.protobuf.Timestamp approved_at = 6;
+}
+
+// -----------------------------------------------------------------------------
+// GradingModelAnswerAmended — chora.delivery.grading.model_answer_amended.v1
+// -----------------------------------------------------------------------------
+//
+// Fired when an instructor corrects a question's canonical model_answer during
+// grading. Consumed by chora-creation, which APPENDS a new QuestionRevision to
+// the question's oe_payload.model_answer (source=grading_amendment; never a
+// silent overwrite; idempotent on event_id). ADR-172 §D8 — the sole sanctioned
+// creation↔delivery coupling, event-mediated.
+message GradingModelAnswerAmended {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string submission_id = 2;           // provenance: where the amendment originated
+  string assessment_id = 3;
+  string test_set_question_id = 4;
+  string question_id = 5;
+  string atom_id = 6;
+  string new_model_answer = 7;
+  string actor_gcid = 8;              // the human instructor
+  google.protobuf.Timestamp amended_at = 9;
+}
+
+// -----------------------------------------------------------------------------
+// GradingMcqSnapshotMissing — chora.delivery.grading.mcq_snapshot_missing.v1
+// -----------------------------------------------------------------------------
+//
+// Fired by chora-delivery when a submission's MCQ answer cannot be graded
+// because its per-question payload snapshot is missing at grade time (the
+// fail-loud ErrMCQSnapshotMissing path in Submission.GradeMCQAnswersFromSnapshot).
+// A structured accountability signal — NOT a grading lifecycle transition —
+// that lets O+ surface the gap and chora-notifications alert the instructor.
+//
+// Producer: services/chora-delivery/internal/adapter/http/assessment_handler.go
+// emitMCQSnapshotMissingEvent. The envelope carries chora_imda_dimension =
+// "accountability" (D1); the message fields below are the diagnostic payload.
+//
+// Consumers:
+//   - chora-observability / O+ : surface the snapshot gap (IMDA D1)
+//   - chora-notifications      : alert the instructor
+//
+// Contract authored by the 2026-07-01 event-fabric audit (Class D — the
+// producer emitted to an unprovisioned topic; this proto + the Schema Registry
+// binding + the protomarshal encoder land the event on a real binary topic).
+message GradingMcqSnapshotMissing {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 of the parent submission (chora_delivery.submissions).
+  string submission_id = 2;
+
+  // UUIDv7 of the assessment (chora_delivery.assessments).
+  string assessment_id = 3;
+
+  // GCID of the learner whose submission could not be graded.
+  string learner_gcid = 4;
+
+  // Human-readable failure detail (the ErrMCQSnapshotMissing error string,
+  // including the offending test_set_question_id).
+  string error_message = 5;
+
+  // When the missing snapshot was detected at the producer's domain database.
+  google.protobuf.Timestamp detected_at = 6;
+}

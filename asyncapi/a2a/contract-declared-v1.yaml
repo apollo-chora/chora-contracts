@@ -1,0 +1,63 @@
+asyncapi: "3.0.0"
+info:
+  title: "Chora Agent-to-Agent — contract.declared.v1"
+  version: "1.0.0"
+  description: |
+    Published when a Chora-side agent declares an A2A capability. Declaration
+    is NOT yet active — platform_ops must approve (chora.a2a.contract.approved.v1)
+    before the A2A Gateway routes invocations.
+
+    Owning team   : Team 3 (Platform)
+    Owning domain : Agent-to-Agent (chora_a2a database)
+    Reference     : ADR-132 §2-§4
+  contact:
+    name: "Chora Platform Team — Platform Track"
+  license:
+    name: "Proprietary"
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  production:
+    host: "pubsub.googleapis.com"
+    protocol: googlepubsub
+    description: "Google Cloud Pub/Sub (production)"
+  emulator:
+    host: "localhost:8085"
+    protocol: googlepubsub
+    description: "Cloud Pub/Sub Emulator (local dev)"
+
+channels:
+  contractDeclared:
+    address: "chora.a2a.contract.declared.v1"
+    messages:
+      contractDeclared:
+        $ref: "#/components/messages/ContractDeclared"
+
+operations:
+  publishContractDeclared:
+    action: send
+    channel:
+      $ref: "#/channels/contractDeclared"
+    summary: "Publish an A2A contract declaration event"
+    description: |
+      Producer: chora-a2a-gateway.
+      Consumers: O+ governance dashboard,
+                 Audit log (immutable),
+                 platform_ops review queue.
+    messages:
+      - $ref: "#/channels/contractDeclared/messages/contractDeclared"
+
+components:
+  messages:
+    ContractDeclared:
+      name: "ContractDeclared"
+      title: "A2A Contract Declared"
+      summary: "A new A2A capability has been declared (pending approval)"
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf;version=3
+      payload:
+        schemaFormat: "application/vnd.google.protobuf;version=3"
+        schema:
+          protoFile: "proto/events/a2a/contract.proto"
+          messageName: "chora.a2a.v1.ContractDeclared"

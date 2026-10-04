@@ -1,0 +1,289 @@
+asyncapi: "3.0.0"
+info:
+  title: "Chora Content Creation — ai_assist.started.v2"
+  version: "1.0.0"
+  description: |
+    Emitted at the START of an AI Assist orchestration — after the
+    AIAssistService has validated the request + debited mana but BEFORE the
+    downstream LangGraph engine invokes the LLM. The .v2 (ADR-195 WS7 / D7)
+    REPLACES the retired `job_kind` orchestration discriminant
+    ("" | "single" | "batch" | "image_regen") with the unified compose model
+    carried explicitly as three new fields:
+
+      - operation  — always "compose" (the single unified authoring operation).
+      - intent     — "new_question" | "model_answer_fill" | "image_regen"
+                     ("single"/"batch" both fold to new_question; the
+                     single-vs-batch distinction is now carried by the plan —
+                     requested_count / type_plan — not the discriminant).
+      - input_kind — "prompt" | "source_files" | "by_hand".
+
+    The agent layer is UNCHANGED (ADR-195 D2): the orchestrator's
+    QGenRunnerRouter routes on (intent, input_kind, plan) instead of `job_kind`,
+    mapping to the SAME composer TaskContextQuestion fields it already consumed.
+
+    CROSS-SERVICE CONSUMER: chora-ai-kernel-orchestrator. Per ADR-195 D2 ("agent
+    layer unchanged") chora-creation PARALLEL-PUBLISHES v1 (with `job_kind`) AND
+    v2 (with the compose trio) during the cutover window; the orchestrator keeps
+    reading v1.job_kind until it migrates to v2.intent/input_kind, after which v1
+    is drained + retired (ADR-195 D7 §5.6).
+
+    Wire-compat: every retained field keeps its v1 proto tag. Proto tag 15 is
+    RESERVED (was `job_kind`) and is NEVER reused; the new compose trio takes
+    tags 23-25 (after the last v1 tag, regen=22).
+
+    Per ADR-141 (IMDA dimension labels): envelope.chora_imda_dimension SHOULD be
+    set to "accountability" (D1) for started events.
+
+    Why the topic lives in the `creation` domain (not `ai_kernel`): the artefact
+    produced is a creation atom draft / question candidate. The emitter living in
+    AI Kernel does NOT determine the topic domain — the topic domain follows the
+    affected aggregate root.
+
+    Owning team    : Team 1 (Content)
+    Owning domain  : Content Creation (chora_creation database)
+    Surface (admin): A+ Creator mode
+
+    Source-of-truth: docs/architecture/adrs/adr-195 (D1 compose model, D2 agent
+    layer unchanged, D7 .v2 cutover) + proto/events/creation/ai_assist.proto
+    + .claude/rules/ddd-enforcement.md
+  contact:
+    name: "Chora Platform Team — Content Track"
+  license:
+    name: "Proprietary"
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  production:
+    host: "pubsub.googleapis.com"
+    protocol: googlepubsub
+    description: "Google Cloud Pub/Sub (production)"
+  emulator:
+    host: "localhost:8085"
+    protocol: googlepubsub
+    description: "Cloud Pub/Sub Emulator (local dev via PUBSUB_EMULATOR_HOST)"
+
+channels:
+  aiAssistStarted:
+    address: "chora.creation.ai_assist.started.v2"
+    description: |
+      Pub/Sub topic for AiAssistStartedV2 events. Topic resides in the
+      centralised platform host project (`chora-489812`) with a paired
+      dead-letter topic `chora.dlq.creation.ai_assist.started.v2`. Schema
+      Registry validates the BINARY Protobuf payload at publish time (flat
+      schema: proto/events-flat/creation/ai_assist/started.v2.proto).
+      Parallel-published alongside the v1 topic during the ADR-195 D7 cutover —
+      the cross-service chora-ai-kernel-orchestrator subscribes here once it
+      migrates off v1.job_kind.
+    messages:
+      aiAssistStarted:
+        $ref: "#/components/messages/AiAssistStartedV2"
+
+operations:
+  publishAiAssistStarted:
+    action: send
+    channel:
+      $ref: "#/channels/aiAssistStarted"
+    summary: "Publish an AI Assist orchestration start event (compose model, v2)"
+    description: |
+      Producer: chora-creation AIAssistService (transactional outbox, BINARY
+      encode at the publish bridge) — emitted after mana debit, before the LLM
+      call.
+      Consumers:
+        - chora-ai-kernel-orchestrator (CROSS-SERVICE) -> QGenRunnerRouter
+          dispatches the compose run, routing on (intent, input_kind, type_plan)
+          instead of job_kind; reads v2.intent/input_kind once migrated off
+          v1.job_kind.
+        - chora-creation     -> write the ai_assist_invocations row in REQUESTED
+                                state.
+        - chora-observability -> D1 IMDA accountability evidence
+                                (envelope.chora_imda_dimension SHOULD =
+                                "accountability").
+    messages:
+      - $ref: "#/channels/aiAssistStarted/messages/aiAssistStarted"
+
+components:
+  messages:
+    AiAssistStartedV2:
+      name: "AiAssistStartedV2"
+      title: "AI Assist Started (v2 — compose model)"
+      summary: "An AI Assist orchestration was started (replaces the retired job_kind discriminant)"
+      description: |
+        Payload fields (proto/events/creation/ai_assist.proto ->
+        chora.creation.v1.AiAssistStartedV2). The leading `f{N}` is the proto
+        field tag. Tag 15 is RESERVED (was `job_kind`) and never reused.
+
+          f1  envelope (chora.common.v1.EventEnvelope)
+              Mandatory event envelope — tenant_id, gcid, occurred_at,
+              published_at, traceparent, tracestate, schema_version, IMDA
+              dimension tagging (SHOULD = "accountability").
+
+          f2  assist_id (string)
+              UUIDv7 — the AI Assist invocation aggregate root id (== the compose
+              job_id).
+
+          f3  tenant_id (string)
+              Tenant context (also in envelope.tenant_id; duplicated for
+              filter-friendly tenant-sharded subscribers).
+
+          f4  author_gcid (string)
+              The author who initiated the AI Assist call. Same as envelope.gcid.
+
+          f5  atom_id (string)
+              Optional UUIDv7 of the parent LearningAtom. Empty for atom-creation
+              flows (the atom is created downstream from the AI Assist output).
+
+          f6  content_type (string)
+              Content type discriminator ("mcq" | "oe"; "mixed" for a multi-type
+              plan). Drives the downstream prompt template + candidate schema.
+
+          f7  prompt (string)
+              The author's prompt (truncated to <= 2 KiB for envelope-size
+              hygiene; canonical full prompt lives in
+              ai_assist_invocations.prompt).
+
+          f8  requested_count (int32)
+              How many candidates the author requested. 1 for single-candidate
+              paths; the count ALWAYS drives the plan now (ADR-195 D1 — no
+              SetMode).
+
+          f9  difficulty (int32)
+              Difficulty hint (1..5 cefr-like). 0 = unspecified (orchestrator
+              picks default).
+
+          f10 started_at (google.protobuf.Timestamp)
+              When the AI Assist orchestration started.
+
+          f11 max_retries (int32)
+              Quality-loop budget for the qgen crew (generator + critic). 0 = no
+              retries (1 total attempt); default 3 (4 total attempts).
+
+          f12 metadata (map<string, string>)
+              Free-form metadata biasing the generator + critic prompts. Stable
+              keys: "category" | "subject" | "cognitive_level" (Bloom enum,
+              lowercase). Additional keys flow through without a proto-rev.
+
+          f13 image_for_stem (bool)
+              Author opt-in for a generated image on the QUESTION stem. Default
+              false.
+
+          f14 image_for_answer (bool)
+              Author opt-in for a generated image on the MODEL-ANSWER part.
+              Default false.
+
+          f15 RESERVED (was `job_kind`)
+              The retired orchestration discriminant ("" | "single" | "batch" |
+              "image_regen"). Reserved so it is never reused; its information is
+              now carried by `intent` + `input_kind` + the presence of
+              `type_plan` (ADR-195 D1/D7).
+
+          f16 grounding_mode (string)
+              How the uploaded source material constrains generation: "" |
+              "starting_point" (seed / springboard, default) | "strict"
+              (generate ONLY from facts in the material). Ignored when
+              source_blob_uri is empty.
+
+          f17 source_blob_uri (string)
+              gs:// URI of the (first) uploaded grounding material. The canonical
+              multi-file list rides in source_files; this mirrors source_files[0]
+              for back-compat. Empty = no grounding.
+
+          f18 source_mime_type (string)
+              MIME type of source_blob_uri (e.g. "application/pdf", "image/png").
+              Empty when source_blob_uri is empty.
+
+          f19 target_growth_edges (repeated string)
+              Optional learner Growth-Edge concept_key values to bias the
+              generator toward (resolved by the FE/BFF from chora-consumption and
+              passed through; chora-creation never queries chora_consumption).
+
+          f20 source_files (repeated SourceFileRef)
+              ALL grounding files for this job, role-tagged. When non-empty this
+              is the canonical list (f17/f18 mirror source_files[0] with
+              role="source"). v1 caps: <= 5 role="source" files + <= 1
+              role="rubric" file, 32 MiB total request. See SourceFileRef below.
+
+          f21 type_plan (repeated GenerationTypeQuota)
+              Mixed-type generation plan. EMPTY ⇒ single-type path (content_type
+              + requested_count + image_for_stem/image_for_answer). NON-EMPTY ⇒
+              mixed batch: requested_count MUST equal sum(count) and content_type
+              SHOULD be "mixed". See GenerationTypeQuota below.
+
+          f22 regen (ImageRegenSpec)
+              intent="image_regen" only: re-render ONE image for an existing
+              draft candidate through the chora-model-gateway chokepoint (Model
+              Armor + mana metering preserved). Ignored on generation jobs. See
+              ImageRegenSpec below.
+
+        -- ADR-195 WS7 compose model (replaces the retired job_kind discriminant) --
+
+          f23 operation (string)
+              Operation discriminant. Always "compose" (ADR-195 D1).
+
+          f24 intent (string)
+              The compose Intent: "new_question" | "model_answer_fill" |
+              "image_regen". Replaces job_kind ("single"/"batch" -> new_question;
+              "image_regen" -> image_regen). The single-vs-batch distinction is
+              now carried by the plan (requested_count / type_plan), not the
+              discriminant.
+
+          f25 input_kind (string)
+              The compose Input kind: "prompt" | "source_files" | "by_hand".
+
+          f26 existing_question_json (string)
+              intent="model_answer_fill" ONLY: the author's CURRENT question
+              content the qgen crew fills a model answer against (preserving the
+              author's stem + rubric/options). A JSON object:
+                {"stem": str,
+                 "mcq_options": [{"option_id","label","is_correct"}],  // MCQ fill
+                 "oe_rubric":   [{"criterion","weight"}],              // OE fill
+                 "model_answer": str}                                  // OE optional
+              Empty for every other intent. JSON-encoded (NOT a nested message)
+              for the same reason AiAssistCompleted.candidate_payload_json is: the
+              author-question + rubric shape iterates with the OpenAPI Question
+              schema, so a string holds the proto stable. The orchestrator
+              json-decodes it into input_obj["existing_question"];
+              reasoning_engine_executor reads stem / mcq_options / oe_rubric /
+              model_answer into the qgen agent's author_* session keys. Producer:
+              chora-creation question_subscriber.runModelAnswer.
+
+        Nested value objects (proto/events/creation/ai_assist.proto):
+
+          SourceFileRef (f20 element):
+            f1 blob_uri (string)   — gs:// URI of the uploaded file.
+            f2 mime_type (string)  — MIME type; drives the inlineData mimeType.
+            f3 role (string)       — "source" (question material, <= 5 per job) |
+                                     "rubric" (mark-scheme / grading rubric,
+                                     <= 1 per job).
+
+          GenerationTypeQuota (f21 element):
+            f1 question_type (string)   — "mcq" | "oe".
+            f2 count (int32)            — how many questions of this type (>= 1).
+            f3 max_images (int32)       — <= count; the model-decided "AI decides"
+                                          image budget for this type (0 disables).
+            f4 image_for_stem (bool)    — when true, EVERY question of this type
+                                          carries a stem image (deterministic,
+                                          author-selected).
+            f5 image_for_answer (bool)  — when true, EVERY question of this type
+                                          carries a model-answer image.
+
+          ImageRegenSpec (f22):
+            f1 draft_id (string)            — draft candidate id within the job.
+            f2 placement (string)           — "stem" | "answer".
+            f3 prompt (string)              — optional author-edited image prompt;
+                                              empty ⇒ reuse the stored image_spec.
+            f4 mode (string)                — "scene" | "mermaid"; empty ⇒ reuse
+                                              the stored spec mode.
+            f5 current_stem (string)        — the author's CURRENT edited stem
+                                              (unsaved-edit context).
+            f6 current_model_answer (string)— the current edited model answer
+                                              (drives "answer"-placement regen).
+            f7 original_source (string)     — the original grounding source text
+                                              biasing the regenerate prompt.
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf;version=3
+      payload:
+        schemaFormat: "application/vnd.google.protobuf;version=3"
+        schema:
+          protoFile: "proto/events/creation/ai_assist.proto"
+          messageName: "chora.creation.v1.AiAssistStartedV2"

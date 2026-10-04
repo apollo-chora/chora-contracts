@@ -1,0 +1,556 @@
+// =============================================================================
+// Chora Content Sharing Service (gRPC)
+// =============================================================================
+//
+// Source-of-truth: docs/chora-sharing.md §5 (greenfield build spec).
+//
+// Inter-service gRPC contract for the Content Sharing core domain
+// (chora_sharing database, Team 1 / Content). Surface: C+ Connect+
+// (tagline: "curiosity meets connection").
+//
+// Aggregates exposed:
+//   - Follow              — directional social graph edge (follower -> followee)
+//   - Post                — atomic-feedback post in the social feed
+//   - Reaction            — like / clap / star reaction on a Post
+//   - Leaderboard         — ranked aggregate per scope + season
+//   - AtomUsageGrant      — licensing record (the new aggregate root)
+//   - RoyaltySettlement   — double-entry royalty accrual
+//
+// Atom-centric: an author shares a LearningAtom (owned by chora-creation)
+// to the social feed under a per-atom license; other learners grant the
+// right to reuse it in duels / test-sets / LiveQuizzes / collections;
+// royalty settles at the point of reuse; a leaderboard ranks the resulting
+// activity.
+//
+// R1 (author stays the original): only the atom's owner may share it.
+// R2 (author decides licensing per atom): LicenseTerms governs reuse
+// everywhere; frozen at grant time onto each AtomUsageGrant.
+//
+// Cross-DB queries FORBIDDEN — atom_ids are cross-domain UUIDs from
+// chora_creation; learner profile data is consumed via Pub/Sub-fed
+// projections.
+//
+// Deployed in chora-content (Team 1 pool). mTLS via Cloud Service Mesh;
+// SPIFFE identity in mesh; W3C trace context in gRPC metadata.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.services.sharing.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/sharing/v1;sharingv1";
+
+import "google/protobuf/timestamp.proto";
+
+// -----------------------------------------------------------------------------
+// Service — 14 RPCs (§5.1 base 15 − 4 duel RPCs + ListSavedAtomIDs +
+// LiveQuiz bridges + GetReuseContext per ADR-229). No *V2 suffixes.
+// -----------------------------------------------------------------------------
+
+service Sharing {
+  // --- Pre-existing social surface (unchanged signatures) ---
+  rpc Follow(FollowRequest) returns (FollowResponse);
+  rpc Unfollow(UnfollowRequest) returns (UnfollowResponse);
+  rpc CreatePost(CreatePostRequest) returns (CreatePostResponse);
+  rpc ReactToPost(ReactToPostRequest) returns (ReactToPostResponse);
+  rpc GetLeaderboard(GetLeaderboardRequest) returns (GetLeaderboardResponse);
+
+  // --- Atom Sharing surface ---
+  rpc ShareAtom(ShareAtomRequest) returns (ShareAtomResponse);
+  rpc ListSharedAtoms(ListSharedAtomsRequest) returns (ListSharedAtomsResponse);
+  rpc AuthorizeAtomUse(AuthorizeAtomUseRequest) returns (AuthorizeAtomUseResponse);
+  rpc RevokeAtomUse(RevokeAtomUseRequest) returns (RevokeAtomUseResponse);
+  rpc ListEntitledAtoms(ListEntitledAtomsRequest) returns (ListEntitledAtomsResponse);
+
+  // --- Saved-atoms surface (C+ bookmark → picker hydration) ---
+  // Returns the caller's bookmarked atom IDs. chora-creation calls this to
+  // hydrate the `saved` disjunct of GET /atoms/questions/search per
+  // docs/design/ux_unified_atom_picker.md. Distinct from ListEntitledAtoms
+  // (grant/royalty surface) — bookmarks are the user's personal save list.
+  rpc ListSavedAtomIDs(ListSavedAtomIDsRequest) returns (ListSavedAtomIDsResponse);
+
+  // --- Reuse-context surface (ADR-229 WS-0) ---
+  // Returns the caller's reuse context for the atom picker's entitlement
+  // disjuncts: the friend set (v1 = mutual follows minus blocks in either
+  // direction, ADR-229 D3) + atom ids covered by an ACTIVE AtomUsageGrant.
+  // chora-creation calls this once per picker search (the same per-request
+  // pattern as ListSavedAtomIDs) to evaluate the friends-visible and granted
+  // disjuncts locally in SQL — never a cross-DB read.
+  rpc GetReuseContext(GetReuseContextRequest) returns (GetReuseContextResponse);
+
+  // --- LiveQuiz bridges (LiveQuiz lives in chora-delivery, reused) ---
+  rpc AuthorizeLiveQuizAtoms(AuthorizeLiveQuizAtomsRequest) returns (AuthorizeLiveQuizAtomsResponse);
+  rpc GenerateQuizFromTopic(GenerateQuizFromTopicRequest) returns (GenerateQuizFromTopicResponse);
+}
+
+// -----------------------------------------------------------------------------
+// Enums (§5.2 — proto UPPER_CASE; DB lowercase snake_case — adapter maps)
+// -----------------------------------------------------------------------------
+
+// PostKind — atomic-feedback post type.
+enum PostKind {
+  POST_KIND_UNSPECIFIED = 0;
+  POST_KIND_FEEDBACK = 1;
+  POST_KIND_QUESTION = 2;
+  POST_KIND_REFLECTION = 3;
+  POST_KIND_ANNOUNCEMENT = 4;
+}
+
+// PostVisibility — who can see a post.
+enum PostVisibility {
+  POST_VISIBILITY_UNSPECIFIED = 0;
+  POST_VISIBILITY_PUBLIC = 1;
+  POST_VISIBILITY_FOLLOWERS = 2;
+  POST_VISIBILITY_CLASS = 3;
+  POST_VISIBILITY_PRIVATE = 4;
+}
+
+// ReactionKind — emotion on a post (intentionally small + curated).
+enum ReactionKind {
+  REACTION_KIND_UNSPECIFIED = 0;
+  REACTION_KIND_LIKE = 1;
+  REACTION_KIND_CLAP = 2;
+  REACTION_KIND_STAR = 3;
+  REACTION_KIND_INSIGHTFUL = 4;
+}
+
+// LeaderboardScope — what aggregates a leaderboard ranks.
+enum LeaderboardScope {
+  LEADERBOARD_SCOPE_UNSPECIFIED = 0;
+  LEADERBOARD_SCOPE_TENANT = 1;
+  LEADERBOARD_SCOPE_COURSE = 2;
+  LEADERBOARD_SCOPE_CLASS = 3;
+  LEADERBOARD_SCOPE_GLOBAL = 4;
+}
+
+// LeaderboardMetric — what's measured on the leaderboard.
+enum LeaderboardMetric {
+  LEADERBOARD_METRIC_UNSPECIFIED = 0;
+  LEADERBOARD_METRIC_XP = 1;
+  LEADERBOARD_METRIC_DUEL_WINS = 2;
+  LEADERBOARD_METRIC_REPUTATION = 3;
+  LEADERBOARD_METRIC_STREAK_DAYS = 4;
+  LEADERBOARD_METRIC_DUEL_ELO = 5;
+}
+
+// LicenseTerms — per-atom licensing governing reuse everywhere (R2).
+enum LicenseTerms {
+  LICENSE_TERMS_UNSPECIFIED = 0;
+  LICENSE_TERMS_FREE = 1;          // free + attribution (~ CC BY)
+  LICENSE_TERMS_ROYALTY_PCT = 2;   // paid reuse, revenue-share %
+  LICENSE_TERMS_ROYALTY_FIXED = 3; // paid reuse, fixed per-use fee
+  LICENSE_TERMS_CC_BY_SA = 4;      // free + attribution + share-alike
+  LICENSE_TERMS_CC_ND = 5;         // free + attribution + no-derivatives
+}
+
+// GrantScope — the real reuse target an AtomUsageGrant covers (R-18).
+enum GrantScope {
+  GRANT_SCOPE_UNSPECIFIED = 0;
+  GRANT_SCOPE_TEST_SET = 1;    // delivery test_sets
+  GRANT_SCOPE_DUEL = 2;        // sharing duels
+  GRANT_SCOPE_LIVE_QUIZ = 3;   // delivery LiveQuiz
+  GRANT_SCOPE_COLLECTION = 4;   // creation collections
+  GRANT_SCOPE_UNLIMITED = 5;   // covers all of the above
+}
+
+// GrantStatus — AtomUsageGrant lifecycle.
+enum GrantStatus {
+  GRANT_STATUS_UNSPECIFIED = 0;
+  GRANT_STATUS_ACTIVE = 1;
+  GRANT_STATUS_REVOKED = 2;
+  GRANT_STATUS_EXPIRED = 3;
+}
+
+// CollectionVisibility — visibility of a creation Collection. (The Collection
+// aggregate is OWNED by chora-creation per R-11/R-17; this enum is mirrored
+// here only where a sharing RPC needs to express it on the way to creation.)
+enum CollectionVisibility {
+  COLLECTION_VISIBILITY_UNSPECIFIED = 0;
+  COLLECTION_VISIBILITY_PRIVATE = 1;
+  COLLECTION_VISIBILITY_SHARED = 2;
+  COLLECTION_VISIBILITY_PUBLIC = 3;
+}
+
+// -----------------------------------------------------------------------------
+// Common message types
+// -----------------------------------------------------------------------------
+
+// Follow — directional social-graph edge.
+message Follow {
+  string follower_gcid = 1;
+  string followee_gcid = 2;
+  string tenant_id = 3;
+  google.protobuf.Timestamp followed_at = 4;
+}
+
+// Post — atomic-feedback post in the social feed.
+message Post {
+  string post_id = 1;
+  string author_gcid = 2;
+  string tenant_id = 3;
+  PostKind kind = 4;
+  PostVisibility visibility = 5;
+  string atom_id = 6;
+  string class_context_id = 7;
+  string body = 8;
+  int32 reaction_count = 9;
+  bool is_removed = 10;
+  google.protobuf.Timestamp created_at = 11;
+  google.protobuf.Timestamp updated_at = 12;
+}
+
+// Reaction — single reactor's reaction on a post (one per reactor per post).
+message Reaction {
+  string reaction_id = 1;
+  string post_id = 2;
+  string reactor_gcid = 3;
+  string tenant_id = 4;
+  ReactionKind kind = 5;
+  google.protobuf.Timestamp reacted_at = 6;
+}
+
+// LeaderboardEntry — single ranked row on a leaderboard.
+message LeaderboardEntry {
+  string gcid = 1;
+  string display_name = 2;
+  int64 score = 3;
+  int32 rank = 4;
+  string companion_nickname = 5;
+}
+
+// RoyaltyRate — the per-atom royalty terms (required iff license_terms in
+// {ROYALTY_PCT, ROYALTY_FIXED}). Frozen at grant time onto each grant.
+message RoyaltyRate {
+  // "pct" (revenue-share percentage, 0..100) | "fixed_per_use" (flat fee).
+  string kind = 1;
+  double value = 2;
+}
+
+// -----------------------------------------------------------------------------
+// Follow RPC
+// -----------------------------------------------------------------------------
+
+message FollowRequest {
+  string follower_gcid = 1;
+  string followee_gcid = 2;
+  string tenant_id = 3;
+}
+
+message FollowResponse {
+  Follow follow = 1;
+}
+
+// -----------------------------------------------------------------------------
+// Unfollow RPC
+// -----------------------------------------------------------------------------
+
+message UnfollowRequest {
+  string follower_gcid = 1;
+  string followee_gcid = 2;
+  string tenant_id = 3;
+}
+
+message UnfollowResponse {
+  bool was_following = 1;
+}
+
+// -----------------------------------------------------------------------------
+// CreatePost RPC
+// -----------------------------------------------------------------------------
+
+message CreatePostRequest {
+  string author_gcid = 1;
+  string tenant_id = 2;
+  PostKind kind = 3;
+  PostVisibility visibility = 4;
+  string atom_id = 5;
+  string class_context_id = 6;
+  string body = 7;
+  string idempotency_key = 8;
+}
+
+message CreatePostResponse {
+  Post post = 1;
+}
+
+// -----------------------------------------------------------------------------
+// ReactToPost RPC
+// -----------------------------------------------------------------------------
+
+message ReactToPostRequest {
+  string post_id = 1;
+  string reactor_gcid = 2;
+  string tenant_id = 3;
+  ReactionKind kind = 4;
+}
+
+message ReactToPostResponse {
+  Reaction reaction = 1;
+  Post post = 2;
+}
+
+// -----------------------------------------------------------------------------
+// GetLeaderboard RPC
+// -----------------------------------------------------------------------------
+
+message GetLeaderboardRequest {
+  LeaderboardScope scope = 1;
+  string scope_target_id = 2;
+  string tenant_id = 3;
+  LeaderboardMetric metric = 4;
+  google.protobuf.Timestamp season_start = 5;
+  google.protobuf.Timestamp season_end = 6;
+  string cursor = 7;
+  int32 limit = 8;
+}
+
+message GetLeaderboardResponse {
+  repeated LeaderboardEntry entries = 1;
+  string next_cursor = 2;
+  google.protobuf.Timestamp computed_at = 3;
+}
+
+// -----------------------------------------------------------------------------
+// Shared-Atom Feed (§5.3)
+// -----------------------------------------------------------------------------
+
+message ShareAtomRequest {
+  // REQUIRED; MUST equal the atom's owner_gcid (R1 — server-enforced, fails loud).
+  string author_gcid = 1;
+  // REQUIRED.
+  string tenant_id = 2;
+  // REQUIRED; must exist in the cached AtomProjection.
+  string atom_id = 3;
+  // OPTIONAL; defaults to the latest published revision (pinned at share time).
+  string atom_revision_id = 4;
+  // 0..512 chars; moderated via Model Armor (FR-037).
+  string caption = 5;
+  // REQUIRED (R2).
+  LicenseTerms license_terms = 6;
+  // REQUIRED iff license_terms in {ROYALTY_PCT, ROYALTY_FIXED}.
+  RoyaltyRate royalty_rate = 7;
+  // REQUIRED; UUIDv7.
+  string idempotency_key = 8;
+}
+
+message ShareAtomResponse {
+  // = social_feed_entries.id (the immutable share Post, entry_type='share').
+  string share_entry_id = 1;
+  // Denormalised snapshot (R1 — "by {author}").
+  string author_display_name = 2;
+  google.protobuf.Timestamp created_at = 3;
+}
+
+message ListSharedAtomsRequest {
+  string tenant_id = 1;
+  string viewer_gcid = 2;
+  string cursor = 3;
+  int32 limit = 4;
+  string topic_filter = 5;
+  string question_type_filter = 6;
+}
+
+message ListSharedAtomsResponse {
+  repeated SharedAtomCard cards = 1;
+  string next_cursor = 2;
+}
+
+message SharedAtomCard {
+  string share_entry_id = 1;
+  string author_gcid = 2;
+  string author_display_name = 3;
+  string atom_id = 4;
+  string atom_revision_id = 5;
+  string atom_stem_preview = 6;
+  string question_type = 7;
+  string caption = 8;
+  LicenseTerms license_terms = 9;
+  RoyaltyRate royalty_rate = 10;
+  int32 reaction_count = 11;
+  google.protobuf.Timestamp created_at = 12;
+  repeated string atom_options = 13;
+}
+
+// -----------------------------------------------------------------------------
+// Grants + permission (§5.3)
+// -----------------------------------------------------------------------------
+
+message AuthorizeAtomUseRequest {
+  string grantee_gcid = 1;
+  string tenant_id = 2;
+  string atom_id = 3;
+  GrantScope scope = 4;
+  string source_share_entry = 5;
+  string idempotency_key = 6;
+}
+
+message AuthorizeAtomUseResponse {
+  string grant_id = 1;
+  string owner_gcid = 2;
+  LicenseTerms license_terms_snapshot = 3;
+  RoyaltyRate royalty_rate_snapshot = 4;
+  string atom_revision_id = 5;
+  GrantStatus status = 6;
+}
+
+message RevokeAtomUseRequest {
+  string grant_id = 1;
+  string revoker_gcid = 2;
+  string tenant_id = 3;
+  string reason = 4;
+}
+
+message RevokeAtomUseResponse {
+  GrantStatus status = 1;
+  google.protobuf.Timestamp revoked_at = 2;
+}
+
+message ListEntitledAtomsRequest {
+  string gcid = 1;
+  string tenant_id = 2;
+  GrantScope scope = 3;
+  repeated string topic_tags = 4;
+  int32 limit = 5;
+}
+
+message ListEntitledAtomsResponse {
+  repeated EntitledAtom atoms = 1;
+}
+
+message EntitledAtom {
+  string atom_id = 1;
+  string atom_revision_id = 2;
+  string author_gcid = 3;
+  string author_display_name = 4;
+  string stem_preview = 5;
+  LicenseTerms license_terms = 6;
+  bool is_own = 7;
+  bool has_grant = 8;
+}
+
+// ListSavedAtomIDs — returns the caller's bookmarked atom IDs (C+ save flow).
+// chora-creation hydrates these from learning_atoms for the picker's `saved`
+// disjunct. No grant/royalty semantics — bookmarks are the user's personal
+// save list. See docs/design/ux_unified_atom_picker.md.
+message ListSavedAtomIDsRequest {
+  string gcid = 1;
+  string tenant_id = 2;
+  int32 limit = 3;  // 0 = server default (500)
+}
+
+message ListSavedAtomIDsResponse {
+  repeated string atom_ids = 1;
+  bool truncated = 2;  // true when the caller's bookmark count exceeded the cap
+}
+
+// -----------------------------------------------------------------------------
+// Collection (§5.3 last bullet). The Collection aggregate is OWNED by
+// chora-creation (R-11/R-17); these messages exist on the proto for the BFF,
+// but the Sharing service block has NO collection RPCs. Sharing publishes NO
+// collection events.
+// -----------------------------------------------------------------------------
+
+message CreateCollectionRequest {
+  string owner_gcid = 1;
+  string tenant_id = 2;
+  string title = 3;
+  string description = 4;
+  CollectionVisibility visibility = 5;
+  string idempotency_key = 6;
+}
+
+message CreateCollectionResponse {
+  string collection_id = 1;
+}
+
+message AddToCollectionRequest {
+  string collection_id = 1;
+  string atom_id = 2;
+  string source_share_entry = 3;
+  string note = 4;
+  string actor_gcid = 5;
+}
+
+message AddToCollectionResponse {
+  bool was_added = 1;
+}
+
+message ConvertCollectionToStudyListRequest {
+  string collection_id = 1;
+  string actor_gcid = 2;
+}
+
+message ConvertCollectionToStudyListResponse {
+  string study_list_event_id = 1;
+}
+
+// -----------------------------------------------------------------------------
+// LiveQuiz bridges (§5.3; LiveQuiz lives in chora-delivery, reused)
+// -----------------------------------------------------------------------------
+
+message AuthorizeLiveQuizAtomsRequest {
+  string instructor_gcid = 1;
+  string tenant_id = 2;
+  repeated string atom_ids = 3;
+  string live_quiz_id = 4;
+  string idempotency_key = 5;
+}
+
+message AuthorizeLiveQuizAtomsResponse {
+  repeated AuthorizedLiveQuizAtom atoms = 1;
+  // False -> ARM MUST be BLOCKED (fail-loud).
+  bool all_authorized = 2;
+}
+
+message AuthorizedLiveQuizAtom {
+  string atom_id = 1;
+  string grant_id = 2;
+  LicenseTerms license_terms_snapshot = 3;
+  bool usable = 4;
+  string reason = 5;
+}
+
+message GenerateQuizFromTopicRequest {
+  string instructor_gcid = 1;
+  string tenant_id = 2;
+  string topic = 3;
+  repeated string topic_tags = 4;
+  int32 question_count = 5;
+  string idempotency_key = 6;
+}
+
+message GenerateQuizFromTopicResponse {
+  string draft_template_id = 1;
+  string qgen_run_id = 2;
+  repeated GeneratedQuestion questions = 3;
+  // Always "true" — HITL before ARM (FR-032).
+  string review_required = 4;
+}
+
+message GeneratedQuestion {
+  string atom_id = 1;
+  string atom_revision_id = 2;
+  string stem = 3;
+  repeated string options = 4;
+  string correct_option_id = 5;
+  int32 timer_seconds = 6;
+  int32 points = 7;
+}
+
+// -----------------------------------------------------------------------------
+// Reuse-context messages (ADR-229 WS-0)
+// -----------------------------------------------------------------------------
+
+message GetReuseContextRequest {
+  string gcid = 1;
+  string tenant_id = 2;
+}
+
+message GetReuseContextResponse {
+  // GCIDs that mutually follow the caller within the tenant. A block in
+  // either direction removes the pair (ADR-229 D3).
+  repeated string friend_gcids = 1;
+  // Atom ids with an ACTIVE, unexpired AtomUsageGrant for the caller
+  // (any scope) — the audit-record grants written at snapshot/arm time.
+  repeated string granted_atom_ids = 2;
+}

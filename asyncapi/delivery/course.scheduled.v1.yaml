@@ -1,0 +1,93 @@
+asyncapi: "3.0.0"
+info:
+  title: "chora.delivery.course.scheduled.v1"
+  version: "1.0.0"
+  description: |
+    Published when a Course transitions DRAFT -> SCHEDULED. Schedule is
+    locked, resources may be booked, and Bookings can open to learners.
+    Companion to `proto/events/delivery/course.proto` message `CourseScheduled`.
+
+    Owning domain : Content Delivery (chora_delivery DB)
+    Owning team   : Team 2 (Delivery)
+
+    Per ADR-129/130/131 collapse mandate, this topic supersedes legacy
+    `chora.training.session.scheduled` channels.
+  contact: { name: "Chora Platform Team" }
+  license: { name: "Proprietary" }
+
+defaultContentType: application/x-protobuf
+
+servers:
+  local: { host: "localhost:8085", protocol: googlepubsub, description: "Pub/Sub Emulator" }
+  production: { host: "pubsub.googleapis.com", protocol: googlepubsub, description: "Google Cloud Pub/Sub" }
+
+channels:
+  courseScheduled:
+    address: chora.delivery.course.scheduled.v1
+    description: |
+      Carries CourseScheduled Protobuf payload. Schema validated by
+      Pub/Sub Schema Registry against `chora.delivery.v1.CourseScheduled`.
+
+      Downstream consumers:
+        - chora-notifications : calendar invites
+        - chora-consumption   : eligibility window
+    messages:
+      courseScheduled:
+        $ref: "#/components/messages/CourseScheduled"
+
+operations:
+  publishCourseScheduled:
+    action: send
+    channel: { $ref: "#/channels/courseScheduled" }
+    summary: "Publish CourseScheduled"
+    messages: [ { $ref: "#/channels/courseScheduled/messages/courseScheduled" } ]
+  consumeCourseScheduled:
+    action: receive
+    channel: { $ref: "#/channels/courseScheduled" }
+    summary: "Consume CourseScheduled"
+    messages: [ { $ref: "#/channels/courseScheduled/messages/courseScheduled" } ]
+
+components:
+  messages:
+    CourseScheduled:
+      name: CourseScheduled
+      title: "Course Scheduled"
+      summary: "A Course transitioned DRAFT -> SCHEDULED."
+      contentType: application/x-protobuf
+      payload:
+        type: object
+        description: "Mirrors chora.delivery.v1.CourseScheduled."
+        properties:
+          envelope: { $ref: "#/components/schemas/EventEnvelope" }
+          course_id: { type: string, format: uuid }
+          title: { type: string, minLength: 1, maxLength: 256 }
+          instructor_gcid: { type: string }
+          atom_path_id: { type: string }
+          modality: { $ref: "#/components/schemas/Modality" }
+          starts_at: { type: string, format: date-time }
+          ends_at: { type: string, format: date-time }
+          capacity: { type: integer }
+          scheduled_by_gcid: { type: string }
+          scheduled_at: { type: string, format: date-time }
+  schemas:
+    EventEnvelope:
+      type: object
+      description: "Mirrors chora.common.v1.EventEnvelope."
+      required: [event_id, idempotency_key, tenant_id, occurred_at, published_at, traceparent, source_project, source_service, schema_version]
+      properties:
+        event_id: { type: string, format: uuid }
+        idempotency_key: { type: string }
+        tenant_id: { type: string }
+        gcid: { type: string }
+        occurred_at: { type: string, format: date-time }
+        published_at: { type: string, format: date-time }
+        traceparent: { type: string }
+        tracestate: { type: string }
+        source_project: { type: string }
+        source_service: { type: string }
+        schema_version: { type: integer }
+        correlation_id: { type: string }
+        causation_id: { type: string }
+    Modality:
+      type: string
+      enum: [MODALITY_UNSPECIFIED, MODALITY_IN_PERSON, MODALITY_ONLINE_SYNC, MODALITY_ONLINE_ASYNC, MODALITY_BLENDED]

@@ -1,0 +1,64 @@
+// =============================================================================
+// chora.governance.v1 — AI Transparency Notice acknowledgement events (ADR-225)
+// =============================================================================
+//
+// Owning domain : Governance (chora_governance database)
+// Owning team   : Team 3 (Platform)
+// Topic prefix  : chora.governance.ai_transparency_notice.*
+// IMDA          : D2 transparency (ISO/IEC 25059:2023 "User Controllability —
+//                 consent UI presence"). The envelope carries
+//                 chora_imda_dimension="transparency" + imda_lifecycle_stage
+//                 ="runtime".
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.governance.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/governance/v1;governancev1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// AiTransparencyNoticeAcknowledged
+// Topic: chora.governance.ai_transparency_notice.acknowledged.v1
+//
+// Emitted when a learner acknowledges the AI Transparency Notice (a NOTICE, not
+// a consent gate — ADR-225). One append-only transparency-evidence record.
+// -----------------------------------------------------------------------------
+message AiTransparencyNoticeAcknowledged {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUID — the acknowledgement evidence-row identifier.
+  string acknowledgement_id = 2;
+
+  // GCID of the learner who acknowledged (also on the envelope; explicit here
+  // for consumer convenience).
+  string gcid = 3;
+
+  // The disclosure version that was acknowledged (e.g. "2026-07-01").
+  string disclosure_version = 4;
+
+  // CHORA surface where the notice was shown (e.g. "companion", "aplus").
+  string surface = 5;
+
+  // AI capability the acknowledgement covers (e.g. "companion_chat", "qgen",
+  // "dose").
+  string scope = 6;
+
+  // When the notice was first shown to the learner.
+  google.protobuf.Timestamp first_shown_at = 7;
+
+  // When the learner acknowledged ("Got it").
+  google.protobuf.Timestamp acknowledged_at = 8;
+
+  // The locale of the copy that was shown (e.g. "en").
+  string locale = 9;
+
+  // True when the age-appropriate (minor) variant was served — set from the
+  // resolved age band (ADR-225 §D6.2 hybrid age signal).
+  bool minor_mode = 10;
+}

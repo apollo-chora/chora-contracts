@@ -1,0 +1,151 @@
+// =============================================================================
+// chora.observability.v1 — Agent decision log events
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 3 + 5
+// + .claude/skills/ai-explainability/SKILL.md
+// + .claude/skills/ai-observability-cloud-trace/SKILL.md
+//
+// Owning domain : Observability (chora_observability database)
+// Owning team   : Team 3 (Platform)
+// Topic prefix  : chora.observability.agent_decision.*
+//
+// AgentDecisionLog feeds the IMDA Explainability dimension (D2) and the
+// Three-Audience Explainability surfaces (Learner / Instructor-Admin /
+// Auditor). Distinct from raw OTLP traces — these entries are the
+// canonical "what did the agent decide and why" record.
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.observability.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/observability/v1;observabilityv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// DecisionKind — taxonomy of agent decision types.
+// -----------------------------------------------------------------------------
+enum DecisionKind {
+  DECISION_KIND_UNSPECIFIED = 0;
+  DECISION_KIND_CLASSIFY = 1;   // Classifier / router agents (intent / topic / risk)
+  DECISION_KIND_ROUTE = 2;       // Model Broker Router routing decisions
+  DECISION_KIND_GENERATE = 3;    // Generative agents (atom_qa_generator, web_researcher)
+  DECISION_KIND_CRITIQUE = 4;    // Critic / evaluator agents
+  DECISION_KIND_REFINE = 5;      // Iterative refinement agents
+  DECISION_KIND_BLOCK = 6;        // Guardrail BLOCK decisions
+}
+
+// -----------------------------------------------------------------------------
+// AgentDecisionLogged — chora.observability.agent_decision.logged.v1
+// -----------------------------------------------------------------------------
+//
+// Published when an agent makes a discrete, observable decision. High-volume
+// — expect batching to BigQuery for explainability dashboards + downstream
+// LLM-as-Judge eval pipelines.
+message AgentDecisionLogged {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — AgentDecisionLog entry identifier.
+  string decision_id = 2;
+
+  // Correlation to Model Gateway invocation chain.
+  string invocation_id = 3;
+
+  // AGID of the deciding agent.
+  string agid = 4;
+
+  // Reference to the prompt template version that produced this decision
+  // (UUIDv7 in chora_ai_kernel.prompt_templates). Enables IMDA D3
+  // Repeatability — same template + same input = reproducible output.
+  string prompt_template_id = 5;
+
+  // Concrete model that produced the decision (matches token_usage.model_id).
+  string model_id = 6;
+
+  DecisionKind decision_kind = 7;
+
+  // Hashed / summarised input — full prompt content lives in OTLP traces
+  // with PII redaction. This summary is safe to retain long-term.
+  // Max 2048 chars.
+  string input_summary = 8;
+
+  // Hashed / summarised output. Max 2048 chars.
+  string output_summary = 9;
+
+  // Optional confidence score (0.0–1.0).
+  float confidence = 10;
+
+  google.protobuf.Timestamp decided_at = 11;
+
+  // ---------------------------------------------------------------------------
+  // Extension fields (2026-05-26) — wave that brings MCQ-AI-Assist (qgen
+  // crew) emissions into chora-governance D1-D4 evidence projection.
+  //
+  // Required by .claude/skills/ai-observability-cloud-trace/SKILL.md
+  // (mandatory chora.* span attributes) and by the canonical ADK plugin
+  // `decision_log_emitter` (services/chora-ai-kernel-orchestrator/poc/
+  // chora-adk-common/decisionlogplugin/) that emits this message after
+  // every LLM call.
+  //
+  // Additive (within v1) — buf breaking is satisfied; Schema Registry
+  // accepts new optional fields on v1 evolution.
+  // ---------------------------------------------------------------------------
+
+  // Crew the agent was acting in for this decision. Agents are reusable
+  // across crews — the same agid may emit decisions tagged with different
+  // crew_name values (e.g. `qgen_critic` participates in `mcq_ai_assist`
+  // today, may participate in `oe_ai_assist` later). Snake_case stable
+  // identifier — feeds /o/agents Crews+Agents hierarchy rendering.
+  string crew_name = 12;
+
+  // UUIDv7 of the crew instance / orchestration the decision belongs to.
+  // Lets the projector group multi-agent decisions back to a single
+  // orchestration for the Decision-Traces drill-down.
+  string crew_id = 13;
+
+  // True if this decision occurred during a resumed orchestration (i.e.
+  // continuation after an interrupt). Lets D6 chaos-test telemetry
+  // distinguish first-attempt from resume-attempt decisions.
+  bool is_resume = 14;
+
+  // True if this decision was emitted under the eval golden-pipeline (per
+  // .claude/skills/mlops-agent-eval/SKILL.md). Eval-tagged rows must be
+  // segregated from production dashboards in chora-governance + O+.
+  bool is_eval_run = 15;
+
+  // LoRA adapter version this decision used (per
+  // .claude/skills/gemma-lora-tenant/SKILL.md). Empty string `""` if the
+  // base model was used without an adapter.
+  string adapter_version = 16;
+
+  // Cloud Model Armor verdict for this call. One of: "pass" | "block" |
+  // "redact". Empty string `""` if guardrails were not invoked
+  // (non-LLM-issuing agents).
+  string guardrail_outcome = 17;
+
+  // gen_ai.usage.prompt_tokens — feeds D3 cost monitoring view. May be
+  // zero for non-LLM decisions (e.g. routing-only events).
+  int64 prompt_tokens = 18;
+
+  // gen_ai.usage.completion_tokens.
+  int64 completion_tokens = 19;
+
+  // gen_ai.usage.cached_tokens — Gemini context cache or self-hosted KV
+  // cache hits. May be zero.
+  int64 cached_tokens = 20;
+
+  // Agent-specific extension attributes (per ADR-167 D5). The proto core
+  // stays GENERIC + cross-agent (decision_id / decision_kind / confidence /
+  // model_id ...); per-agent detail that has no generic home rides here as
+  // free-form string pairs rather than polluting the schema with named
+  // single-agent fields. Examples: qgen quality-gate emits
+  // {"attempt_count":"2","max_retries":"3","quality_warning":"false"}.
+  // Streamed to BigQuery as a REPEATED key/value RECORD column. Additive
+  // v1 evolution — older consumers ignore unknown field 21.
+  map<string, string> attributes = 21;
+}

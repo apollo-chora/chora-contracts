@@ -1,0 +1,105 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Consumption - Learning Companion typed-chat turn (request + result)
+  version: 1.0.0
+  description: |
+    ADR-254 D1/D4/D8 (R20): a typed chat turn is event-orchestrated. chora-consumption
+    keeps the SSE to the browser, writes the turn row and the request event into its
+    outbox in ONE transaction, sends the SSE `accepted` frame the moment the request is
+    durable, and the kennel's generic single-agent workflow parks on the companion_chat
+    dispatch lane and answers with one whole-reply completion that consumption forwards
+    as `turn_complete` (or `error`). A retried turn_id is answered by consumption from
+    the stored result; the kennel dedupes on the idempotency key for seven days.
+
+    JSON-wire (ADR-254 D4): body = protojson of the message; envelope in the Pub/Sub
+    attributes and in field 1; routing on the `event_topic` attribute;
+    envelope.idempotency_key = turn_id. Pull on both sides.
+
+    - Domain: Content Consumption (`chora_consumption` DB); producer of the request and
+      consumer of the result: chora-consumption; the kennel (chora-ai-kernel-orchestrator)
+      consumes the request and produces the result.
+    - Source proto: `proto/events/consumption/companion_turn.proto`
+  contact:
+    name: Chora Content Team (Team 1)
+  license:
+    name: Proprietary
+
+defaultContentType: application/json
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  companionTurnRequested:
+    address: chora.consumption.companion_turn.requested.v1
+    messages:
+      companionTurnRequested:
+        $ref: '#/components/messages/CompanionTurnRequested'
+  companionTurnCompleted:
+    address: chora.consumption.companion_turn.completed.v1
+    messages:
+      companionTurnCompleted:
+        $ref: '#/components/messages/CompanionTurnCompleted'
+
+operations:
+  publishCompanionTurnRequested:
+    action: send
+    channel:
+      $ref: '#/channels/companionTurnRequested'
+    description: chora-consumption, outbox, same transaction as the turn row (status requested).
+    messages:
+      - $ref: '#/channels/companionTurnRequested/messages/companionTurnRequested'
+  consumeCompanionTurnRequested:
+    action: receive
+    channel:
+      $ref: '#/channels/companionTurnRequested'
+    description: the kennel generic workflow (subscription chora-ai-kernel-orchestrator.consumption-companion-turn-requested, ack 120 s).
+    messages:
+      - $ref: '#/channels/companionTurnRequested/messages/companionTurnRequested'
+  publishCompanionTurnCompleted:
+    action: send
+    channel:
+      $ref: '#/channels/companionTurnCompleted'
+    description: the kennel, on completion or a reaper FAILED; status OK | FAILED | REJECTED.
+    messages:
+      - $ref: '#/channels/companionTurnCompleted/messages/companionTurnCompleted'
+  consumeCompanionTurnCompleted:
+    action: receive
+    channel:
+      $ref: '#/channels/companionTurnCompleted'
+    description: chora-consumption (subscription chora-consumption.companion-turn-completed, ack 60 s) stores the result by turn_id and forwards it on the open SSE as turn_complete or error.
+    messages:
+      - $ref: '#/channels/companionTurnCompleted/messages/companionTurnCompleted'
+
+components:
+  messages:
+    CompanionTurnRequested:
+      name: CompanionTurnRequested
+      title: Companion turn requested
+      summary: >-
+        BINDING SHAPE (coordinator 2026-08-22 17:31Z, ADR-254 D6 payload addendum): the
+        kennel's generic workflow passes this body through to the chat binary VERBATIM as
+        the dispatch input_payload (adding only turn_kind), so the JSON keys are exactly
+        what the binary decodes: tenant_id, gcid, familiar_id (required), familiar_config
+        (protojson FamiliarInstanceConfig, required), conversation_id (required for
+        persistence), turn_kind, message (required), locale, mana_tier, mana_action_code,
+        growth_stage (JSON number 0-6), species, prompt_overrides_json,
+        resolved_prompt_version, familiar_memory, learner_weakness, visible_kg_neighbors
+        (OMITTED by consumption, retired R3-1), aha_moment_active_until. Pre-rename wire
+        names inside the kennel-to-agent lane are deliberate; publishers marshal with
+        protojson UseProtoNames=true (snake_case keys).
+      contentType: application/json
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/consumption/companion_turn.proto#/chora.consumption.v1.CompanionTurnRequested'
+    CompanionTurnCompleted:
+      name: CompanionTurnCompleted
+      title: Companion turn completed (whole reply)
+      contentType: application/json
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/consumption/companion_turn.proto#/chora.consumption.v1.CompanionTurnCompleted'

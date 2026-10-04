@@ -1,0 +1,2677 @@
+openapi: 3.2.0
+info:
+  title: "Chora Content Delivery — Assessment Lifecycle + Learner Submission API"
+  version: "1.2.0"
+  description: |
+    Author-facing + learner-facing REST API for the **Assessment** aggregate
+    in the Content Delivery domain. An Assessment is a live, instructor-run
+    instance of a published `TestSet` (delivery-test-sets.yaml) — bound to a
+    scheduled window with attempt caps + grading config + optional class
+    binding.
+
+    **Two POVs**:
+      - **Instructor (Phyllis)** — instantiates, schedules, monitors, reviews
+        grades, releases results. Endpoints under `/assessments/*`.
+      - **Learner (may include Phyllis dogfooding herself)** — starts an
+        attempt, autosaves answers, submits, reads the result post-release.
+        Endpoints under `/me/assessments/*`.
+
+    **Composes with**:
+      - `delivery-test-sets.yaml` — Assessment instantiates a PUBLISHED
+        TestSet snapshot (immutable per ADR-155 D5).
+      - `chora-contracts/proto/events/delivery/assessment.proto` + `grading.proto`
+        — 8 lifecycle events for Assessment+Submission + 5 grading events.
+        Submission.submitted.v1 triggers grading.requested.v1.
+      - Grading dispatch is **Pub/Sub-only** per ADR-155 §"Locked
+        architectural rule" — there is NO REST/gRPC grading contract; FE
+        learns the result via this contract's
+        `GET /me/.../submissions/{id}/result` once grading completes +
+        assessment is released.
+
+    **Surface ownership**:
+      - R+ (Rhythm+) — instructor monitoring + admin operations
+        (instantiate / publish / release / archive)
+      - A+ (A-plus) — when Phyllis dogfoods herself as a learner; the
+        `/me/assessments/*` learner paths render in A+ Reader mode
+
+    **State machine** (Assessment FSM):
+      DRAFT     → SCHEDULED  (via /publish; requires scheduled_open_at >= now)
+      SCHEDULED → OPEN       (auto-flip at scheduled_open_at)
+      OPEN      → CLOSED     (auto-flip at scheduled_close_at OR all attempts
+                              exhausted OR admin force-close)
+      CLOSED    → GRADING    (auto-trigger after all submissions finalised)
+      GRADING   → GRADED     (when grading.finalized.v1 received for all)
+      GRADED    → RELEASED   (manual /release-results; or auto if
+                              grading_config.auto_release=true)
+      any       → ARCHIVED   (manual; preserves audit trail)
+
+    **State machine** (Submission FSM):
+      IN_PROGRESS → SUBMITTED (via /submit; or auto on time-out)
+      SUBMITTED   → GRADING   (assessment-level batch grading dispatches)
+      GRADING     → GRADED    (grading.finalized.v1 received for this submission)
+      GRADED      → RELEASED  (parent assessment released)
+
+    **Cohort scoping** (v1): assessments support 4 eligibility modes via
+    combinations of `class_id` + `invited_gcids[]`:
+
+    | Mode                | `class_id` | `invited_gcids` | Eligible |
+    |---------------------|------------|-----------------|----------|
+    | Open-link           | null       | null            | Any tenant member (least restrictive — v1 demo) |
+    | Class-bound         | UUID       | null            | Class roster (chora_delivery.bookings) |
+    | Explicit cohort     | null       | [UUID...]       | Only listed GCIDs |
+    | Intersection        | UUID       | [UUID...]       | Class roster ∩ invited (most restrictive) |
+
+    `release-results` flips per-submission visibility ONLY for learners who
+    actually submitted (regardless of eligibility mode); non-submitters see
+    nothing different. Pub/Sub `submission.released.v1` fires per-submission
+    for downstream notification fan-out.
+
+    **Mana semantics**: grading is institutional — `TenantManaPool` debits
+    via the OE evaluator agent. Learners do NOT pay mana to submit/be
+    graded. See ADR-142 + ADR-155 D3.
+
+    Owning domain : Content Delivery (`chora_delivery` database)
+    Owning team   : Team 2 (Delivery)
+    Topic prefix  : chora.delivery.assessment.* + chora.delivery.submission.*
+
+    AP-01: This contract exists BEFORE implementation. Source-of-truth:
+    `docs/architecture/adrs/adr-155-assessment-grading-dispatch.md`.
+
+  contact:
+    name: "Chora Platform Team — Delivery Track"
+  license:
+    name: "Proprietary"
+
+servers:
+  - url: "https://api.chora.site/delivery/v1"
+    description: "Production"
+  - url: "https://api.staging.chora.site/delivery/v1"
+    description: "Staging"
+  - url: "http://localhost:8082/delivery/v1"
+    description: "Local dev"
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: assessments-instructor
+    description: |
+      Instructor-facing Assessment CRUD + monitoring. Tenant admins can
+      also call these (role-driven feature visibility per integrative-UI
+      principle).
+  - name: assessments-learner
+    description: |
+      Learner-facing assessment list + submission flow. Path prefix `/me/*`
+      scopes to the authenticated GCID.
+
+paths:
+  # ===========================================================================
+  # INSTRUCTOR — Assessment lifecycle (Phyllis instantiates from a test-set)
+  # ===========================================================================
+
+  /assessments:
+    get:
+      tags: [assessments-instructor]
+      operationId: listAssessments
+      summary: "List assessments authored by the caller (filter+sort+paginate)"
+      description: |
+        Returns the caller's tenant assessments. Mirrors the search pattern
+        from `/atoms/questions/search` + `/test-sets` for FE reuse — same
+        cursor + page_size enum + sort syntax.
+
+        Default scope: assessments where `instructor_gcid == caller_gcid` OR
+        the caller is a tenant admin. Pass `author_gcid` to broaden (admin
+        only).
+      parameters:
+        - name: state
+          in: query
+          required: false
+          description: "Multi-value FSM state filter."
+          explode: true
+          schema:
+            type: array
+            items:
+              $ref: "#/components/schemas/AssessmentState"
+        - name: test_set_id
+          in: query
+          required: false
+          description: "Multi-value test-set filter (find assessments instantiated from a test-set)."
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+              format: uuid
+        - name: class_id
+          in: query
+          required: false
+          description: "Multi-value class binding filter."
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+              format: uuid
+        - name: instructor_gcid
+          in: query
+          required: false
+          description: "Multi-value author filter (admin-only when distinct from caller)."
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+              format: uuid
+        - name: q
+          in: query
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 200
+        - name: sort
+          in: query
+          required: false
+          description: |
+            `{field}:{direction}`. Supported fields: created_at, updated_at,
+            scheduled_open_at, scheduled_close_at, published_at, released_at,
+            title. Default `created_at:desc`.
+          schema:
+            type: string
+            default: "created_at:desc"
+            pattern: '^[a-z_]+:(asc|desc)(,[a-z_]+:(asc|desc))*$'
+        - name: page_size
+          in: query
+          required: false
+          schema:
+            type: integer
+            enum: [10, 20, 50, 100]
+            default: 20
+        - name: page_token
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 512
+        - name: include_total
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: "Page of assessments."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssessmentListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+    post:
+      tags: [assessments-instructor]
+      operationId: createAssessment
+      summary: "Instantiate a PUBLISHED test-set as a live assessment (DRAFT)"
+      description: |
+        Creates an Assessment in `state=DRAFT`. Validations:
+          - `test_set_id` MUST be in `state=PUBLISHED` (otherwise 409)
+          - `scheduled_open_at` <= `scheduled_close_at`
+          - `scheduled_close_at` > `now()` (cannot create an already-closed
+            assessment)
+          - `max_attempts` ∈ [1, 3]
+          - If `class_id` present, the caller MUST be the class instructor
+            OR a tenant admin (otherwise 403)
+
+        On success:
+          - Snapshots the test-set's `total_points` + `question_count` +
+            `default_grading_config` onto the Assessment
+          - Records `test_set_revision_snapshot` so subsequent test-set
+            edits don't propagate to live assessments
+          - Emits `chora.delivery.assessment.created.v1`
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAssessmentRequest"
+            examples:
+              freestanding:
+                summary: "Freestanding (no class binding) — v1 demo default"
+                value:
+                  test_set_id: "01985e7f-1234-7abc-8def-000000000a01"
+                  title_override: "Agile Estimation — Cohort May 2026"
+                  scheduled_open_at: "2026-05-20T09:00:00Z"
+                  scheduled_close_at: "2026-05-20T11:00:00Z"
+                  max_attempts: 1
+                  shuffle_questions: true
+                  shuffle_mcq_options: true
+              classBound:
+                summary: "Class-bound assessment with accommodations"
+                value:
+                  test_set_id: "01985e7f-1234-7abc-8def-000000000a01"
+                  class_id: "01985e7f-1234-7abc-8def-000000000c10"
+                  scheduled_open_at: "2026-05-22T13:00:00Z"
+                  scheduled_close_at: "2026-05-22T15:00:00Z"
+                  max_attempts: 2
+                  shuffle_questions: false
+                  shuffle_mcq_options: true
+                  accommodations:
+                    extra_time_minutes: 30
+                    allow_calculator: true
+                    allow_open_book: false
+      responses:
+        "201":
+          description: "Assessment created."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Assessment"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: "Caller cannot bind to this class_id."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: "test_set_id not found in caller's tenant."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: |
+            Test-set in incompatible state. `code` is one of:
+              - `DELIVERY_TEST_SET_NOT_PUBLISHED` — must be PUBLISHED
+              - `DELIVERY_TEST_SET_ARCHIVED` — soft-deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: "Validation — window invalid, max_attempts out of range, etc."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ===========================================================================
+  # INSTRUCTOR — Offering-nested assessments (W3.A: making an Offering's
+  # assessments addressable). Intra-chora_delivery (Offering + Assessment +
+  # TestSet share the DB) — no cross-DB query, no new event. Detach reuses
+  # POST /assessments/{assessment_id}/archive (no DELETE).
+  # ===========================================================================
+
+  /offerings/{offering_id}/assessments:
+    parameters:
+      - name: offering_id
+        in: path
+        required: true
+        description: "The delivery Offering whose assessments are addressed."
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [assessments-instructor]
+      operationId: listOfferingAssessments
+      summary: "List the assessments scoped to a delivery Offering"
+      description: |
+        Returns the assessments attached to `offering_id`, newest first
+        (created_at DESC), tenant + RLS scoped. Same `{items, next_page_token}`
+        envelope as `GET /assessments`. Instructor / training-admin only.
+      parameters:
+        - name: page_size
+          in: query
+          required: false
+          schema:
+            type: integer
+            enum: [10, 20, 50, 100]
+            default: 20
+        - name: page_token
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 512
+      responses:
+        "200":
+          description: "Page of the offering's assessments."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssessmentListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: "Caller lacks the instructor / training-admin role."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    post:
+      tags: [assessments-instructor]
+      operationId: createOfferingAssessment
+      summary: "Attach a PUBLISHED test-set to an Offering as a live assessment"
+      description: |
+        Creates an Assessment scoped to `offering_id` (the response carries
+        `offering_id`). Reuses the `POST /assessments` core: snapshots the
+        test-set's total_points + question_count + grading config, and (when
+        the scheduling window is omitted) auto-publishes the FSM to OPEN.
+        `offering_id` comes from the PATH, not the body.
+
+        Validations:
+          - the Offering MUST exist in the caller's tenant (otherwise 404)
+          - `test_set_id` MUST exist in the caller's tenant AND be in
+            `state=PUBLISHED` (otherwise 400)
+          - instructor / training-admin role required (otherwise 403)
+
+        Emits `chora.delivery.assessment.created.v1` (+ published/opened when
+        auto-published) — the same events as `POST /assessments`.
+
+        Detach is NOT a DELETE — reuse `POST /assessments/{assessment_id}/archive`.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAssessmentRequest"
+            examples:
+              offeringScoped:
+                summary: "Attach a published test-set to an offering"
+                value:
+                  test_set_id: "01985e7f-1234-7abc-8def-000000000a01"
+                  title_override: "Estimation — Offering A"
+      responses:
+        "201":
+          description: "Assessment created + scoped to the offering."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Assessment"
+        "400":
+          description: |
+            `test_set_id` not found in the tenant, or not in `state=PUBLISHED`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: "Caller lacks the instructor / training-admin role."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: "Offering not found in the caller's tenant."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /assessments/{assessment_id}:
+    parameters:
+      - $ref: "#/components/parameters/AssessmentIdPath"
+    get:
+      tags: [assessments-instructor]
+      operationId: getAssessment
+      summary: "Read full assessment detail (instructor POV — includes grading config)"
+      description: |
+        Returns the Assessment + the embedded TestSet snapshot's question
+        list (with correct-answer keys, since this is the instructor view).
+
+        Learner POV is `GET /me/assessments/{assessment_id}` which strips
+        answer keys (LearnerSafe projection).
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssessmentInstructorDetail"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      tags: [assessments-instructor]
+      operationId: updateAssessment
+      summary: "Update assessment metadata (DRAFT or SCHEDULED only)"
+      description: |
+        Partial update — only fields in body are updated. State guard:
+        only allowed while `state ∈ {DRAFT, SCHEDULED}`. Once OPEN, all
+        edits return 409 — instructor must close + clone if changes are
+        needed.
+
+        Cannot change `test_set_id` once created. To swap test-sets, archive
+        + create a new Assessment.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateAssessmentRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Assessment"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            Assessment past the editable window (OPEN/CLOSED/GRADING/GRADED/
+            RELEASED/ARCHIVED). `code=DELIVERY_ASSESSMENT_NOT_EDITABLE`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /assessments/{assessment_id}/publish:
+    parameters:
+      - $ref: "#/components/parameters/AssessmentIdPath"
+    post:
+      tags: [assessments-instructor]
+      operationId: publishAssessment
+      summary: "Transition DRAFT → SCHEDULED (visible to invited learners)"
+      description: |
+        Transitions the assessment from DRAFT to SCHEDULED. After this, the
+        assessment is visible to learners (filtered by class roster or
+        invite list) but they cannot start an attempt until
+        `scheduled_open_at` is reached.
+
+        Validations:
+          - state MUST be DRAFT
+          - `scheduled_open_at` >= `now()`
+          - `scheduled_close_at` > `scheduled_open_at`
+
+        Emits `chora.delivery.assessment.published.v1`. The auto-flip
+        SCHEDULED → OPEN is clock-driven (Cloud Scheduler cron) — no
+        separate `.opened.v1` event; consumers watch `scheduled_open_at`.
+
+        Idempotent: re-publishing an already-SCHEDULED assessment returns
+        200 with the same envelope.
+      responses:
+        "200":
+          description: "Assessment published (SCHEDULED)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Assessment"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            Not in DRAFT/SCHEDULED OR scheduling window invalid. Codes:
+              - `DELIVERY_ASSESSMENT_INVALID_WINDOW`
+              - `DELIVERY_ASSESSMENT_NOT_DRAFT`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /assessments/{assessment_id}/force-close:
+    parameters:
+      - $ref: "#/components/parameters/AssessmentIdPath"
+    post:
+      tags: [assessments-instructor]
+      operationId: forceCloseAssessment
+      summary: "Force-close an OPEN assessment (admin/instructor override)"
+      description: |
+        Transitions the assessment OPEN → CLOSED immediately, regardless of
+        `scheduled_close_at`. All IN_PROGRESS submissions are auto-finalised
+        (transitioned to SUBMITTED with `close_reason=ADMIN_FORCE_CLOSE`).
+        Grading dispatch is then triggered for all submissions.
+
+        Emits `chora.delivery.assessment.closed.v1` with
+        `close_reason=instructor_force_close`.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  maxLength: 500
+                  description: "Optional instructor-supplied reason for audit log."
+      responses:
+        "200":
+          description: "Assessment force-closed; grading triggered."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Assessment"
+        "409":
+          description: "Not in OPEN state."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /assessments/{assessment_id}/release-results:
+    parameters:
+      - $ref: "#/components/parameters/AssessmentIdPath"
+    post:
+      tags: [assessments-instructor]
+      operationId: releaseAssessmentResults
+      summary: "Transition GRADED → RELEASED (learners see grades + feedback)"
+      description: |
+        Releases graded results to learners. Pre-release, learners see
+        `state=PENDING_RELEASE` on `GET /me/.../submissions/{id}/result`.
+        Post-release, the full SubmissionResult is returned.
+
+        Validations:
+          - state MUST be GRADED (or GRADING with all submissions graded —
+            auto-flip path)
+          - At least 1 submission must be in GRADED state
+
+        On success:
+          - Assessment state → RELEASED
+          - All graded Submissions are transitioned to RELEASED
+          - Emits `chora.delivery.assessment.released.v1` + per-submission
+            `chora.delivery.submission.released.v1` (fan-out)
+          - Notifications are queued per learner ("Your results are ready")
+
+        Idempotent: re-calling release on an already-RELEASED assessment
+        returns 200 with the same envelope (no re-emission).
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                release_announcement:
+                  type: string
+                  maxLength: 500
+                  description: "Optional instructor announcement (e.g., 'Well done; common errors discussed in Thursday class')."
+      responses:
+        "200":
+          description: "Results released."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Assessment"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            Cannot release in current state. Codes:
+              - `DELIVERY_ASSESSMENT_NOT_GRADED` — grading still in progress
+              - `DELIVERY_ASSESSMENT_NO_GRADED_SUBMISSIONS`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /assessments/{assessment_id}/archive:
+    parameters:
+      - $ref: "#/components/parameters/AssessmentIdPath"
+    post:
+      tags: [assessments-instructor]
+      operationId: archiveAssessment
+      summary: "Soft-archive an assessment (preserves audit trail)"
+      description: |
+        Transitions any state → ARCHIVED. Soft-delete (`deleted_at` set;
+        `state=ARCHIVED`). Learners can no longer access the assessment;
+        historical submissions remain queryable for audit. Idempotent.
+      responses:
+        "200":
+          description: "Assessment archived."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Assessment"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /assessments/{assessment_id}/monitor:
+    parameters:
+      - $ref: "#/components/parameters/AssessmentIdPath"
+    get:
+      tags: [assessments-instructor]
+      operationId: getAssessmentMonitor
+      summary: "Instructor monitoring dashboard data"
+      description: |
+        Returns realtime counts + per-question pass rates for the assessment
+        dashboard. Recommended polling interval 10-30s for OPEN state, 5s
+        during GRADING.
+
+        Per-question pass rates are computed only post-grading; the field is
+        empty during OPEN/CLOSED states.
+
+        Average / median scores are post-grading only.
+      responses:
+        "200":
+          description: "Monitor envelope."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssessmentMonitor"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /assessments/{assessment_id}/submissions:
+    parameters:
+      - $ref: "#/components/parameters/AssessmentIdPath"
+    get:
+      tags: [assessments-instructor]
+      operationId: listAssessmentSubmissions
+      summary: "List submissions for an assessment (instructor review)"
+      description: |
+        Returns paginated list of submissions for the assessment. Filter
+        on state, learner GCID, attempt_number.
+      parameters:
+        - name: state
+          in: query
+          required: false
+          explode: true
+          schema:
+            type: array
+            items:
+              $ref: "#/components/schemas/SubmissionState"
+        - name: learner_gcid
+          in: query
+          required: false
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+              format: uuid
+        - name: page_size
+          in: query
+          required: false
+          schema:
+            type: integer
+            enum: [10, 20, 50, 100]
+            default: 20
+        - name: page_token
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 512
+      responses:
+        "200":
+          description: "Page of submissions."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubmissionListResponse"
+
+  # ===========================================================================
+  # INSTRUCTOR — OE grading review + HITL gate (ADR-172)
+  # ===========================================================================
+  #
+  # After the oe_grading_crew completes, OE submissions land GRADED (wire) with
+  # review_status=PENDING_REVIEW and all AI artifacts provenance=AI. The
+  # instructor reviews here BEFORE release. Per-question edits are opt-in;
+  # one-click approve (per-candidate or assessment-wide bulk) accepts AI grading
+  # as-is. release-results only releases APPROVED submissions.
+
+  /assessments/{assessment_id}/submissions/{submission_id}/grading:
+    parameters:
+      - $ref: "#/components/parameters/AssessmentIdPath"
+      - $ref: "#/components/parameters/SubmissionIdPath"
+    get:
+      tags: [assessments-instructor]
+      operationId: getSubmissionGradingDetail
+      summary: "Instructor grading-review detail for one submission"
+      description: |
+        Full per-question grading view for the R+ grading queue drawer:
+        current score/comment/model-answer alongside the original AI values +
+        provenance (AI | HUMAN), per-criterion sub-scores, quality flag, and
+        the editable overall comment. Author projection — includes answer keys.
+      responses:
+        "200":
+          description: "Grading review detail."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GradingReviewDetail"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /assessments/{assessment_id}/submissions/{submission_id}/grades:
+    parameters:
+      - $ref: "#/components/parameters/AssessmentIdPath"
+      - $ref: "#/components/parameters/SubmissionIdPath"
+    patch:
+      tags: [assessments-instructor]
+      operationId: editSubmissionGrades
+      summary: "Edit per-question OE score / comment / model-answer (opt-in HITL override)"
+      description: |
+        Applies instructor overrides to one or more OE questions. Each edit
+        flips the affected artifact's provenance AI→HUMAN and APPENDS to the
+        grade_overrides audit (ADR-172 §D7 / ADR-170 append-to-resolve) —
+        never an in-place loss of the AI original. Per edit:
+          - `points_earned` → emits `grading.score_overridden.v1` (SCORE)
+          - `comment`       → emits `grading.score_overridden.v1` (COMMENT)
+          - `model_answer`  → emits `grading.score_overridden.v1` (MODEL_ANSWER)
+            AND `grading.model_answer_amended.v1` (consumed by chora-creation,
+            which appends a QuestionRevision).
+        Allowed only while the submission is GRADED + review_status≠APPROVED
+        (re-open an approved submission via a future endpoint if needed).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EditGradesRequest"
+      responses:
+        "200":
+          description: "Updated grading review detail."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GradingReviewDetail"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            Not editable. Codes:
+              - `DELIVERY_SUBMISSION_NOT_GRADED`
+              - `DELIVERY_SUBMISSION_ALREADY_APPROVED`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /assessments/{assessment_id}/submissions/{submission_id}/overall-comment:
+    parameters:
+      - $ref: "#/components/parameters/AssessmentIdPath"
+      - $ref: "#/components/parameters/SubmissionIdPath"
+    patch:
+      tags: [assessments-instructor]
+      operationId: editSubmissionOverallComment
+      summary: "Edit the whole-assessment overall comment (HITL override)"
+      description: |
+        Overrides the AI-drafted overall comment (ADR-172 §D5). Flips
+        overall_comment_provenance AI→HUMAN; emits
+        `grading.score_overridden.v1` (OVERALL_COMMENT).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EditOverallCommentRequest"
+      responses:
+        "200":
+          description: "Updated grading review detail."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GradingReviewDetail"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /assessments/{assessment_id}/submissions/{submission_id}/approve:
+    parameters:
+      - $ref: "#/components/parameters/AssessmentIdPath"
+      - $ref: "#/components/parameters/SubmissionIdPath"
+    post:
+      tags: [assessments-instructor]
+      operationId: approveSubmissionGrading
+      summary: "Per-candidate one-click approve (review_status → APPROVED)"
+      description: |
+        Accepts a submission's grading as-is (or after edits). Sets
+        review_status=APPROVED; emits `grading.submission_approved.v1`.
+        Idempotent on an already-APPROVED submission. Does NOT release — the
+        learner still sees nothing until /release-results.
+      responses:
+        "200":
+          description: "Submission approved."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Submission"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            Cannot approve. Codes:
+              - `DELIVERY_SUBMISSION_NOT_GRADED` — grading not complete
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /assessments/{assessment_id}/approve-all:
+    parameters:
+      - $ref: "#/components/parameters/AssessmentIdPath"
+    post:
+      tags: [assessments-instructor]
+      operationId: approveAllSubmissions
+      summary: "Assessment-wide bulk approve (optionally approve-and-release)"
+      description: |
+        Approves every GRADED submission (review_status → APPROVED) in one
+        action; emits `grading.assessment_approved.v1`. When
+        `release: true`, chains directly to release-results (combined
+        approve-and-release). Submissions still PENDING_OE_GRADING are skipped
+        and reported in `skipped_submission_ids`.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApproveAllRequest"
+      responses:
+        "200":
+          description: "Bulk approval result."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApproveAllResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ===========================================================================
+  # LEARNER — submission flow (Phyllis may dogfood)
+  # ===========================================================================
+
+  /me/assessments:
+    get:
+      tags: [assessments-learner]
+      operationId: listMyAssessments
+      summary: "List assessments visible to the caller (learner POV)"
+      description: |
+        Returns assessments the learner is eligible to take — filtered by
+        class roster (if class_id present) + invite list + tenant scope.
+        Excludes assessments not yet SCHEDULED + ARCHIVED.
+
+        Default scope: assessments where `state ∈ {SCHEDULED, OPEN, GRADING,
+        GRADED, RELEASED}`. Pre-publish DRAFT assessments are NEVER visible
+        to learners.
+      parameters:
+        - name: state
+          in: query
+          required: false
+          explode: true
+          schema:
+            type: array
+            items:
+              $ref: "#/components/schemas/AssessmentState"
+        - name: class_id
+          in: query
+          required: false
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+              format: uuid
+        - name: page_size
+          in: query
+          required: false
+          schema:
+            type: integer
+            enum: [10, 20, 50, 100]
+            default: 20
+        - name: page_token
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 512
+      responses:
+        "200":
+          description: "Page of learner-visible assessments."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LearnerAssessmentListResponse"
+
+  /me/assessments/{assessment_id}:
+    parameters:
+      - $ref: "#/components/parameters/AssessmentIdPath"
+    get:
+      tags: [assessments-learner]
+      operationId: getMyAssessment
+      summary: "Learner-facing assessment read (no answer keys, no grading config)"
+      description: |
+        Returns the LearnerSafe projection of the assessment: question list
+        with prompts + options (NO `is_correct` flags, NO model_answer, NO
+        rubric, NO criterion weights — those are sent only POST-grade via
+        `GET .../result`).
+
+        Also returns the learner's current attempt count + `remaining_attempts`
+        + the assessment's open/close window.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LearnerAssessmentDetail"
+        "403":
+          description: "Learner not on the assessment's invite list / class roster."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /me/assessments/{assessment_id}/submissions:
+    parameters:
+      - $ref: "#/components/parameters/AssessmentIdPath"
+    post:
+      tags: [assessments-learner]
+      operationId: startMySubmission
+      summary: "Start a new submission attempt (idempotent within window)"
+      description: |
+        Starts a new attempt. Validations:
+          - Assessment MUST be in OPEN state
+          - Learner attempt count < max_attempts
+          - Learner must be on the invite list (or class roster if class_id)
+
+        **Idempotency**: if the learner already has an IN_PROGRESS submission
+        for this assessment, returns 200 with that submission (no new attempt
+        counter bump). To force a fresh attempt, the learner must first
+        submit (or let the time-out auto-finalise) the existing one.
+
+        On success: emits `chora.delivery.submission.started.v1`.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "201":
+          description: "New attempt started."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubmissionStartedResponse"
+        "200":
+          description: "Existing IN_PROGRESS submission returned (idempotent)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubmissionStartedResponse"
+        "403":
+          description: "Not invited / not on class roster."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: |
+            Cannot start. Codes:
+              - `DELIVERY_ASSESSMENT_NOT_OPEN` — assessment not yet OPEN
+                (still SCHEDULED) or CLOSED/GRADING/etc.
+              - `DELIVERY_SUBMISSION_MAX_ATTEMPTS_EXHAUSTED`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /me/assessments/{assessment_id}/submissions/{submission_id}:
+    parameters:
+      - $ref: "#/components/parameters/AssessmentIdPath"
+      - $ref: "#/components/parameters/SubmissionIdPath"
+    get:
+      tags: [assessments-learner]
+      operationId: getMySubmission
+      summary: "Read the learner's in-progress submission (autosave state + remaining time)"
+      description: |
+        Returns the learner's submission with current `answers[]` +
+        `last_saved_at` + `time_remaining_seconds`. Used by the learner's
+        in-app assessment runner to rehydrate state on tab refresh. Returns
+        the submission in any state (IN_PROGRESS / SUBMITTED / GRADING /
+        GRADED / RELEASED) — for the released graded result use
+        `GET .../submissions/{id}/result`.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Submission"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    patch:
+      tags: [assessments-learner]
+      operationId: autosaveMySubmission
+      summary: "Autosave in-progress answers (idempotent merge)"
+      description: |
+        Partial update of the submission's `answers[]`. Each item in the
+        request body MAY override / add to the corresponding answer.
+        Idempotent on `(submission_id, question_id)` — re-sending the same
+        answer overwrites in place.
+
+        Only allowed while `state=IN_PROGRESS`. Past-window writes return
+        409 with `DELIVERY_SUBMISSION_WINDOW_CLOSED`.
+
+        FE-recommended autosave cadence: every 5s OR on field-change debounce.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AutosaveRequest"
+      responses:
+        "200":
+          description: "Autosave persisted; new `last_saved_at`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Submission"
+        "409":
+          description: "Submission past window / already submitted."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /me/assessments/{assessment_id}/submissions/{submission_id}/submit:
+    parameters:
+      - $ref: "#/components/parameters/AssessmentIdPath"
+      - $ref: "#/components/parameters/SubmissionIdPath"
+    post:
+      tags: [assessments-learner]
+      operationId: submitMySubmission
+      summary: "Finalize the submission → triggers grading"
+      description: |
+        Transitions the submission IN_PROGRESS → SUBMITTED. Emits
+        `chora.delivery.submission.submitted.v1` which the in-process
+        grading-dispatcher subscribes to and emits
+        `chora.delivery.grading.requested.v1` (see grading.proto).
+
+        Validations:
+          - state MUST be IN_PROGRESS
+          - Parent assessment MUST be in OPEN state
+          - All `required=true` questions in the test-set must have an answer
+
+        Idempotent: re-submitting an already-SUBMITTED submission returns
+        200 with the same envelope (no event re-emission). FE retry-safe.
+      responses:
+        "202":
+          description: |
+            Submission finalised; grading dispatched. Response carries the
+            estimated grading completion window.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubmissionSubmittedResponse"
+        "200":
+          description: "Already submitted (idempotent replay)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubmissionSubmittedResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            Cannot submit. Codes:
+              - `DELIVERY_SUBMISSION_NOT_IN_PROGRESS`
+              - `DELIVERY_ASSESSMENT_NOT_OPEN`
+              - `DELIVERY_SUBMISSION_REQUIRED_QUESTIONS_UNANSWERED`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /me/assessments/{assessment_id}/submissions/{submission_id}/result:
+    parameters:
+      - $ref: "#/components/parameters/AssessmentIdPath"
+      - $ref: "#/components/parameters/SubmissionIdPath"
+    get:
+      tags: [assessments-learner]
+      operationId: getMySubmissionResult
+      summary: "Read the graded result (pending or released)"
+      description: |
+        Returns either:
+          - **Pre-release** (`state ∈ {SUBMITTED, PENDING_OE_GRADING,
+            GRADED_PENDING_RELEASE}`): envelope with `state=PENDING_RELEASE`
+            + `message` — the learner knows they submitted but score +
+            feedback are hidden until the instructor releases (or auto-
+            release fires). `oe_batch_pending=true` when one or more OE
+            answers are still awaiting batch grading; otherwise false.
+          - **Post-release** (`state=RELEASED`): full `SubmissionResult`
+            with `per_question_grades[]` (correct flags + LLM feedback +
+            criterion scores) + total earned + passed flag + `breakdown`
+            summary (mcq_correct/total + oe_pending/total) for the FE
+            result-screen aggregate row.
+
+        OE feedback strings are included only when the parent assessment's
+        `grading_config.per_question_feedback_enabled=true`.
+
+        MCQ option `is_correct` flags + the correct `choice_id` are
+        revealed per option in the post-release projection so the learner
+        can see WHY they got it right/wrong (sourced from the
+        test_set_question.payload_snapshot captured at TestSet.Publish()
+        time — cross-DB queries are FORBIDDEN per ddd-enforcement #3).
+
+        IN_PROGRESS submissions return 409 with
+        `DELIVERY_SUBMISSION_IN_PROGRESS` so the FE can redirect to the
+        rehydrate path (`GET .../submissions/{id}`) — they are NOT folded
+        into `PENDING_RELEASE` because the semantics differ (resume vs
+        wait-for-instructor).
+      responses:
+        "200":
+          description: "Result envelope (pending or released)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MySubmissionResultResponse"
+              examples:
+                pendingReleaseMCQOnly:
+                  summary: "Submission graded inline; awaiting release"
+                  value:
+                    state: PENDING_RELEASE
+                    oe_batch_pending: false
+                    message: "Your submission has been graded. Results will be released by your instructor."
+                pendingReleaseOEAwaiting:
+                  summary: "OE batch grading still in flight"
+                  value:
+                    state: PENDING_RELEASE
+                    oe_batch_pending: true
+                    message: "Your submission is being graded. Results will be released by your instructor once grading finishes."
+                released:
+                  summary: "Released — full result body"
+                  value:
+                    state: RELEASED
+                    result:
+                      submission_id: "01985e7f-1234-7abc-8def-000000000601"
+                      total_points_earned: 85.5
+                      total_points_possible: 100
+                      passing_threshold_percent: 70
+                      passed: true
+                      breakdown:
+                        mcq_correct_count: 1
+                        mcq_total: 1
+                        oe_graded_count: 1
+                        oe_total: 1
+                        oe_pending_count: 0
+                      per_question_grades:
+                        - test_set_question_id: "01985e7f-1234-7abc-8def-000000000701"
+                          question_id: "01985e7f-1234-7abc-8def-000000000001"
+                          question_type: mcq
+                          points_earned: 10
+                          points_possible: 10
+                          correct: true
+                          grading_dispatch: DETERMINISTIC
+                        - test_set_question_id: "01985e7f-1234-7abc-8def-000000000702"
+                          question_id: "01985e7f-1234-7abc-8def-000000000002"
+                          question_type: oe
+                          points_earned: 7.5
+                          points_possible: 10
+                          grading_dispatch: LLM_EVALUATOR
+                          llm_evaluator_feedback: "Strong articulation of the relative-vs-absolute distinction; missed the false-precision callout."
+                      instructor_comment: "Well done; common errors discussed in Thursday class."
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            Submission is still IN_PROGRESS. FE MUST redirect to
+            `GET /me/assessments/{assessment_id}/submissions/{submission_id}`
+            for rehydrate. `error.code = DELIVERY_SUBMISSION_IN_PROGRESS`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    AssessmentIdPath:
+      name: assessment_id
+      in: path
+      required: true
+      description: "UUIDv7 of the Assessment instance."
+      schema:
+        type: string
+        format: uuid
+    SubmissionIdPath:
+      name: submission_id
+      in: path
+      required: true
+      description: "UUIDv7 of the Submission (one per learner-attempt)."
+      schema:
+        type: string
+        format: uuid
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: "Client-supplied idempotency key (UUIDv7 recommended)."
+      schema:
+        type: string
+        maxLength: 64
+
+  schemas:
+    # -- FSM states --
+
+    AssessmentState:
+      type: string
+      description: |
+        Assessment lifecycle. See file-level FSM doc.
+      enum:
+        - DRAFT
+        - SCHEDULED
+        - OPEN
+        - CLOSED
+        - GRADING
+        - GRADED
+        - RELEASED
+        - ARCHIVED
+
+    SubmissionState:
+      type: string
+      description: |
+        Submission lifecycle. See file-level FSM doc.
+      enum:
+        - IN_PROGRESS
+        - SUBMITTED
+        - GRADING
+        - GRADED
+        - RELEASED
+        - ARCHIVED
+
+    # -- Accommodations --
+
+    Accommodations:
+      type: object
+      description: |
+        Optional per-assessment accommodations. Applied uniformly to all
+        invited learners; for per-learner overrides see future
+        `LearnerAccommodationGrant` aggregate (out of v1 scope).
+      properties:
+        extra_time_minutes:
+          type: integer
+          minimum: 0
+          maximum: 240
+          description: "Additional time beyond `time_limit_seconds`."
+        allow_calculator:
+          type: boolean
+          default: false
+        allow_open_book:
+          type: boolean
+          default: false
+        font_scale_factor:
+          type: number
+          format: float
+          minimum: 1.0
+          maximum: 3.0
+          nullable: true
+          description: "Visual accommodation; client renders UI at this scale."
+
+    # -- Assessment aggregate --
+
+    Assessment:
+      type: object
+      description: |
+        Assessment aggregate root in `chora_delivery.assessments`. Cross-
+        domain references: instructor_gcid (Identity), class_id (Delivery —
+        same DB, soft FK).
+      required:
+        - assessment_id
+        - tenant_id
+        - instructor_gcid
+        - test_set_id
+        - test_set_revision_snapshot
+        - title
+        - state
+        - max_attempts
+        - shuffle_questions
+        - shuffle_mcq_options
+        - total_points
+        - question_count
+        - grading_config_snapshot
+        - created_at
+        - updated_at
+      properties:
+        assessment_id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        instructor_gcid:
+          type: string
+          format: uuid
+        test_set_id:
+          type: string
+          format: uuid
+        test_set_revision_snapshot:
+          type: integer
+          minimum: 1
+          description: "Revision number of the test-set captured at create-time."
+        class_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: "Optional class binding; null = freestanding."
+        offering_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            Optional delivery-Offering scope (W3.A — making an Offering's
+            assessments addressable). Set when the assessment was attached via
+            POST /offerings/{offering_id}/assessments; null = freestanding.
+            Same-DB soft FK to chora_delivery.offerings (no FK constraint).
+            Distinct from class_id.
+        invited_gcids:
+          type: array
+          nullable: true
+          maxItems: 10000
+          description: |
+            Optional explicit cohort scoping. When null AND `class_id` null =
+            open-link freestanding (any tenant member). When populated =
+            ONLY these GCIDs may attempt. Compatible with `class_id` —
+            intersection applies (must be in both).
+          items:
+            type: string
+            format: uuid
+        title:
+          type: string
+          minLength: 1
+          maxLength: 256
+        learner_facing_name:
+          type: string
+          nullable: true
+          maxLength: 256
+        state:
+          $ref: "#/components/schemas/AssessmentState"
+        scheduled_open_at:
+          type: string
+          format: date-time
+        scheduled_close_at:
+          type: string
+          format: date-time
+        max_attempts:
+          type: integer
+          minimum: 1
+          maximum: 3
+        shuffle_questions:
+          type: boolean
+        shuffle_mcq_options:
+          type: boolean
+        accommodations:
+          allOf:
+            - $ref: "#/components/schemas/Accommodations"
+          nullable: true
+        total_points:
+          type: integer
+          minimum: 0
+          description: "Snapshot from test-set at create time."
+        question_count:
+          type: integer
+          minimum: 0
+        grading_config_snapshot:
+          type: object
+          description: |
+            Snapshot of `GradingConfig` (from delivery-test-sets.yaml) at
+            create time. Captured here so live assessments lock against
+            their grading semantics; test-set edits don't propagate.
+          properties:
+            mcq_dispatch:
+              type: string
+              enum: [DETERMINISTIC]
+            oe_dispatch:
+              type: string
+              enum: [LLM_EVALUATOR_AGENT]
+            llm_evaluator_model_tier:
+              type: string
+              enum: [T1, T2]
+            passing_threshold_percent:
+              type: integer
+              minimum: 0
+              maximum: 100
+            per_question_feedback_enabled:
+              type: boolean
+            auto_release:
+              type: boolean
+        deleted_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        published_at:
+          type: string
+          format: date-time
+          nullable: true
+        closed_at:
+          type: string
+          format: date-time
+          nullable: true
+        released_at:
+          type: string
+          format: date-time
+          nullable: true
+        archived_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    AssessmentInstructorDetail:
+      type: object
+      description: "Instructor read — includes test-set snapshot with answer keys."
+      allOf:
+        - $ref: "#/components/schemas/Assessment"
+        - type: object
+          required: [questions]
+          properties:
+            questions:
+              type: array
+              description: "Test-set's question list at the locked revision (with answer keys)."
+              items:
+                $ref: "#/components/schemas/InstructorQuestion"
+
+    InstructorQuestion:
+      type: object
+      description: |
+        Full per-question detail visible to instructor (correct flags,
+        model_answer, rubric). Sub-shape mirrors creation-questions.yaml's
+        `Question` shape; embedded as a snapshot.
+      required:
+        - test_set_question_id
+        - question_id
+        - question_type
+        - prompt
+        - points
+        - display_order
+        - required
+      properties:
+        test_set_question_id:
+          type: string
+          format: uuid
+        question_id:
+          type: string
+          format: uuid
+        question_type:
+          type: string
+          enum: [mcq, oe]
+        prompt:
+          type: string
+        points:
+          type: integer
+          minimum: 1
+          maximum: 100
+        display_order:
+          type: integer
+        required:
+          type: boolean
+        mcq:
+          type: object
+          nullable: true
+          description: "MCQ payload (with `is_correct` flags + explainers)."
+          properties:
+            options:
+              type: array
+              items:
+                type: object
+                properties:
+                  option_id:  { type: string, format: uuid }
+                  label:      { type: string }
+                  text:       { type: string }
+                  is_correct: { type: boolean }
+                  explainer:  { type: string }
+            scoring:
+              type: object
+              properties:
+                mode:
+                  type: string
+                  enum: [single_correct, multi_correct, all_or_nothing]
+                partial_credit_policy:
+                  type: string
+                  enum: [none, proportional]
+            shuffle_options:
+              type: boolean
+        oe:
+          type: object
+          nullable: true
+          description: "OE payload (with `model_answer` + `rubric`)."
+          properties:
+            model_answer: { type: string }
+            rubric:
+              type: array
+              items:
+                type: object
+                properties:
+                  criterion_id: { type: string }
+                  title:        { type: string }
+                  description:  { type: string }
+                  weight:
+                    type: number
+                    minimum: 0
+                    maximum: 1
+            min_response_chars: { type: integer }
+            max_response_chars: { type: integer }
+
+    AssessmentMonitor:
+      type: object
+      description: |
+        Realtime monitoring dashboard data. Per-question pass rates computed
+        only post-grading.
+      required:
+        - assessment_id
+        - state
+        - total_invited
+        - total_started
+        - total_submitted
+        - total_graded
+        - in_progress_count
+        - total_released
+      properties:
+        assessment_id:
+          type: string
+          format: uuid
+        state:
+          $ref: "#/components/schemas/AssessmentState"
+        total_invited:
+          type: integer
+          minimum: 0
+        total_started:
+          type: integer
+          minimum: 0
+        total_submitted:
+          type: integer
+          minimum: 0
+        total_graded:
+          type: integer
+          minimum: 0
+        in_progress_count:
+          type: integer
+          minimum: 0
+          description: "Number of learners currently with IN_PROGRESS submissions."
+        total_released:
+          type: integer
+          minimum: 0
+        average_score_percent:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 100
+          nullable: true
+          description: "Null until at least one submission is GRADED."
+        median_score_percent:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 100
+          nullable: true
+        passed_count:
+          type: integer
+          minimum: 0
+          nullable: true
+        failed_count:
+          type: integer
+          minimum: 0
+          nullable: true
+        per_question_pass_rate:
+          type: array
+          description: "Per-question pass rates; empty during OPEN/CLOSED."
+          items:
+            type: object
+            required: [test_set_question_id, question_id, pass_rate, answered_count]
+            properties:
+              test_set_question_id:
+                type: string
+                format: uuid
+              question_id:
+                type: string
+                format: uuid
+              pass_rate:
+                type: number
+                format: float
+                minimum: 0
+                maximum: 1
+                description: "Fraction of learners who scored ≥50% on this question."
+              answered_count:
+                type: integer
+                minimum: 0
+
+    # -- Submission aggregate --
+
+    Submission:
+      type: object
+      required:
+        - submission_id
+        - assessment_id
+        - learner_gcid
+        - tenant_id
+        - state
+        - attempt_number
+        - started_at
+        - answers
+      properties:
+        submission_id:
+          type: string
+          format: uuid
+        assessment_id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        learner_gcid:
+          type: string
+          format: uuid
+        attempt_number:
+          type: integer
+          minimum: 1
+        state:
+          $ref: "#/components/schemas/SubmissionState"
+        opens_at:
+          type: string
+          format: date-time
+          description: "Window start (snapshot of parent assessment scheduled_open_at + per-learner accommodations)."
+        closes_at:
+          type: string
+          format: date-time
+          description: "Window end (includes any extra_time_minutes)."
+        time_limit_seconds:
+          type: integer
+          minimum: 0
+          description: "Computed total time available (closes_at - opens_at)."
+        time_remaining_seconds:
+          type: integer
+          minimum: 0
+          description: "Computed remaining; 0 once submitted/closed."
+        started_at:
+          type: string
+          format: date-time
+        submitted_at:
+          type: string
+          format: date-time
+          nullable: true
+        last_saved_at:
+          type: string
+          format: date-time
+          nullable: true
+        answers:
+          type: array
+          items:
+            $ref: "#/components/schemas/SubmissionAnswer"
+        review_status:
+          allOf:
+            - $ref: "#/components/schemas/ReviewStatus"
+          description: |
+            HITL gate (ADR-172 §D6). Present once OE grading has landed.
+            PENDING_REVIEW until an instructor approves; APPROVED gates release.
+            Absent/ignored for MCQ-only submissions (no OE grading gate).
+        approved_by_gcid:
+          type: string
+          format: uuid
+          nullable: true
+          description: "Instructor who approved this submission's grading."
+        approved_at:
+          type: string
+          format: date-time
+          nullable: true
+        overall_comment:
+          type: string
+          nullable: true
+          description: "Whole-assessment narrative (ADR-172 §D5); current value (AI-drafted or instructor-edited)."
+        overall_comment_provenance:
+          allOf:
+            - $ref: "#/components/schemas/Provenance"
+          description: "AI by default; HUMAN once an instructor edits the overall comment."
+
+    SubmissionAnswer:
+      type: object
+      required: [test_set_question_id, question_id]
+      description: |
+        One row per question. `mcq_choice_id` is set for MCQs;
+        `oe_response_text` for OE. Both nullable so partial autosave is
+        possible without rejecting on incomplete payloads.
+      properties:
+        test_set_question_id:
+          type: string
+          format: uuid
+        question_id:
+          type: string
+          format: uuid
+        mcq_choice_id:
+          type: string
+          nullable: true
+          description: "Single-correct: option_id selected (opaque string — positional letters A/B/C/D today; not a UUID). Null when unanswered or for OE."
+        mcq_choice_ids:
+          type: array
+          nullable: true
+          description: "Multi-correct: option_ids selected (opaque strings). Null when single-correct."
+          items:
+            type: string
+        oe_response_text:
+          type: string
+          nullable: true
+          maxLength: 8000
+        answered_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: "Stamp of last write for this question."
+
+    # -- Request payloads --
+
+    CreateAssessmentRequest:
+      type: object
+      required: [test_set_id, max_attempts]
+      description: |
+        ADR-155 §D8 demo simplification: `scheduled_open_at` +
+        `scheduled_close_at` are OPTIONAL. When omitted, BE synthesises an
+        open-link window `[now, now+24h]` and auto-publishes the assessment
+        (DRAFT → SCHEDULED → OPEN in a single POST). When provided, BE
+        validates `close > open` and keeps DRAFT until an explicit publish.
+      properties:
+        test_set_id:
+          type: string
+          format: uuid
+        title_override:
+          type: string
+          maxLength: 256
+          description: "Optional; falls back to test-set title."
+        learner_facing_name_override:
+          type: string
+          maxLength: 256
+        scheduled_open_at:
+          type: string
+          format: date-time
+          description: |
+            Optional. Omit to trigger demo auto-publish per ADR-155 §D8 —
+            BE synthesises `[now, now+24h]` and flips state to OPEN
+            immediately. Provide together with `scheduled_close_at` to keep
+            the assessment DRAFT pending an explicit publish call.
+        scheduled_close_at:
+          type: string
+          format: date-time
+          description: |
+            Optional. See `scheduled_open_at` for omission semantics. Must be
+            strictly after `scheduled_open_at` when both are provided.
+        max_attempts:
+          type: integer
+          minimum: 1
+          maximum: 3
+        shuffle_questions:
+          type: boolean
+          default: false
+        shuffle_mcq_options:
+          type: boolean
+          default: false
+          description: |
+            Anti-cheat: when true, each learner sees the MCQ options in a
+            per-learner scrambled order (the correct answer isn't always in
+            the same slot). Default false — options keep their authored order
+            (owner decision 2026-06-21, reverses the 2026-06-20 default-on).
+            Grading is option_id-based, so scrambling never affects marking.
+        accommodations:
+          $ref: "#/components/schemas/Accommodations"
+        class_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: "Optional binding; null = freestanding."
+        invited_gcids:
+          type: array
+          nullable: true
+          maxItems: 10000
+          description: |
+            Optional explicit cohort. See top-level §"Cohort scoping" for
+            the 4 eligibility modes (open-link / class-bound / explicit /
+            intersection).
+          items:
+            type: string
+            format: uuid
+        grading_config_override:
+          type: object
+          description: |
+            Optional partial override of the test-set's default_grading_config.
+            Only `passing_threshold_percent` / `per_question_feedback_enabled` /
+            `auto_release` are overridable per instance — `mcq_dispatch` +
+            `oe_dispatch` + `llm_evaluator_model_tier` are tenant-level
+            commitments and cannot be flipped at instance time.
+          properties:
+            passing_threshold_percent:
+              type: integer
+              minimum: 0
+              maximum: 100
+            per_question_feedback_enabled:
+              type: boolean
+            auto_release:
+              type: boolean
+
+    UpdateAssessmentRequest:
+      type: object
+      description: "Partial — only fields present are updated. State guard: DRAFT or SCHEDULED only."
+      properties:
+        title:
+          type: string
+          maxLength: 256
+        learner_facing_name:
+          type: string
+          maxLength: 256
+        scheduled_open_at:
+          type: string
+          format: date-time
+        scheduled_close_at:
+          type: string
+          format: date-time
+        max_attempts:
+          type: integer
+          minimum: 1
+          maximum: 3
+        shuffle_questions:
+          type: boolean
+        shuffle_mcq_options:
+          type: boolean
+        accommodations:
+          $ref: "#/components/schemas/Accommodations"
+        invited_gcids:
+          type: array
+          nullable: true
+          maxItems: 10000
+          description: |
+            Update the explicit cohort. To CLEAR the cohort (open it back up),
+            pass an empty array []. To LEAVE UNCHANGED, omit the field entirely.
+            Null is reserved for explicit "no cohort scoping" (= class-bound or
+            open-link). State guard: DRAFT or SCHEDULED only; no edits after
+            first submission.
+          items:
+            type: string
+            format: uuid
+        grading_config_override:
+          type: object
+          properties:
+            passing_threshold_percent:
+              type: integer
+              minimum: 0
+              maximum: 100
+            per_question_feedback_enabled:
+              type: boolean
+            auto_release:
+              type: boolean
+
+    AutosaveRequest:
+      type: object
+      required: [answers]
+      properties:
+        answers:
+          type: array
+          minItems: 1
+          maxItems: 200
+          items:
+            type: object
+            required: [test_set_question_id, question_id]
+            properties:
+              test_set_question_id:
+                type: string
+                format: uuid
+              question_id:
+                type: string
+                format: uuid
+              mcq_choice_id:
+                type: string
+                nullable: true
+              mcq_choice_ids:
+                type: array
+                nullable: true
+                items:
+                  type: string
+              oe_response_text:
+                type: string
+                nullable: true
+                maxLength: 8000
+
+    # -- Response payloads (instructor) --
+
+    AssessmentListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Assessment"
+        next_page_token:
+          type: string
+          nullable: true
+        total:
+          type: integer
+          nullable: true
+          minimum: 0
+
+    SubmissionListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Submission"
+        next_page_token:
+          type: string
+          nullable: true
+
+    # -- Response payloads (learner) --
+
+    LearnerAssessmentSummary:
+      type: object
+      description: "Light projection for the learner's assessment list."
+      required:
+        - assessment_id
+        - title
+        - state
+        - scheduled_open_at
+        - scheduled_close_at
+        - max_attempts
+        - learner_attempt_count
+        - learner_remaining_attempts
+      properties:
+        assessment_id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        learner_facing_name:
+          type: string
+          nullable: true
+        state:
+          $ref: "#/components/schemas/AssessmentState"
+        scheduled_open_at:
+          type: string
+          format: date-time
+        scheduled_close_at:
+          type: string
+          format: date-time
+        max_attempts:
+          type: integer
+        learner_attempt_count:
+          type: integer
+          minimum: 0
+        learner_remaining_attempts:
+          type: integer
+          minimum: 0
+        learner_latest_submission_state:
+          $ref: "#/components/schemas/SubmissionState"
+        learner_latest_submission_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            UUID of the learner's most-recent submission for this assessment
+            (highest attempt_number). Absent / null when
+            `learner_attempt_count === 0`. Populated by chora-delivery's
+            `SubmissionRepo.FindLatestByLearner` so the FE "View result"
+            CTA can deep-link straight to
+            `/a/me/assessments/{id}/result/{learner_latest_submission_id}`
+            without a second round-trip. See
+            E2E-BE-RESULT-LINK-SUBMISSION-ID.
+        question_count:
+          type: integer
+          minimum: 0
+        total_points:
+          type: integer
+          minimum: 0
+        time_limit_seconds:
+          type: integer
+          minimum: 0
+
+    LearnerAssessmentListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/LearnerAssessmentSummary"
+        next_page_token:
+          type: string
+          nullable: true
+
+    LearnerAssessmentDetail:
+      type: object
+      description: |
+        Learner-facing assessment detail. LearnerSafe projection of the
+        test-set: question prompts + options ONLY (no `is_correct`, no
+        `model_answer`, no rubric).
+      allOf:
+        - $ref: "#/components/schemas/LearnerAssessmentSummary"
+        - type: object
+          required: [questions]
+          properties:
+            questions:
+              type: array
+              items:
+                $ref: "#/components/schemas/LearnerQuestion"
+
+    LearnerQuestion:
+      type: object
+      description: "LearnerSafe projection — no answer keys."
+      required:
+        - test_set_question_id
+        - question_id
+        - question_type
+        - prompt
+        - points_possible
+        - display_order
+      properties:
+        test_set_question_id:
+          type: string
+          format: uuid
+        question_id:
+          type: string
+          format: uuid
+        question_type:
+          type: string
+          enum: [mcq, oe]
+        prompt:
+          description: |
+            LearnerSafe prompt. Legacy builds shipped a bare string; the
+            current BE ships the nested envelope `{ stem, options?, image_url?,
+            ... }` (LEG3-D R5). `image_url` is the OPTIONAL W8 stem
+            illustration shown WHILE taking the assessment (the question's
+            accompanying picture — learner-safe, never the answer key). Field
+            name is IDENTICAL across every layer.
+          oneOf:
+            - type: string
+            - type: object
+              required: [stem]
+              properties:
+                stem:
+                  type: string
+                image_url:
+                  type: string
+                  nullable: true
+                  description: "OPTIONAL W8 stem illustration (learner-safe)."
+                options:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      option_id: { type: string, format: uuid }
+                      label:     { type: string }
+                      text:      { type: string }
+                scoring_mode:
+                  type: string
+                  enum: [single_correct, multi_correct, all_or_nothing]
+        points_possible:
+          type: integer
+          minimum: 1
+          maximum: 100
+        display_order:
+          type: integer
+        required:
+          type: boolean
+        mcq:
+          type: object
+          nullable: true
+          description: "LearnerSafe MCQ — NO is_correct, NO explainer."
+          properties:
+            options:
+              type: array
+              items:
+                type: object
+                properties:
+                  option_id: { type: string, format: uuid }
+                  label:     { type: string }
+                  text:      { type: string }
+            scoring_mode:
+              type: string
+              enum: [single_correct, multi_correct, all_or_nothing]
+            shuffle_options:
+              type: boolean
+        oe:
+          type: object
+          nullable: true
+          description: "LearnerSafe OE — NO model_answer, NO rubric."
+          properties:
+            min_response_chars:
+              type: integer
+            max_response_chars:
+              type: integer
+
+    SubmissionStartedResponse:
+      type: object
+      required: [submission_id, opens_at, closes_at, time_limit_seconds]
+      properties:
+        submission_id:
+          type: string
+          format: uuid
+        attempt_number:
+          type: integer
+          minimum: 1
+        opens_at:
+          type: string
+          format: date-time
+        closes_at:
+          type: string
+          format: date-time
+        time_limit_seconds:
+          type: integer
+          minimum: 0
+        idempotent_replay:
+          type: boolean
+          description: "True when replaying an existing IN_PROGRESS submission."
+
+    SubmissionSubmittedResponse:
+      type: object
+      required: [submission_id, state, grading_job_id]
+      properties:
+        submission_id:
+          type: string
+          format: uuid
+        state:
+          $ref: "#/components/schemas/SubmissionState"
+        grading_job_id:
+          type: string
+          format: uuid
+          description: "UUIDv7 of the dispatched grading job. FE may track but does not poll directly — grading is event-driven."
+        grading_eta_seconds:
+          type: integer
+          minimum: 0
+          nullable: true
+          description: "Server-estimated time to GRADED. MCQ-only: ~1s. OE-batched: 30-120s typical."
+
+    # -- Learner result envelope (discriminated by `state`) --
+
+    MySubmissionResultResponse:
+      type: object
+      required: [state]
+      description: |
+        Discriminated response: `state=PENDING_RELEASE` envelopes lack
+        `result` but carry `oe_batch_pending` so the FE pending-screen can
+        decide between "graded, awaiting release" vs "OE still grading";
+        `state=RELEASED` envelopes include the full `SubmissionResult`
+        (with `breakdown` aggregate + `mcq_post_grade.options[]` reveal).
+
+        IN_PROGRESS submissions are NOT returned by this endpoint — they
+        return 409 with `DELIVERY_SUBMISSION_IN_PROGRESS` so the FE can
+        redirect to `GET .../submissions/{id}` for rehydrate.
+      properties:
+        state:
+          type: string
+          enum: [PENDING_RELEASE, RELEASED]
+        message:
+          type: string
+          description: "Localised message when state=PENDING_RELEASE."
+        oe_batch_pending:
+          type: boolean
+          description: |
+            LEG5-A. True when one or more OE answers are awaiting batch
+            grading (submission state == PENDING_OE_GRADING). False
+            otherwise (including MCQ-only submissions in
+            GRADED_PENDING_RELEASE). Always present when
+            state=PENDING_RELEASE.
+        result:
+          $ref: "#/components/schemas/SubmissionResult"
+
+    SubmissionResult:
+      type: object
+      description: "Released grading result for the learner."
+      required:
+        - submission_id
+        - total_points_earned
+        - total_points_possible
+        - passing_threshold_percent
+        - passed
+        - per_question_grades
+      properties:
+        submission_id:
+          type: string
+          format: uuid
+        total_points_earned:
+          type: number
+          format: float
+          minimum: 0
+        total_points_possible:
+          type: integer
+          minimum: 0
+        passing_threshold_percent:
+          type: integer
+          minimum: 0
+          maximum: 100
+        passed:
+          type: boolean
+        breakdown:
+          $ref: "#/components/schemas/SubmissionResultBreakdown"
+        per_question_grades:
+          type: array
+          items:
+            $ref: "#/components/schemas/LearnerQuestionGrade"
+        instructor_comment:
+          type: string
+          nullable: true
+          maxLength: 500
+          description: "Echo of parent assessment's release_announcement."
+        overall_comment:
+          type: string
+          nullable: true
+          description: |
+            Whole-assessment narrative comment for this candidate (ADR-172
+            §D5) — AI-drafted, instructor-editable, learner-visible. Spans
+            MCQ + OE (score achieved + themes to improve).
+        overall_comment_provenance:
+          allOf:
+            - $ref: "#/components/schemas/Provenance"
+          description: "AI by default; HUMAN once an instructor edits it. Drives the result-screen badge."
+        released_at:
+          type: string
+          format: date-time
+
+    SubmissionResultBreakdown:
+      type: object
+      description: |
+        E2E-BE-4 aggregate breakdown for the FE result-screen header row.
+        Counts derived deterministically from `per_question_grades[]`.
+      required: [mcq_correct_count, mcq_total, oe_graded_count, oe_total, oe_pending_count]
+      properties:
+        mcq_correct_count:
+          type: integer
+          minimum: 0
+        mcq_total:
+          type: integer
+          minimum: 0
+        oe_graded_count:
+          type: integer
+          minimum: 0
+        oe_total:
+          type: integer
+          minimum: 0
+        oe_pending_count:
+          type: integer
+          minimum: 0
+          description: |
+            OE answers awaiting batch grading at release time (instructor
+            elected to release early). FE may render an "OE grading
+            in progress" placeholder row per question.
+
+    LearnerQuestionGrade:
+      type: object
+      description: |
+        Per-question grade visible to the learner post-release. Includes
+        correct flags + the question's full answer key projection
+        (`mcq.options[].is_correct` + `oe.model_answer` + `oe.rubric`) so
+        the learner can see WHY they got it right/wrong.
+      required:
+        - test_set_question_id
+        - question_id
+        - question_type
+        - points_earned
+        - points_possible
+        - grading_dispatch
+      properties:
+        test_set_question_id:
+          type: string
+          format: uuid
+        question_id:
+          type: string
+          format: uuid
+        question_type:
+          type: string
+          enum: [mcq, oe]
+        points_earned:
+          type: number
+          format: float
+          minimum: 0
+        points_possible:
+          type: integer
+          minimum: 1
+          maximum: 100
+        correct:
+          type: boolean
+          nullable: true
+          description: "MCQ only."
+        grading_dispatch:
+          type: string
+          enum: [DETERMINISTIC, LLM_EVALUATOR]
+        learner_answer:
+          type: object
+          description: "Echo of the learner's submitted answer (for FE re-render)."
+          properties:
+            mcq_choice_id:
+              type: string
+              nullable: true
+            mcq_choice_ids:
+              type: array
+              nullable: true
+              items:
+                type: string
+            oe_response_text:
+              type: string
+              nullable: true
+        mcq_post_grade:
+          type: object
+          nullable: true
+          description: "MCQ-only post-grade projection (now safe to send is_correct + explainer)."
+          properties:
+            options:
+              type: array
+              items:
+                type: object
+                properties:
+                  option_id:   { type: string, format: uuid }
+                  label:       { type: string }
+                  text:        { type: string }
+                  is_correct:  { type: boolean }
+                  explainer:   { type: string, nullable: true }
+            answer_image_url:
+              type: string
+              nullable: true
+              description: |
+                OPTIONAL W8 model-answer illustration revealed in the result
+                alongside the answer reveal. Field name is IDENTICAL across
+                every layer (snapshot json tag → DTO → FE model → template).
+        oe_post_grade:
+          type: object
+          nullable: true
+          description: "OE-only post-grade projection (model answer + rubric + criterion scores + LLM feedback)."
+          properties:
+            model_answer:
+              type: string
+            rubric:
+              type: array
+              items:
+                type: object
+                properties:
+                  criterion_id: { type: string }
+                  title:        { type: string }
+                  description:  { type: string }
+                  weight:       { type: number }
+            criterion_scores:
+              type: array
+              items:
+                type: object
+                properties:
+                  criterion_id: { type: string }
+                  title:        { type: string }
+                  score:        { type: number, format: float }
+                  max_score:    { type: number, format: float }
+                  feedback:
+                    type: string
+                    nullable: true
+            llm_evaluator_feedback:
+              type: string
+              nullable: true
+              description: "Surfaced only when grading_config.per_question_feedback_enabled=true."
+            comment:
+              type: string
+              nullable: true
+              description: |
+                Per-question grader comment — ALWAYS present for a graded OE
+                answer (right or wrong), ADR-172 §D4. Markdown.
+            comment_provenance:
+              allOf:
+                - $ref: "#/components/schemas/Provenance"
+              description: "AI by default; HUMAN once an instructor edits this comment. Drives the 'AI comments' / 'Human reviewer' badge."
+
+    # -- HITL grading review (ADR-172) --
+
+    Provenance:
+      type: string
+      description: "Authorship of a grading artifact. Drives AI/Human badges."
+      enum: [AI, HUMAN]
+
+    ReviewStatus:
+      type: string
+      description: "Per-submission HITL gate state (ADR-172 §D6)."
+      enum: [PENDING_REVIEW, APPROVED]
+
+    GradingReviewDetail:
+      type: object
+      description: "Instructor grading-review view for one submission (R+ grading queue)."
+      required:
+        - submission_id
+        - assessment_id
+        - learner_gcid
+        - state
+        - review_status
+        - total_points_earned
+        - total_points_possible
+        - passing_threshold_percent
+        - questions
+      properties:
+        submission_id: { type: string, format: uuid }
+        assessment_id: { type: string, format: uuid }
+        learner_gcid:  { type: string, format: uuid }
+        attempt_number: { type: integer, minimum: 1 }
+        state:
+          $ref: "#/components/schemas/SubmissionState"
+        review_status:
+          $ref: "#/components/schemas/ReviewStatus"
+        total_points_earned: { type: number, format: float, minimum: 0 }
+        total_points_possible: { type: integer, minimum: 0 }
+        passing_threshold_percent: { type: integer, minimum: 0, maximum: 100 }
+        passed: { type: boolean, nullable: true }
+        overall_comment:
+          type: string
+          nullable: true
+        ai_overall_comment:
+          type: string
+          nullable: true
+          description: "Original AI-drafted overall comment (preserved when a human edits)."
+        overall_comment_provenance:
+          $ref: "#/components/schemas/Provenance"
+        approved_by_gcid: { type: string, format: uuid, nullable: true }
+        approved_at: { type: string, format: date-time, nullable: true }
+        questions:
+          type: array
+          items:
+            $ref: "#/components/schemas/GradingReviewQuestion"
+
+    GradingReviewQuestion:
+      type: object
+      description: |
+        One question in the instructor review. For OE: current vs original-AI
+        score/comment + provenance + per-criterion scores + quality flag. For
+        MCQ: deterministic outcome (read-only — not editable).
+      required:
+        - test_set_question_id
+        - question_id
+        - question_type
+        - points_earned
+        - points_possible
+        - grading_dispatch
+      properties:
+        test_set_question_id: { type: string, format: uuid }
+        question_id: { type: string, format: uuid }
+        question_type:
+          type: string
+          enum: [mcq, oe]
+        display_order: { type: integer, minimum: 0 }
+        prompt: { type: string }
+        grading_dispatch:
+          type: string
+          enum: [DETERMINISTIC, LLM_EVALUATOR]
+        points_earned: { type: number, format: float, minimum: 0 }
+        points_possible: { type: integer, minimum: 1, maximum: 100 }
+        ai_points_earned:
+          type: number
+          format: float
+          nullable: true
+          description: "Original AI composite (preserved when a human overrides the score)."
+        score_provenance:
+          $ref: "#/components/schemas/Provenance"
+        correct:
+          type: boolean
+          nullable: true
+          description: "MCQ deterministic outcome."
+        learner_answer:
+          type: object
+          properties:
+            mcq_choice_id: { type: string, nullable: true }
+            mcq_choice_ids:
+              type: array
+              nullable: true
+              items: { type: string }
+            oe_response_text: { type: string, nullable: true }
+        comment:
+          type: string
+          nullable: true
+          description: "Current per-question grader comment (ALWAYS present for graded OE)."
+        ai_comment:
+          type: string
+          nullable: true
+          description: "Original AI comment (preserved when a human edits)."
+        comment_provenance:
+          $ref: "#/components/schemas/Provenance"
+        quality_flagged:
+          type: boolean
+          description: "True when the evaluator→moderator loop exhausted retries — priority review."
+        criterion_scores:
+          type: array
+          items:
+            type: object
+            properties:
+              criterion_id: { type: string }
+              title: { type: string }
+              score: { type: number, format: float }
+              max_score: { type: number, format: float }
+              feedback: { type: string, nullable: true }
+        model_answer:
+          type: string
+          nullable: true
+          description: "Current canonical model answer (snapshot or instructor-amended)."
+        ai_model_answer:
+          type: string
+          nullable: true
+          description: "Original snapshot model answer (preserved when a human amends)."
+        model_answer_provenance:
+          $ref: "#/components/schemas/Provenance"
+        rubric:
+          type: array
+          items:
+            type: object
+            properties:
+              criterion_id: { type: string }
+              title: { type: string }
+              description: { type: string }
+              weight: { type: number }
+
+    EditGradesRequest:
+      type: object
+      required: [question_edits]
+      properties:
+        question_edits:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [test_set_question_id]
+            properties:
+              test_set_question_id: { type: string, format: uuid }
+              points_earned:
+                type: number
+                format: float
+                minimum: 0
+                nullable: true
+                description: "New score (≤ points_possible). Omit to leave unchanged."
+              comment:
+                type: string
+                nullable: true
+                description: "New per-question comment. Omit to leave unchanged."
+              model_answer:
+                type: string
+                nullable: true
+                description: "Corrected canonical model answer. Present → also emits model_answer_amended.v1 (→ chora-creation)."
+              reason:
+                type: string
+                nullable: true
+                maxLength: 500
+                description: "Optional override rationale (recorded in the grade_overrides audit)."
+
+    EditOverallCommentRequest:
+      type: object
+      required: [overall_comment]
+      properties:
+        overall_comment:
+          type: string
+          maxLength: 4000
+        reason:
+          type: string
+          nullable: true
+          maxLength: 500
+
+    ApproveAllRequest:
+      type: object
+      properties:
+        release:
+          type: boolean
+          default: false
+          description: "When true, chain directly to release-results (approve-and-release)."
+        release_announcement:
+          type: string
+          maxLength: 500
+          nullable: true
+          description: "Only used when release=true."
+
+    ApproveAllResponse:
+      type: object
+      required: [assessment_id, approved_submission_count, released]
+      properties:
+        assessment_id: { type: string, format: uuid }
+        approved_submission_count: { type: integer, minimum: 0 }
+        skipped_submission_ids:
+          type: array
+          items: { type: string, format: uuid }
+          description: "Submissions skipped (still PENDING_OE_GRADING / not graded)."
+        released: { type: boolean }
+
+    # -- Errors --
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:    { type: string }
+            message: { type: string }
+            correlation_id:
+              type: string
+              format: uuid
+            details:
+              type: object
+
+  responses:
+    BadRequest:
+      description: "Malformed request."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unauthorized:
+      description: "Missing or invalid bearer token."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: "Resource not found."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ValidationError:
+      description: "Validation failed."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"

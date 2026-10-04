@@ -1,0 +1,169 @@
+// =============================================================================
+// chora.tenancy.v1 — Tenant Mana Allocation events
+// =============================================================================
+//
+// Source-of-truth: docs/architecture/adrs/adr-142-per-user-economy-mana.md
+//   (Q2 = v1, tenant subsidy track)
+//   + chora-contracts/openapi/tenancy-admin.yaml v1.2
+//
+// Owning domain : Tenancy + Billing (chora_tenancy database)
+// Owning team   : Team 3 (Platform)
+// Topic prefix  : chora.tenancy.tenant_mana_allocation.*
+//
+// TenantManaAllocation is the append-only audit row written by
+// chora-tenancy when a tenant's pool grants mana to a specific learner.
+// chora-identity consumes `granted` events and credits the learner's
+// UserMana wallet (reason=tenant_subsidy); on first debit hitting the
+// allocation, chora-identity emits its own UserManaDebited which loops
+// back to chora-tenancy as a `claimed` transition.
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.tenancy.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/tenancy/v1;tenancyv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// AllocationStatus — TenantManaAllocation lifecycle.
+// -----------------------------------------------------------------------------
+enum AllocationStatus {
+  ALLOCATION_STATUS_UNSPECIFIED = 0;
+  ALLOCATION_STATUS_PENDING = 1;
+  ALLOCATION_STATUS_CLAIMED = 2;
+  ALLOCATION_STATUS_EXPIRED = 3;
+  ALLOCATION_STATUS_REVOKED = 4;
+}
+
+// -----------------------------------------------------------------------------
+// AllocationReason — why an allocation was issued.
+// -----------------------------------------------------------------------------
+enum AllocationReason {
+  ALLOCATION_REASON_UNSPECIFIED = 0;
+  ALLOCATION_REASON_MANUAL = 1;
+  ALLOCATION_REASON_ON_ENROLLMENT = 2;
+  ALLOCATION_REASON_EQUAL_SPLIT = 3;
+  ALLOCATION_REASON_TIER_BASED = 4;
+  ALLOCATION_REASON_PROMO = 5;
+}
+
+// -----------------------------------------------------------------------------
+// TenantManaAllocationGranted — chora.tenancy.tenant_mana_allocation.granted.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a tenant admin or auto-allocation policy issues mana to a
+// specific learner from the tenant's pool. Debits the pool atomically
+// with the event publish. chora-identity consumes and credits the
+// learner's UserMana wallet (UserManaCredited; reason=tenant_subsidy).
+message TenantManaAllocationGranted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — TenantManaAllocation row.
+  string allocation_id = 2;
+
+  string tenant_id = 3;
+
+  // Recipient learner GCID.
+  string gcid = 4;
+
+  // Source pool ID.
+  string source_pool_id = 5;
+
+  // Mana units granted (>= 1).
+  int64 units = 6;
+
+  AllocationReason allocation_reason = 7;
+
+  // GCID of the admin (manual) or empty for auto-policy.
+  string allocated_by_gcid = 8;
+
+  // Optional expiry (e.g., end of training cohort).
+  google.protobuf.Timestamp expires_at = 9;
+
+  google.protobuf.Timestamp allocated_at = 10;
+}
+
+// -----------------------------------------------------------------------------
+// TenantManaAllocationClaimed — chora.tenancy.tenant_mana_allocation.claimed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when chora-identity acks the FIRST debit hitting the
+// allocation (i.e., the learner spends from this slice). Idempotent on
+// allocation_id — repeats are no-ops.
+message TenantManaAllocationClaimed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string allocation_id = 2;
+  string tenant_id = 3;
+  string gcid = 4;
+
+  // The first ledger entry_id that drained from this allocation
+  // (cross-link back to chora_identity mana_ledger).
+  string first_debit_entry_id = 5;
+
+  // Optional remaining slice units after this first debit.
+  int64 remaining_units = 6;
+
+  google.protobuf.Timestamp claimed_at = 7;
+}
+
+// -----------------------------------------------------------------------------
+// TenantManaAllocationRevoked — chora.tenancy.tenant_mana_allocation.revoked.v1
+// -----------------------------------------------------------------------------
+//
+// Published when an allocation is revoked (admin action, learner offboarding
+// from tenant). If status was PENDING, the allocated units revert to the
+// pool atomically with this event publish; CLAIMED units stay (already
+// debited).
+message TenantManaAllocationRevoked {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string allocation_id = 2;
+  string tenant_id = 3;
+  string gcid = 4;
+
+  // Whether the units were returned to the pool (true only when prior
+  // status was PENDING).
+  bool units_returned_to_pool = 5;
+
+  // Units returned to pool (0 when units_returned_to_pool=false).
+  int64 returned_units = 6;
+
+  // Free-text reason (max 512 chars).
+  string reason = 7;
+
+  // GCID of the actor revoking.
+  string revoked_by_gcid = 8;
+
+  google.protobuf.Timestamp revoked_at = 9;
+}
+
+// -----------------------------------------------------------------------------
+// TenantManaAllocationExpired — chora.tenancy.tenant_mana_allocation.expired.v1
+// -----------------------------------------------------------------------------
+//
+// Published by the housekeeping job when an allocation crosses its
+// `expires_at`. Behaves like a system-driven revocation: pending units
+// revert to the pool; claimed units stay.
+message TenantManaAllocationExpired {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string allocation_id = 2;
+  string tenant_id = 3;
+  string gcid = 4;
+
+  // Whether the units were returned to the pool (true if any units
+  // remained unclaimed at expiry).
+  bool units_returned_to_pool = 5;
+
+  // Units returned to pool.
+  int64 returned_units = 6;
+
+  google.protobuf.Timestamp expires_at = 7;
+  google.protobuf.Timestamp expired_at = 8;
+}

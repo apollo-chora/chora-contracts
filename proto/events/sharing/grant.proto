@@ -1,0 +1,177 @@
+// =============================================================================
+// Chora Content Sharing — Atom Usage Grant + Royalty events (Atom Sharing Redesign)
+// =============================================================================
+//
+// Source-of-truth:
+//   - docs/design/atom-sharing-redesign/chora-sharing-full-design.md §4.2, §12 + App B
+//   - specs/001-atom-sharing-redesign/contracts/events-flat.md (T002)
+//   - .claude/rules/ddd-enforcement.md (Atom-Centric; cross-domain refs are
+//     UUID with no FK — validated via Pub/Sub + gRPC)
+//   - chora-contracts/CLAUDE.md §2 topic taxonomy
+//
+// Owning domain  : Content Sharing (chora_sharing database)
+// Owning team    : Team 1 (Content)
+// Topic prefix   : chora.sharing.atom.licensed.v1 / atom.revoked.v1 /
+//                  royalty.settled.v1
+// Surface        : C+ Connect+ (and inter-service: creation, delivery)
+//
+// Aggregate root : AtomUsageGrant (the only genuinely-new sharing aggregate
+//                  for this feature — the licensing record). Created lazily
+//                  when an atom is pulled into a real reuse target. NEW
+//                  tables atom_usage_grants + grant_events (migration 0028).
+//                  Idempotency via the existing idempotency_keys table (0025).
+//
+// R1 (author stays the original): owner_gcid is the author; travels via the
+//   grant snapshot. R2 (author decides licensing per atom): license_terms are
+//   FROZEN at grant time onto license_terms_snapshot (dispute-proof) — an
+//   author price-change does NOT alter existing grants.
+//
+// RoyaltySettlement is double-entry accrual: debit the reuser's tenant,
+// credit the author. Idempotent on source_event_id. Real-money payout is
+// DEFERRED (R-05); currency=mana accrual for now.
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.sharing.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/sharing/v1;sharingv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+// LicenseTerms + RoyaltyRate are defined in atom_share.proto (the share is
+// the origin of per-atom licensing per R2) and reused here. protoflatten
+// inlines them into each flat event proto.
+import "events/sharing/atom_share.proto";
+
+// GrantScope — the real reuse target (R-18). MUST stay in sync with the
+// GrantScope enum in proto/services/sharing/v1/sharing.proto.
+enum GrantScope {
+  GRANT_SCOPE_UNSPECIFIED = 0;
+  GRANT_SCOPE_TEST_SET = 1;
+  GRANT_SCOPE_DUEL = 2;
+  GRANT_SCOPE_LIVE_QUIZ = 3;
+  GRANT_SCOPE_COLLECTION = 4;
+  GRANT_SCOPE_UNLIMITED = 5;
+}
+
+// -----------------------------------------------------------------------------
+// AtomLicensed — chora.sharing.atom.licensed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when an AtomUsageGrant is created (or an existing active grant is
+// returned idempotently on re-call). license_terms_snapshot is FROZEN at grant
+// time — an author price-change does not alter it. Consumers: chora-creation
+// (records grant_id on the delivery test_set item), Observability.
+//
+// Topic: chora.sharing.atom.licensed.v1
+message AtomLicensed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string grant_id = 2;
+
+  // The AUTHOR (R1).
+  string owner_gcid = 3;
+
+  // The reuser.
+  string grantee_gcid = 4;
+
+  string atom_id = 5;
+
+  // Pinned at grant time (immutable).
+  string atom_revision_id = 6;
+
+  GrantScope scope = 7;
+
+  // Frozen at grant time (dispute-proof).
+  LicenseTerms license_terms_snapshot = 8;
+
+  RoyaltyRate royalty_rate_snapshot = 9;
+}
+
+// -----------------------------------------------------------------------------
+// AtomGrantRevoked — chora.sharing.atom.revoked.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a grant is revoked (by the author or an admin) — append-only,
+// never a hard-delete (except crypto-shred on closure). The reuser's next
+// AuthorizeAtomUse for this atom will fail loud. Consumers: chora-creation
+// (invalidates the test_set item's grant_id), Observability.
+//
+// Topic: chora.sharing.atom.revoked.v1
+message AtomGrantRevoked {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string grant_id = 2;
+
+  string owner_gcid = 3;
+
+  string grantee_gcid = 4;
+
+  string atom_id = 5;
+
+  // = envelope.gcid (the author/admin).
+  string revoked_by_gcid = 6;
+
+  string reason = 7;
+
+  google.protobuf.Timestamp revoked_at = 8;
+}
+
+// -----------------------------------------------------------------------------
+// RoyaltySettled — chora.sharing.royalty.settled.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a royalty accrues on real reuse (a learner completes an atom
+// session, a duel round is resolved, or a LiveQuiz is ARMED). Double-entry:
+// debit the reuser's tenant, credit the author. IDEMPOTENT on source_event_id
+// (the triggering event) — replays never double-credit. Free licenses incur
+// no debit (no RoyaltySettled event is published for them). Real-money payout
+// is deferred (R-05); currency=mana accrual for now.
+//
+// Topic: chora.sharing.royalty.settled.v1
+message RoyaltySettled {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string settlement_id = 2;
+
+  string grant_id = 3;
+
+  // Credit (the author).
+  string owner_gcid = 4;
+
+  // Debit (the reuser's tenant).
+  string grantee_tenant_id = 5;
+
+  string atom_id = 6;
+
+  double amount = 7;
+
+  RoyaltyCurrency currency = 8;
+
+  RoyaltyUsageContext usage_context = 9;
+
+  // Idempotency: the event that triggered this settlement (e.g., the
+  // atom_session.completed event_id, or the ARM idempotency_key for LiveQuiz).
+  string source_event_id = 10;
+}
+
+// RoyaltyCurrency — settlement currency. Real-money (USD) payout is deferred
+// (R-05); mana is the default accrual currency.
+enum RoyaltyCurrency {
+  ROYALTY_CURRENCY_UNSPECIFIED = 0;
+  ROYALTY_CURRENCY_MANA = 1;
+  ROYALTY_CURRENCY_COINS = 2;
+  ROYALTY_CURRENCY_REPUTATION = 3;
+  ROYALTY_CURRENCY_USD = 4; // deferred — real-money payout not yet wired
+}
+
+// RoyaltyUsageContext — which reuse target triggered the settlement.
+enum RoyaltyUsageContext {
+  ROYALTY_USAGE_CONTEXT_UNSPECIFIED = 0;
+  ROYALTY_USAGE_CONTEXT_TEST_SET = 1;   // delivery test_set (R-18)
+  ROYALTY_USAGE_CONTEXT_DUEL = 2;       // sharing duel round
+  ROYALTY_USAGE_CONTEXT_LIVE_QUIZ = 3; // delivery LiveQuiz (settles at ARM, R-20)
+}

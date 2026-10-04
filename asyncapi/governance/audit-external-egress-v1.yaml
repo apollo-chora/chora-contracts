@@ -1,0 +1,74 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Governance — ExternalEgressAudited (audit)
+  version: 1.0.0
+  description: |
+    First-class IMDA-D2 governance trail for the platform's single controlled
+    web-egress surface — chora-model-gateway's GroundedSearch RPC (Far Sight,
+    ADR-220 / ADR-231 D6). Emitted by chora-model-gateway via the outbox on
+    EVERY grounded call (allowed OR denied), with parity to the payments
+    cross-tenant audit: a governed capability gets its own audit event, not
+    just an OTLP span + token-usage ledger row.
+
+    Privacy: the learner directive is NOT persisted — only its SHA-256 hash
+    (`directive_hash`). The model-issued `web_search_queries` ARE recorded
+    (O+ transparency; model-emitted, not learner PII).
+
+    - Domain: Governance (`chora_governance` DB) — producer: chora-model-gateway
+    - Topic: `chora.governance.audit.external_egress.v1`
+    - Source proto: `proto/events/governance/audit.proto`
+       message `chora.governance.v1.ExternalEgressAudited`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  externalEgressAudited:
+    address: chora.governance.audit.external_egress.v1
+    messages:
+      externalEgressAudited:
+        $ref: '#/components/messages/ExternalEgressAudited'
+
+operations:
+  publishExternalEgressAudited:
+    action: send
+    channel:
+      $ref: '#/channels/externalEgressAudited'
+    description: |
+      chora-model-gateway publishes one event per GroundedSearch call — on the
+      allowed path (after Armor POST + mana debit) and on every denial path
+      (external_egress gate OFF, Armor block, insufficient mana). Atomic with
+      the state via the outbox; idempotent on the envelope idempotency_key.
+    messages:
+      - $ref: '#/channels/externalEgressAudited/messages/externalEgressAudited'
+
+  consumeExternalEgressAudited:
+    action: receive
+    channel:
+      $ref: '#/channels/externalEgressAudited'
+    description: |
+      Consumers: chora-governance audit ingest (append-only trail), O+
+      governance dashboard (IMDA D2 transparency + external-egress evidence).
+    messages:
+      - $ref: '#/channels/externalEgressAudited/messages/externalEgressAudited'
+
+components:
+  messages:
+    ExternalEgressAudited:
+      name: ExternalEgressAudited
+      title: External Web Egress Audited (grounded search)
+      summary: Per-call accountability record for a gateway grounded-search egress
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/governance/audit.proto#/chora.governance.v1.ExternalEgressAudited'

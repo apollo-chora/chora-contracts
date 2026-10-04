@@ -1,0 +1,65 @@
+// =============================================================================
+// Chora Content Consumption — learner preference events
+// =============================================================================
+//
+// Aggregate root: LearnerProfile projection (ADR-200 WS1) consumes this; the
+//                 producer of record is the dose_pref preference store
+//                 (ADR-224 / CHO-2045) in the same chora_consumption DB.
+// Owning domain : Content Consumption (chora_consumption DB).
+// Topic prefix  : chora.consumption.preferences.*
+//
+// Source-of-truth:
+//   - docs/architecture/adrs/adr-200-companion-global-learner-profile-read-model.md
+//     (§2 deferred `preferences.updated` as a clean extension point; CHO-2049)
+//   - docs/COMPANION-WS1-LEARNER-PROFILE-SPINE-2026-07-07.md (the preferences leg)
+//   - .claude/rules/ddd-enforcement.md (cross-DB forbidden; events only)
+//
+// Verified-only (ADR-203 / L16 anti-gaming): the LearnerProfile projection mints
+// one verified FactPreference per PreferenceEntry, citing the envelope event_id
+// as the source — there is no self-declaration path.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.consumption.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/consumption/v1;consumptionv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// PreferenceEntry — one changed learner preference.
+//
+// key is a STABLE, opaque preference key (owner ruling Q2). For dose preferences
+// it is `dose.map.<map_id>` — the map_id is the durable reference (a friendlier
+// label would go stale). The projection stores key + value verbatim, so the leg
+// is source-agnostic: a later identity.preferences.updated (locale / notifications
+// / accessibility) reuses this same shape with no consumer change.
+message PreferenceEntry {
+  // Stable preference key, e.g. "dose.map.<map_id>".
+  string key = 1;
+
+  // Preference value, e.g. "included" | "excluded". A re-include is projected as
+  // an `included` value, NEVER a delete (owner ruling Q3).
+  string value = 2;
+}
+
+// PreferencesUpdated — emitted when a learner changes one or more preferences.
+//
+// Topic: chora.consumption.preferences.updated.v1
+// Producer: chora-consumption (dose_pref store, on PUT /v1/me/dose-preferences).
+// Consumers: Content Consumption — LearnerProfile projection → FactPreference
+//            (ADR-200 WS1). A preference is context, not achievement: it earns
+//            NO companion EXP and gates no goal.
+message PreferencesUpdated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // Learner's GCID (UUIDv7, opaque, cross-tenant portable).
+  string learner_gcid = 2;
+
+  // The changed preferences (one or more). Ordered for deterministic projection.
+  repeated PreferenceEntry preferences = 3;
+
+  // When the learner changed the preference(s) (producer clock).
+  google.protobuf.Timestamp occurred_at = 4;
+}

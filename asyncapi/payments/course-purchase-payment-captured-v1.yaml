@@ -1,0 +1,62 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Payments — CoursePurchasePaymentCaptured
+  version: 1.0.0
+  description: |
+    Stripe `checkout.session.completed` webhook confirmed payment.
+    chora-delivery MUST subscribe and call EnrollmentRegistry.Register
+    (idempotent on course_id + gcid) then emit
+    `chora.delivery.enrollment.created.v1`. Load-bearing provisioning trigger.
+
+    - Domain: Payments (`chora_payments` DB)
+    - Topic: `chora.payments.course_purchase.payment_captured.v1`
+    - Source proto: `proto/events/payments/course_purchase.proto`
+       message `chora.payments.v1.CoursePurchasePaymentCaptured`
+    - Aggregate: CoursePurchase
+    - Per ADR-164 (chora-payments service + 13th DB).
+    - IMDA: envelope.chora_imda_dimension = "accountability"
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  coursePurchasePaymentCaptured:
+    address: chora.payments.course_purchase.payment_captured.v1
+    messages:
+      coursePurchasePaymentCaptured:
+        $ref: '#/components/messages/CoursePurchasePaymentCaptured'
+
+operations:
+  publishCoursePurchasePaymentCaptured:
+    action: send
+    channel:
+      $ref: '#/channels/coursePurchasePaymentCaptured'
+    messages:
+      - $ref: '#/channels/coursePurchasePaymentCaptured/messages/coursePurchasePaymentCaptured'
+
+  consumeCoursePurchasePaymentCaptured:
+    action: receive
+    channel:
+      $ref: '#/channels/coursePurchasePaymentCaptured'
+    messages:
+      - $ref: '#/channels/coursePurchasePaymentCaptured/messages/coursePurchasePaymentCaptured'
+
+components:
+  messages:
+    CoursePurchasePaymentCaptured:
+      name: CoursePurchasePaymentCaptured
+      title: Stripe payment confirmed for a paid course enrolment (CJ#2)
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/payments/course_purchase.proto#/chora.payments.v1.CoursePurchasePaymentCaptured'

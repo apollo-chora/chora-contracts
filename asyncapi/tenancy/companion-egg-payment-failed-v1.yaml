@@ -1,0 +1,67 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Tenancy — CompanionEggPaymentFailed
+  version: 1.0.0
+  description: |
+    Stripe has reported a payment failure for a Companion-egg checkout
+    (`checkout.session.async_payment_failed` or `charge.failed` for
+    offline methods). Cleanup signal — chora-consumption MUST NOT
+    provision a Companion instance for this purchase.
+
+    - Domain: Tenancy + Billing (`chora_tenancy` DB)
+    - Topic: `chora.tenancy.companion_egg.payment_failed.v1`
+    - Source proto: `proto/events/tenancy/companion_egg.proto`
+       message `chora.tenancy.v1.CompanionEggPaymentFailed`
+    - Aggregate: CompanionEggPurchase (1:1 with Stripe Checkout session)
+    - Per ADR-149 §"Egg purchase".
+    - IMDA: tag envelope.chora_imda_dimension = "accountability"
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  companionEggPaymentFailed:
+    address: chora.tenancy.companion_egg.payment_failed.v1
+    messages:
+      companionEggPaymentFailed:
+        $ref: '#/components/messages/CompanionEggPaymentFailed'
+
+operations:
+  publishCompanionEggPaymentFailed:
+    action: send
+    channel:
+      $ref: '#/channels/companionEggPaymentFailed'
+    messages:
+      - $ref: '#/channels/companionEggPaymentFailed/messages/companionEggPaymentFailed'
+
+  consumeCompanionEggPaymentFailed:
+    action: receive
+    channel:
+      $ref: '#/channels/companionEggPaymentFailed'
+    description: |
+      Consumers:
+        - chora-notifications (payment-failure email with retry CTA)
+        - chora-observability (funnel-attrition telemetry)
+        - chora-governance (compliance audit — IMDA D1 evidence)
+    messages:
+      - $ref: '#/channels/companionEggPaymentFailed/messages/companionEggPaymentFailed'
+
+components:
+  messages:
+    CompanionEggPaymentFailed:
+      name: CompanionEggPaymentFailed
+      title: Stripe payment failure for a Companion-egg purchase
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/tenancy/companion_egg.proto#/chora.tenancy.v1.CompanionEggPaymentFailed'

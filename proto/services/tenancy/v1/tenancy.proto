@@ -1,0 +1,629 @@
+// =============================================================================
+// Chora Tenancy Service (gRPC)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 1 D1
+//   + chora-contracts/openapi/tenancy-admin.yaml
+//   + memory project_chora_topology.md
+//
+// Inter-service gRPC contract for the Tenancy + Billing supporting domain
+// (chora_tenancy database, Team 3 / Platform). Tenancy and Billing are
+// COMBINED into a single domain — there is no separate billing service.
+//
+// REST surface in chora-contracts/openapi/tenancy-admin.yaml is the H+
+// admin equivalent; gRPC is for internal service-to-service sync calls
+// (mTLS via Cloud Service Mesh per CLAUDE.md §4 protocol strategy).
+//
+// Aggregates exposed:
+//   - Tenant         — top-level tenant record + hosting mode
+//   - Member         — TenantMembership (GCID -> Tenant association)
+//   - AddOn          — composable feature-flag plan (NOT tier pricing)
+//   - Invoice        — Stripe-backed invoice + line items
+//
+// Composable Add-On Plans, NOT tier pricing — per Project Identity in
+// CLAUDE.md. DigitalSkin is NEVER referenced here (earned, not purchased
+// — see chora.sharing.* events).
+//
+// CreateSubTenant supports white-label / franchise hierarchies (parent_tenant_id).
+//
+// Deployed in chora-489812 team-platform pool. mTLS via Cloud Service Mesh;
+// SPIFFE identity in mesh; W3C trace context in gRPC metadata.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.services.tenancy.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/tenancy/v1;tenancyv1";
+
+import "google/protobuf/timestamp.proto";
+
+// -----------------------------------------------------------------------------
+// Service
+// -----------------------------------------------------------------------------
+
+service Tenancy {
+  // Resolve a single tenant by ID.
+  rpc GetTenant(GetTenantRequest) returns (GetTenantResponse);
+
+  // Create a top-level tenant (no parent). Idempotent on (display_name,
+  // owner_gcid, hosting_mode) within the platform tenant scope.
+  rpc CreateTenant(CreateTenantRequest) returns (CreateTenantResponse);
+
+  // Create a sub-tenant under an existing parent. Used for white-label /
+  // franchise hierarchies — the child inherits some parent governance
+  // policy by default but owns its own membership + add-ons.
+  rpc CreateSubTenant(CreateSubTenantRequest) returns (CreateSubTenantResponse);
+
+  // Return the DIRECT children of a tenant (Model β franchise hierarchy,
+  // ADR-217 Phase 2.3b) with a per-child live-member count. is_parent is true
+  // when the tenant has >= 1 non-deleted direct child. atom_count is 0 for now
+  // (atoms live in chora_creation and cross-DB reads are forbidden — a future
+  // event-fed projection will populate it). The BFF resolves tenant_id from the
+  // caller's validated session; the gateway operator/tenant-admin gate is the
+  // sole app-layer authz (this server does no JWT/role check — mesh-trusted).
+  rpc GetTenantHierarchy(GetTenantHierarchyRequest) returns (GetTenantHierarchyResponse);
+
+  // Bulk-invite a list of GCIDs into a tenant with a uniform initial role.
+  // Returns per-invitee success/failure detail; partial success is allowed
+  // (errors do not abort the batch). Idempotent on (tenant_id, invitee_gcid).
+  rpc BulkInviteMembers(BulkInviteMembersRequest) returns (BulkInviteMembersResponse);
+
+  // Subscribe a tenant to an AddOnPlan. Activates the feature flag set
+  // declared by the plan and starts billing accrual. Idempotent on
+  // (tenant_id, addon_plan_id) — repeat calls return the existing AddOn.
+  rpc SubscribeAddOn(SubscribeAddOnRequest) returns (SubscribeAddOnResponse);
+
+  // Generate an invoice for a tenant covering a billing period. Used by
+  // the Cloud Run Job billing-cycle worker. Idempotent on
+  // (tenant_id, period_start, period_end). Side-effect: emits
+  // chora.tenancy.invoice.generated.v1 on success.
+  rpc GenerateInvoice(GenerateInvoiceRequest) returns (GenerateInvoiceResponse);
+
+  // List ALL tenant memberships held by a single GCID, across every tenant
+  // the user belongs to. Cardinality: one GCID → many TenantMembership rows
+  // (per the user-stated invariant: one GCID, many tenants, many roles per
+  // tenant). Used by chora-identity's POST /v1/identity/resolve endpoint to
+  // build the active session JWT's tenant + role claim set.
+  //
+  // Surfaces[] is DERIVED on the server from the membership's roles:
+  //   learner       → [aplus, cplus]
+  //   author        → [aplus]
+  //   instructor    → [rplus]
+  //   tenant_admin  → [hplus]
+  //   auditor       → [oplus]
+  //
+  // default_tenant_id is the most-recently-active tenant for the GCID,
+  // surfaced so chora-identity can stamp it on the session JWT when the
+  // caller did NOT supply an active_tenant_id hint.
+  //
+  // Empty memberships is NOT an error — chora-identity surfaces an empty
+  // response to the gateway, which turns it into HTTP 403
+  // AUTH_NO_TENANT_MEMBERSHIP so the FE can render "no tenant yet" UX.
+  // (Post-ADR-182: chora-identity auto-enrols zero-membership users into
+  // the public chora-master tenant via UpsertMembership before answering
+  // the gateway, so the empty case no longer reaches the mint in practice.)
+  rpc ListMembershipsByGCID(ListMembershipsByGCIDRequest) returns (ListMembershipsByGCIDResponse);
+
+  // Idempotently grant membership roles to a GCID in a tenant (ADR-182).
+  // One members row exists per (tenant_id, gcid, role); rows that already
+  // exist are no-ops. Callers:
+  //   (a) chora-identity resolve auto-enrolment into the public
+  //       chora-master tenant (ADR-182 D2) — tenant_slug="chora-master",
+  //       roles=[learner, author];
+  //   (b) chora-identity admin add-member-by-email (L1 tenant lane),
+  //       which previously wrote only the identity-side mirror table and
+  //       never the authoritative chora_tenancy.members store.
+  // Suspended or soft-deleted memberships are NOT resurrected — the call
+  // fails FAILED_PRECONDITION so the suspension stays an explicit admin
+  // decision. "owner" is bootstrap-only and INVALID_ARGUMENT here.
+  rpc UpsertMembership(UpsertMembershipRequest) returns (UpsertMembershipResponse);
+
+  // Remove a member from a tenant — SOFT-DELETE every live role row for
+  // (tenant_id, gcid). Member-centric revoke (CHO-1869 WS2b): the H+ roster is
+  // gcid-keyed, so "remove member" erases the whole membership, not one role.
+  // NEVER hard-deletes (soft-delete + the closure saga own erasure). Idempotent
+  // for an already-removed member is NOT_FOUND (no live role rows). A suspended
+  // membership still blocks (FAILED_PRECONDITION) — un-suspend first. Called by
+  // chora-identity's admin removeTenantMember (DELETE
+  // /api/v1/admin/tenant-members/{gcid}); the identity mirror is soft-deleted in
+  // the same handler.
+  rpc RemoveMembership(RemoveMembershipRequest) returns (RemoveMembershipResponse);
+}
+
+// -----------------------------------------------------------------------------
+// Shared enums
+// -----------------------------------------------------------------------------
+
+// HostingMode — how the tenant is hosted. Aligned with REST schema.
+enum HostingMode {
+  HOSTING_MODE_UNSPECIFIED = 0;
+  HOSTING_MODE_PLATFORM_HOSTED = 1;
+  HOSTING_MODE_WHITE_LABEL = 2;
+  HOSTING_MODE_FRANCHISE = 3;
+  HOSTING_MODE_SELF_HOST = 4;
+}
+
+// TenantState — Tenant aggregate lifecycle.
+enum TenantState {
+  TENANT_STATE_UNSPECIFIED = 0;
+  TENANT_STATE_ACTIVE = 1;
+  TENANT_STATE_SUSPENDED = 2;
+  TENANT_STATE_CLOSED = 3;
+}
+
+// MemberRole — the initial role assigned at invite. Tenant-scoped (NOT
+// per-course; per-course role is computed by chora-identity).
+enum MemberRole {
+  MEMBER_ROLE_UNSPECIFIED = 0;
+  MEMBER_ROLE_LEARNER = 1;
+  MEMBER_ROLE_INSTRUCTOR = 2;
+  MEMBER_ROLE_ADMIN = 3;
+  MEMBER_ROLE_AUDITOR = 4;
+  MEMBER_ROLE_OWNER = 5;
+}
+
+// MemberStatus — invitation / membership lifecycle.
+enum MemberStatus {
+  MEMBER_STATUS_UNSPECIFIED = 0;
+  MEMBER_STATUS_INVITED = 1;        // invite issued; not yet accepted
+  MEMBER_STATUS_ACTIVE = 2;
+  MEMBER_STATUS_SUSPENDED = 3;
+  MEMBER_STATUS_REVOKED = 4;
+}
+
+// InvoiceStatus — invoice lifecycle (Stripe-aligned).
+enum InvoiceStatus {
+  INVOICE_STATUS_UNSPECIFIED = 0;
+  INVOICE_STATUS_DRAFT = 1;
+  INVOICE_STATUS_OPEN = 2;
+  INVOICE_STATUS_PAID = 3;
+  INVOICE_STATUS_VOID = 4;
+  INVOICE_STATUS_UNCOLLECTIBLE = 5;
+}
+
+// -----------------------------------------------------------------------------
+// Common message types
+// -----------------------------------------------------------------------------
+
+// Tenant — top-level tenant record. Mirrors REST Tenant schema.
+message Tenant {
+  // UUIDv7.
+  string tenant_id = 1;
+
+  // Optional parent for sub-tenants (white-label / franchise). Empty when
+  // top-level.
+  string parent_tenant_id = 2;
+
+  // Human-readable name (1..256 chars).
+  string display_name = 3;
+
+  // How the tenant is hosted.
+  HostingMode hosting_mode = 4;
+
+  // GCID of the tenant owner.
+  string owner_gcid = 5;
+
+  // Lifecycle state.
+  TenantState state = 6;
+
+  // When the tenant was created.
+  google.protobuf.Timestamp created_at = 7;
+}
+
+// Member — TenantMembership row (GCID -> Tenant + role).
+message Member {
+  // UUIDv7 of the membership row (NOT the GCID).
+  string membership_id = 1;
+
+  // Tenant the membership applies to.
+  string tenant_id = 2;
+
+  // GCID of the member.
+  string gcid = 3;
+
+  // Initial / current tenant-scoped role (NOT per-course).
+  MemberRole role = 4;
+
+  // Membership lifecycle status.
+  MemberStatus status = 5;
+
+  // GCID that issued the invite.
+  string invited_by_gcid = 6;
+
+  // When the invite was issued.
+  google.protobuf.Timestamp invited_at = 7;
+
+  // When the invitee accepted (becoming ACTIVE). Zero when still INVITED.
+  google.protobuf.Timestamp accepted_at = 8;
+}
+
+// AddOn — active add-on plan subscription on a tenant. Per Composable
+// Add-On Plans model: pricing is per-feature, NOT per-tier.
+message AddOn {
+  // Tenant the add-on is active on.
+  string tenant_id = 1;
+
+  // UUIDv7 of the AddOnPlan being subscribed.
+  string addon_plan_id = 2;
+
+  // Human-readable plan name (denormalised for observability).
+  string plan_name = 3;
+
+  // When the add-on was activated.
+  google.protobuf.Timestamp activated_at = 4;
+
+  // When the add-on was deactivated. Zero when still active.
+  google.protobuf.Timestamp deactivated_at = 5;
+
+  // Feature flags this plan unlocks (e.g., "ai_kernel.daily_dose",
+  // "delivery.proctored_exam"). Tenant feature gate driven from this set.
+  repeated string feature_flags = 6;
+}
+
+// Invoice — Stripe-backed billing invoice.
+message Invoice {
+  // UUIDv7 (Chora-side).
+  string invoice_id = 1;
+
+  // Tenant being invoiced.
+  string tenant_id = 2;
+
+  // Stripe invoice ID for cross-system reconciliation. Empty for drafts
+  // not yet pushed to Stripe.
+  string stripe_invoice_id = 3;
+
+  // Billing period covered (closed-open: [start, end)).
+  google.protobuf.Timestamp period_start = 4;
+  google.protobuf.Timestamp period_end = 5;
+
+  // Total amount in cents (no decimals; ISO 4217 minor units).
+  int64 amount_cents = 6;
+
+  // ISO 4217 3-letter currency code (e.g., "USD", "SGD").
+  string currency = 7;
+
+  // Lifecycle status.
+  InvoiceStatus status = 8;
+
+  // When the invoice was created (Chora-side).
+  google.protobuf.Timestamp created_at = 9;
+
+  // When the invoice was paid. Zero when not yet paid.
+  google.protobuf.Timestamp paid_at = 10;
+}
+
+// MemberInvite — single-row request for the bulk invite RPC.
+message MemberInvite {
+  // GCID of the invitee. Required.
+  string gcid = 1;
+
+  // Initial role to grant on accept. Required.
+  MemberRole role = 2;
+
+  // Optional human-friendly note added to the invite email.
+  string invite_note = 3;
+}
+
+// MemberInviteResult — per-invitee outcome of BulkInviteMembers.
+message MemberInviteResult {
+  // GCID being invited.
+  string gcid = 1;
+
+  // True if the invite was successfully issued (or already existed, on
+  // idempotent re-call).
+  bool success = 2;
+
+  // The membership row when success=true; empty otherwise.
+  Member member = 3;
+
+  // Human-readable error when success=false.
+  string error_message = 4;
+}
+
+// -----------------------------------------------------------------------------
+// GetTenant RPC
+// -----------------------------------------------------------------------------
+
+message GetTenantRequest {
+  // Tenant UUIDv7. Required.
+  string tenant_id = 1;
+}
+
+message GetTenantResponse {
+  // The resolved tenant record. Soft-deleted tenants are not returned —
+  // gRPC NOT_FOUND is raised instead.
+  Tenant tenant = 1;
+}
+
+// -----------------------------------------------------------------------------
+// CreateTenant RPC
+// -----------------------------------------------------------------------------
+
+message CreateTenantRequest {
+  // Display name (1..256 chars). Required.
+  string display_name = 1;
+
+  // Hosting mode. Required.
+  HostingMode hosting_mode = 2;
+
+  // GCID of the tenant owner. Required.
+  string owner_gcid = 3;
+}
+
+message CreateTenantResponse {
+  // The newly-created tenant.
+  Tenant tenant = 1;
+}
+
+// -----------------------------------------------------------------------------
+// CreateSubTenant RPC
+// -----------------------------------------------------------------------------
+
+message CreateSubTenantRequest {
+  // UUIDv7 of the parent tenant. Required.
+  string parent_tenant_id = 1;
+
+  // Display name for the sub-tenant.
+  string display_name = 2;
+
+  // Hosting mode for the sub-tenant. Typically inherited from parent
+  // (caller may override for hybrid franchise-on-platform setups).
+  HostingMode hosting_mode = 3;
+
+  // GCID of the sub-tenant owner.
+  string owner_gcid = 4;
+
+  // Add-on CODES granted at creation, beyond the mandatory `core`
+  // (E1 / UX refactor wave W2). Written as durable add_on_subscriptions rows
+  // in the SAME transaction as the tenant, so a created organisation holds its
+  // entitlements across a restart instead of only in the in-memory registry.
+  //
+  // Codes, never display names: `add_ons` carries both and the canonical codes
+  // live in `code`. `base` is an alias of `core` and is folded, not doubled.
+  // An unrecognised code fails the WHOLE creation rather than granting the
+  // subset the server happened to recognise.
+  //
+  // Additive and optional: an empty list is the historical behaviour, core
+  // only, so every existing caller is unaffected.
+  repeated string add_on_codes = 5;
+}
+
+message CreateSubTenantResponse {
+  // The newly-created sub-tenant. parent_tenant_id is set.
+  Tenant tenant = 1;
+}
+
+// -----------------------------------------------------------------------------
+// GetTenantHierarchy RPC (ADR-217 Phase 2.3b)
+// -----------------------------------------------------------------------------
+
+message GetTenantHierarchyRequest {
+  // The tenant whose direct children are requested — the caller's CURRENT
+  // tenant, resolved by the BFF from the validated session JWT. Required.
+  string tenant_id = 1;
+}
+
+// ChildTenantSummary — one DIRECT child of the requested tenant, with counts.
+message ChildTenantSummary {
+  // UUIDv7 of the child tenant.
+  string tenant_id = 1;
+
+  // Display name of the child tenant.
+  string tenant_name = 2;
+
+  // Count of DISTINCT live members (GCIDs) in the child tenant. Read under the
+  // child's own RLS scope (the members policy is tenant-pinned, not span-all).
+  int64 user_count = 3;
+
+  // Count of atoms owned by the child tenant. Always 0 for now — atoms live in
+  // chora_creation and cross-DB reads are forbidden; a future event-fed
+  // projection will populate it.
+  int64 atom_count = 4;
+}
+
+message GetTenantHierarchyResponse {
+  // True when the tenant has >= 1 non-deleted direct child.
+  bool is_parent = 1;
+
+  // The DIRECT children (parent_tenant_id = request tenant_id), name-sorted.
+  repeated ChildTenantSummary children = 2;
+}
+
+// -----------------------------------------------------------------------------
+// BulkInviteMembers RPC
+// -----------------------------------------------------------------------------
+
+message BulkInviteMembersRequest {
+  // Tenant the invitees will join. Required.
+  string tenant_id = 1;
+
+  // GCID issuing the invites (admin / owner). Required for audit.
+  string invited_by_gcid = 2;
+
+  // Invitations to issue. 1..1000 per call (Cloud Run request size budget).
+  repeated MemberInvite invites = 3;
+}
+
+message BulkInviteMembersResponse {
+  // Echo of tenant_id.
+  string tenant_id = 1;
+
+  // Per-invitee result. Length matches the request invites length.
+  repeated MemberInviteResult results = 2;
+
+  // Count of successful invites in this batch.
+  int32 success_count = 3;
+
+  // Count of failed invites in this batch.
+  int32 failure_count = 4;
+}
+
+// -----------------------------------------------------------------------------
+// SubscribeAddOn RPC
+// -----------------------------------------------------------------------------
+
+message SubscribeAddOnRequest {
+  // Tenant subscribing. Required.
+  string tenant_id = 1;
+
+  // UUIDv7 of the AddOnPlan to activate. Required.
+  string addon_plan_id = 2;
+
+  // GCID of the actor activating the plan (admin / owner). Required for audit.
+  string actor_gcid = 3;
+}
+
+message SubscribeAddOnResponse {
+  // The active AddOn row.
+  AddOn add_on = 1;
+}
+
+// -----------------------------------------------------------------------------
+// GenerateInvoice RPC
+// -----------------------------------------------------------------------------
+
+message GenerateInvoiceRequest {
+  // Tenant being invoiced. Required.
+  string tenant_id = 1;
+
+  // Closed-open billing period. Required.
+  google.protobuf.Timestamp period_start = 2;
+  google.protobuf.Timestamp period_end = 3;
+
+  // ISO 4217 3-letter currency code. Required (e.g., "USD", "SGD").
+  string currency = 4;
+
+  // GCID of the actor triggering generation. Empty when issued by the
+  // billing-cycle Cloud Run Job.
+  string actor_gcid = 5;
+}
+
+message GenerateInvoiceResponse {
+  // The generated invoice (status = DRAFT or OPEN depending on tenant config).
+  Invoice invoice = 1;
+}
+
+// -----------------------------------------------------------------------------
+// ListMembershipsByGCID RPC — multi-tenant + multi-role resolution
+// -----------------------------------------------------------------------------
+//
+// One GCID can carry multiple TenantMembership rows; each membership can
+// declare multiple roles (e.g. learner + author at tenant A, instructor +
+// tenant_admin at tenant B). This RPC is the sole sanctioned cross-domain
+// read path between chora-identity (the caller) and chora-tenancy (the
+// owner of the members table) — chora-identity MUST NOT query chora_tenancy
+// directly per ddd-enforcement HARD RULE.
+
+// TenantMembership — one row per (gcid, tenant_id) pair. Roles[] carries
+// EVERY role the user holds in this tenant; surfaces[] is derived on the
+// server-side from the role→surfaces map.
+message TenantMembership {
+  // UUIDv7 of the tenant. Required.
+  string tenant_id = 1;
+
+  // Human-friendly slug for the tenant (e.g. "mightymind-academy"). Used
+  // by chora-web for tenant-picker rendering. Falls back to the tenant
+  // display_name lower-cased + hyphenated when no slug is set.
+  string tenant_slug = 2;
+
+  // Every role the user holds in this tenant. Non-empty by construction —
+  // a membership row with no role is filtered out at the DB layer.
+  repeated string roles = 3;
+
+  // Surfaces[] the membership unlocks, DERIVED from roles[] via the
+  // role→surfaces map in chora-tenancy. The canonical 5 surfaces are
+  // [aplus, cplus, hplus, oplus, rplus]; this list is the deduplicated
+  // union across all roles in the membership.
+  repeated string surfaces = 4;
+
+  // is_default = true on EXACTLY ONE membership per GCID. The server
+  // marks the most-recently-active membership (max joined_at, falling
+  // back to invited_at) when no explicit default has been set.
+  bool is_default = 5;
+}
+
+message ListMembershipsByGCIDRequest {
+  // Opaque cross-tenant-portable UUIDv7. Required.
+  string gcid = 1;
+
+  // Include memberships whose `suspended_at` is set. Additive, and FALSE is
+  // the proto3 zero value, so an old client keeps the historical behaviour
+  // (migration 0011) exactly.
+  //
+  // Widens the read over `members.suspended_at` and NOTHING else; it is not a
+  // cross-tenant widening and opens no RLS surface.
+  //
+  // Set it true ONLY for the closure ownership pre-flight. A suspended owner
+  // still holds the tenant, because the one-live-owner index (tenancy
+  // migration 0036) and the membership write guards ignore suspension, so a
+  // pre-flight that could not see them would let an owner close their account
+  // and orphan the organisation.
+  //
+  // Mint MUST leave this false: a suspended member must not authenticate back
+  // into the tenant that suspended them.
+  bool include_suspended = 2;
+}
+
+message ListMembershipsByGCIDResponse {
+  // All TenantMembership rows for the GCID. Empty when the user has no
+  // memberships yet (post-Firebase-create / pre-H+ Setup-Tenant flow).
+  // NOT an error — caller surfaces empty as HTTP 403
+  // AUTH_NO_TENANT_MEMBERSHIP.
+  repeated TenantMembership memberships = 1;
+
+  // Most-recently-active membership's tenant_id, or empty when no
+  // memberships exist. Caller uses this as the JWT tenant_id claim when
+  // the client did NOT supply an active_tenant_id hint.
+  string default_tenant_id = 2;
+}
+
+message UpsertMembershipRequest {
+  // Opaque cross-tenant-portable UUIDv7. Required.
+  string gcid = 1;
+
+  // Target tenant — exactly ONE of tenant_id / tenant_slug must be set.
+  // tenant_slug exists so the chora-master auto-enrol caller does not
+  // need to hard-code the tenant UUID (no-inline-config).
+  string tenant_id = 2;
+  string tenant_slug = 3;
+
+  // Lowercase tenant_member_role values to grant:
+  // learner | author | instructor | admin | auditor.
+  // "owner" is bootstrap-only — INVALID_ARGUMENT here. Must be non-empty.
+  repeated string roles = 4;
+
+  // When true, the upsert REPLACES the (tenant_id, gcid) role set:
+  // existing role rows NOT in `roles` are soft-deleted before the new
+  // rows are upserted. When false (default), the upsert is additive —
+  // existing rows persist alongside the granted set. The H+ Members
+  // page multi-role edit (CHO-1809 follow-up) sets this true; the
+  // ADR-182 auto-enrol caller keeps it false so accumulated roles
+  // survive a re-enrol.
+  bool replace_existing = 5;
+}
+
+message UpsertMembershipResponse {
+  // The full membership after the upsert — same derived shape
+  // (roles[] aggregated, surfaces[] derived) as ListMembershipsByGCID.
+  TenantMembership membership = 1;
+
+  // True when at least one new members row was created by this call.
+  bool created = 2;
+}
+
+message RemoveMembershipRequest {
+  // Opaque cross-tenant-portable UUIDv7. Required.
+  string gcid = 1;
+
+  // Target tenant — exactly ONE of tenant_id / tenant_slug must be set
+  // (mirrors UpsertMembershipRequest so the operator/admin callers share a
+  // resolution path).
+  string tenant_id = 2;
+  string tenant_slug = 3;
+}
+
+message RemoveMembershipResponse {
+  // Number of live role rows soft-deleted by this call (>= 1 on success).
+  int32 removed_role_count = 1;
+}

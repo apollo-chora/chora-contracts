@@ -1,0 +1,66 @@
+// =============================================================================
+// GENERATED — DO NOT EDIT.
+// Source : events/delivery/course.proto message CourseContentComposed
+// Tool   : chora-contracts/internal/protoflatten
+// Why    : GCP Pub/Sub Schema Registry rejects (a) schemas with `import`
+//          statements and (b) schemas with more than one top-level message.
+//          This flat copy contains exactly ONE top-level message;
+//          EventEnvelope + Timestamp + transitive deps are nested inside.
+// Path C : see chora-contracts/CHANGELOG.md and m10-data-plane main.tf.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.delivery.v1;
+
+message CourseContentComposed {
+  // Inlined chora.common.v1.EventEnvelope (nested for self-contained schema).
+  message Envelope {
+    string event_id = 1;
+    string idempotency_key = 2;
+    string tenant_id = 3;
+    string gcid = 4;
+    Timestamp occurred_at = 5;
+    Timestamp published_at = 6;
+    string traceparent = 7;
+    string tracestate = 8;
+    string source_project = 9;
+    string source_service = 10;
+    int32 schema_version = 11;
+    string correlation_id = 12;
+    string causation_id = 13;
+    string chora_imda_dimension = 14;
+    string imda_lifecycle_stage = 15;
+  }
+
+  // Inlined google.protobuf.Timestamp (nested; wire-compatible).
+  message Timestamp {
+    int64 seconds = 1;
+    int32 nanos = 2;
+  }
+
+  // Inlined dep: CourseContentItem
+  message CourseContentItem {
+    string item_id = 1;
+    ContentKind kind = 2;
+    string ref = 3;
+    string title = 4;
+    int32 position = 5;
+  }
+
+  // Inlined enum dep: ContentKind
+  enum ContentKind {
+    CONTENT_KIND_UNSPECIFIED = 0;
+    CONTENT_KIND_ATOM = 1;
+    CONTENT_KIND_VIDEO = 2;
+    CONTENT_KIND_YOUTUBE = 3;
+    CONTENT_KIND_DOCUMENT = 4;
+    CONTENT_KIND_LIVE_CLASSROOM = 5;
+    CONTENT_KIND_ASSESSMENT = 6;
+  }
+
+  Envelope envelope = 1;
+  string course_id = 2;
+  repeated CourseContentItem items = 3;
+  Timestamp composed_at = 4;
+}

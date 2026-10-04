@@ -1,0 +1,271 @@
+// =============================================================================
+// chora.tenancy.v1 — Tenant aggregate events
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 1 D2 +
+//   Tier 4 D16 (Hub+ neutral on authority — supports white-label / franchise /
+//   self-host)
+// + .claude/rules/ddd-enforcement.md
+//
+// Owning domain  : Tenancy + Billing (chora_tenancy database) — COMBINED.
+// Owning team    : Team 3 (Platform)
+// Topic prefix   : chora.tenancy.tenant.*
+// Surface (admin): H+ Hub+ (Surface-5)
+//
+// Note: Tenancy and Billing are COMBINED into a single supporting domain;
+// no separate `chora.billing.*` namespace exists. Subscription, addon, and
+// invoice events live alongside tenant events in chora.tenancy.*.
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.tenancy.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/tenancy/v1;tenancyv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// HostingMode — H+ Hub+ is neutral on authority; tenants may run as:
+// -----------------------------------------------------------------------------
+//
+// PLATFORM_HOSTED — standard SaaS multi-tenant (Chora hosts, Chora brands)
+// WHITE_LABEL     — Chora hosts, tenant brands the surfaces (custom domain)
+// FRANCHISE       — tenant resells to sub-tenants under their own brand
+// SELF_HOST       — tenant runs Chora in their own GCP project (M17 capability)
+enum HostingMode {
+  HOSTING_MODE_UNSPECIFIED = 0;
+  HOSTING_MODE_PLATFORM_HOSTED = 1;
+  HOSTING_MODE_WHITE_LABEL = 2;
+  HOSTING_MODE_FRANCHISE = 3;
+  HOSTING_MODE_SELF_HOST = 4;
+}
+
+// -----------------------------------------------------------------------------
+// TenantCreated — chora.tenancy.tenant.created.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a new Tenant is provisioned. Triggers RLS policy bootstrap,
+// default add-on plan attach, default IdP config, and welcome notifications
+// to the initial OWNER GCID.
+message TenantCreated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — Tenant aggregate root identifier.
+  string tenant_id = 2;
+
+  // Optional parent tenant — populated for FRANCHISE sub-tenants. Empty for
+  // top-level tenants.
+  string parent_tenant_id = 3;
+
+  // Display name (1..256 chars, plain text).
+  string display_name = 4;
+
+  HostingMode hosting_mode = 5;
+
+  // GCID of the initial OWNER (creator).
+  string owner_gcid = 6;
+
+  google.protobuf.Timestamp created_at = 7;
+}
+
+// -----------------------------------------------------------------------------
+// TenantSuspended — chora.tenancy.tenant.suspended.v1
+// -----------------------------------------------------------------------------
+//
+// Published on platform-initiated suspension (non-payment, policy violation,
+// security event). Tenant is read-only; learners receive a suspension notice.
+message TenantSuspended {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string tenant_id = 2;
+  string parent_tenant_id = 3;
+  string display_name = 4;
+  HostingMode hosting_mode = 5;
+
+  // Free-text reason (max 512 chars).
+  string reason = 6;
+
+  // GCID of the platform admin / system actor who suspended.
+  string suspended_by_gcid = 7;
+
+  google.protobuf.Timestamp suspended_at = 8;
+}
+
+// -----------------------------------------------------------------------------
+// TenantReactivated — chora.tenancy.tenant.reactivated.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a SUSPENDED tenant is restored.
+message TenantReactivated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string tenant_id = 2;
+  string parent_tenant_id = 3;
+  string display_name = 4;
+  HostingMode hosting_mode = 5;
+
+  string reason = 6;
+  string reactivated_by_gcid = 7;
+
+  google.protobuf.Timestamp reactivated_at = 8;
+}
+
+// -----------------------------------------------------------------------------
+// TenantClosed — chora.tenancy.tenant.closed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a tenant is permanently closed. Triggers federated closure
+// saga (data export, pseudonymisation across all 11 domains, eventual
+// crypto-shred). Distinct from TenantSuspended (reversible).
+message TenantClosed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string tenant_id = 2;
+  string parent_tenant_id = 3;
+  string display_name = 4;
+  HostingMode hosting_mode = 5;
+
+  // Free-text reason.
+  string reason = 6;
+
+  // GCID of the OWNER / platform admin who initiated closure.
+  string closed_by_gcid = 7;
+
+  // Optional saga correlation ID — links to AccountLifecycleChanged events
+  // for each member GCID's per-domain pseudonymisation.
+  string saga_id = 8;
+
+  google.protobuf.Timestamp closed_at = 9;
+}
+
+// -----------------------------------------------------------------------------
+// TenantGoLive — chora.tenancy.tenant.golive.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a tenant transitions from PROVISIONING -> ACTIVE on the
+// admin's explicit go-live action via H+ Setup-Tenant wizard. Triggers
+// Stripe customer creation, default add-on provisioning (base, cms, ai_assist,
+// companion per Phyllis MVP §3 Step 2), and "workspace ready" notification.
+//
+// Distinct from TenantCreated (which fires at PROVISIONING entry). Phyllis
+// MVP §5.2 endpoint: POST /v1/tenants/{tenant_id}/golive.
+message TenantGoLive {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string tenant_id = 2;
+  string parent_tenant_id = 3;
+  string display_name = 4;
+  HostingMode hosting_mode = 5;
+
+  // GCID of the admin / owner who initiated go-live.
+  string activated_by_gcid = 6;
+
+  // Stripe Customer ID created at go-live (links chora_tenancy.tenants
+  // to the Stripe billing entity). Empty for SELF_HOST mode.
+  string stripe_customer_id = 7;
+
+  // Default add-on plan_ids enabled at go-live (per Phyllis MVP §3 Step 2:
+  // ["base", "cms", "ai_assist", "companion"]).
+  repeated string default_addon_plan_ids = 8;
+
+  google.protobuf.Timestamp activated_at = 9;
+}
+
+// -----------------------------------------------------------------------------
+// TenantMemberAdded — chora.tenancy.tenant.member_added.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a member (GCID) is added to a tenant beyond the initial
+// owner. Used by H+ admin onboarding flow + Phyllis MVP §3 Step 2 onboarding
+// of additional admins.
+//
+// Distinct from chora.identity.tenancy_membership.granted.v1 — that event
+// records the GCID-Tenant linkage in Identity domain; THIS event captures
+// the Tenancy-side add-member action (with billing seat impact).
+message TenantMemberAdded {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string tenant_id = 2;
+
+  // GCID of the new member.
+  string member_gcid = 3;
+
+  // GCID of the admin who added the member.
+  string added_by_gcid = 4;
+
+  // Whether this addition consumed an active-learner seat (drives addon
+  // usage_recorded for metered add-ons).
+  bool consumes_seat = 5;
+
+  google.protobuf.Timestamp added_at = 6;
+}
+
+// -----------------------------------------------------------------------------
+// TenantPaymentCaptured — chora.tenancy.tenant.payment_captured.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a one-time or recurring payment is captured against a
+// tenant's Stripe customer (e.g., add-on activation prepayment, course
+// enrolment fee paid by tenant on behalf of a learner).
+//
+// Distinct from chora.tenancy.billing.invoice_paid.v1 (which is invoice-level)
+// — this event is the lower-level Stripe Charge / PaymentIntent capture.
+//
+// DEPRECATED: superseded by the chora.payments.{aggregate}.payment_captured.v1 family per ADR-164. Map `purpose` to the matching aggregate: `course_enrolment_fee`→chora.payments.application_payment.payment_captured.v1, `mana_pool_topup`→chora.payments.tenant_mana_topup.payment_captured.v1, `addon_activation`→chora.payments.tenant_mana_topup or application_payment depending on add-on. Drain by 2026-06-30.
+message TenantPaymentCaptured {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string tenant_id = 2;
+
+  // Stripe PaymentIntent ID (idempotency key — same intent_id never charges twice).
+  string stripe_payment_intent_id = 3;
+
+  // Amount in micros (1e-6 USD or 1e-6 of any currency). Integer to avoid
+  // float drift.
+  int64 amount_micros = 4;
+
+  // ISO 4217 currency code (e.g., "USD", "SGD", "EUR").
+  string currency = 5;
+
+  // Free-form purpose tag (e.g., "addon_activation", "course_enrolment_fee",
+  // "mana_pool_topup"). Stable machine codes for billing reconciliation.
+  string purpose = 6;
+
+  // Optional reference to the related entity (e.g., addon_plan_id or
+  // application_id when payment closes a Course Application).
+  string related_entity_id = 7;
+
+  google.protobuf.Timestamp captured_at = 8;
+}
+
+// -----------------------------------------------------------------------------
+// TenantWhitelabelConfigured — chora.tenancy.tenant.whitelabel_configured.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a WHITE_LABEL or FRANCHISE tenant configures custom branding
+// (logo, primary color, custom domain). Triggers per-surface theme rebuild
+// and Cloud DNS / GCLB cert renewal for the custom domain.
+message TenantWhitelabelConfigured {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string tenant_id = 2;
+  HostingMode hosting_mode = 3;
+
+  // Custom domain (e.g., "learn.acme.com") — empty for default chora.site.
+  string custom_domain = 4;
+
+  // Brand assets URI (Cloud Storage path).
+  string brand_assets_uri = 5;
+
+  // Primary brand color in hex (e.g., "#00B4FF"). Empty for default.
+  string primary_color_hex = 6;
+
+  // GCID of the admin who configured.
+  string configured_by_gcid = 7;
+
+  google.protobuf.Timestamp configured_at = 8;
+}

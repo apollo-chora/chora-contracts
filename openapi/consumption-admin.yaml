@@ -1,0 +1,553 @@
+openapi: 3.2.0
+info:
+  title: Chora Content Consumption — Admin REST API
+  version: 1.0.0
+  description: |
+    Administrative + observability REST surface for the **Content Consumption**
+    domain (`chora_consumption` DB). Powers instructor / tenant-admin tooling
+    in the **R+ (Rhythm+)** and **O+ (Observability+)** surfaces.
+
+    Domain: Content Consumption — `LearningPath`, `AtomicSession`, `Companion`
+    (RPG companion entity), `KnowledgeGraph`.
+
+    **Note**: Learner-facing reads use **GraphQL** (see
+    `graphql/consumption.graphql`). This REST surface is for admin / instructor
+    write commands + observability queries only.
+
+    Aligned with Architecture Review locked 2026-05-07 — Tier 1 D1, Tier 2 D7,
+    Tier 4 D16, Tier 5 D20.
+  contact:
+    name: Chora Platform Team
+  license:
+    name: Proprietary
+
+servers:
+  - url: https://api.chora.site/consumption/v1
+    description: Production (chora-content project)
+  - url: http://localhost:8080/consumption/v1
+    description: Local dev
+
+tags:
+  - name: paths
+    description: LearningPath admin CRUD
+  - name: sessions
+    description: AtomicSession admin observability
+  - name: companions
+    description: Companion (RPG companion entity) admin
+  - name: knowledge-graph
+    description: KnowledgeGraph admin inspection
+
+security:
+  - bearerAuth: []
+
+paths:
+  /paths:
+    get:
+      tags: [paths]
+      operationId: listPaths
+      summary: List LearningPaths in tenant
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - $ref: '#/components/parameters/Mode'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Paged list of LearningPaths
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LearningPathPage'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [paths]
+      operationId: createPath
+      summary: Create a curated LearningPath
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateLearningPathRequest'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LearningPath'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /paths/{path_id}:
+    parameters:
+      - $ref: '#/components/parameters/PathId'
+    get:
+      tags: [paths]
+      operationId: getPath
+      summary: Get a LearningPath by ID
+      responses:
+        '200':
+          description: LearningPath detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LearningPath'
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [paths]
+      operationId: updatePath
+      summary: Update LearningPath metadata
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateLearningPathRequest'
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LearningPath'
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [paths]
+      operationId: deletePath
+      summary: Soft-delete a LearningPath
+      description: |
+        Sets `deleted_at` (soft delete per ddd-enforcement invariant #5).
+        Hard delete is forbidden.
+      responses:
+        '204': { description: Soft-deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /sessions/{session_id}:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    get:
+      tags: [sessions]
+      operationId: getSession
+      summary: Admin lookup of an AtomicSession
+      responses:
+        '200':
+          description: AtomicSession detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AtomicSession'
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /sessions:
+    get:
+      tags: [sessions]
+      operationId: listSessions
+      summary: Admin listing of AtomicSessions for reporting
+      parameters:
+        - name: learner_gcid
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Learner GCID (UUIDv7)
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: Inclusive lower bound on `started_at`
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: Exclusive upper bound on `started_at`
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Paged list of AtomicSessions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AtomicSessionPage'
+
+  /companions/{companion_id}:
+    parameters:
+      - $ref: '#/components/parameters/CompanionId'
+    get:
+      tags: [companions]
+      operationId: getCompanion
+      summary: Admin lookup of a Companion (RPG companion entity)
+      description: |
+        Returns the **domain entity** view of a Companion (species, level,
+        bonded_at, etc.) — NOT the AI agent that powers it. The agent lives
+        in AI Kernel; query its observability via `chora.ai_kernel.*`.
+      responses:
+        '200':
+          description: Companion entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Companion'
+        '404': { $ref: '#/components/responses/NotFound' }
+  /companions/{companion_id}/retire:
+    parameters:
+      - $ref: '#/components/parameters/CompanionId'
+    post:
+      tags: [companions]
+      operationId: retireCompanion
+      summary: Admin retirement of a Companion
+      description: |
+        Game-mechanic retirement. Distinct from account closure.
+        Triggers `chora.consumption.companion.retired.v1`.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RetireCompanionRequest'
+      responses:
+        '200':
+          description: Companion retired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Companion'
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /knowledge-graph/edges:
+    get:
+      tags: [knowledge-graph]
+      operationId: listKnowledgeGraphEdges
+      summary: Admin inspection of KnowledgeGraph edges around a node
+      parameters:
+        - name: topic_node_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: KnowledgeGraphNode ID to inspect
+        - name: depth
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 5
+            default: 1
+          description: Recursive CTE traversal depth (1–5)
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Edges around the queried node
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KnowledgeGraphEdgePage'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    TenantId:
+      name: tenant_id
+      in: query
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Tenant UUID (UUIDv7)
+    PathId:
+      name: path_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    SessionId:
+      name: session_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    CompanionId:
+      name: companion_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    Mode:
+      name: mode
+      in: query
+      required: false
+      schema:
+        $ref: '#/components/schemas/PathMode'
+      description: Filter by bimodal delivery mode
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      schema:
+        type: string
+      description: Opaque pagination cursor
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: Missing or invalid credentials
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: Caller lacks required role / capability
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: Resource not found (or soft-deleted)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflict:
+      description: State conflict
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: Domain-prefixed error code (UPPER_SNAKE_CASE)
+          example: CONSUMPTION_PATH_NOT_FOUND
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+
+    PathMode:
+      type: string
+      enum: [STRAIGHT_UP, GRAPH_DISCOVERY]
+      description: |
+        Bimodal delivery mode. STRAIGHT_UP = linear cert track.
+        GRAPH_DISCOVERY = curiosity-driven KnowledgeGraph traversal.
+
+    LearningPath:
+      type: object
+      required: [path_id, tenant_id, mode, atom_ids, created_at]
+      properties:
+        path_id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        title: { type: string }
+        description: { type: string }
+        mode: { $ref: '#/components/schemas/PathMode' }
+        atom_ids:
+          type: array
+          items: { type: string, format: uuid }
+          description: |
+            Atom UUID references. NO FK across DBs (cross-DB queries
+            forbidden — see ddd-enforcement). Eventually consistent via
+            local AtomProjection cache.
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        deleted_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    LearningPathPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/LearningPath' }
+        next_cursor: { type: string, nullable: true }
+
+    CreateLearningPathRequest:
+      type: object
+      required: [tenant_id, title, mode, atom_ids]
+      properties:
+        tenant_id: { type: string, format: uuid }
+        title: { type: string, minLength: 1, maxLength: 200 }
+        description: { type: string, maxLength: 2000 }
+        mode: { $ref: '#/components/schemas/PathMode' }
+        atom_ids:
+          type: array
+          minItems: 1
+          items: { type: string, format: uuid }
+
+    UpdateLearningPathRequest:
+      type: object
+      properties:
+        title: { type: string, minLength: 1, maxLength: 200 }
+        description: { type: string, maxLength: 2000 }
+        mode: { $ref: '#/components/schemas/PathMode' }
+        atom_ids:
+          type: array
+          items: { type: string, format: uuid }
+
+    AtomicSession:
+      type: object
+      required:
+        - session_id
+        - tenant_id
+        - learner_gcid
+        - atom_id
+        - atom_revision_id
+        - status
+        - started_at
+      properties:
+        session_id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        learner_gcid: { type: string, format: uuid }
+        atom_id: { type: string, format: uuid }
+        atom_revision_id: { type: string, format: uuid }
+        path_id:
+          type: string
+          format: uuid
+          nullable: true
+        status:
+          type: string
+          enum: [STARTED, COMPLETED, ABANDONED]
+        score:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+          nullable: true
+        answer_correct:
+          type: boolean
+          nullable: true
+        duration_ms:
+          type: integer
+          format: int64
+          nullable: true
+        started_at: { type: string, format: date-time }
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+        deleted_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    AtomicSessionPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/AtomicSession' }
+        next_cursor: { type: string, nullable: true }
+
+    CompanionSpecies:
+      type: string
+      enum:
+        - OWL
+        - FOX
+        - CAT
+        - DRAGON
+        - PHOENIX
+        - TURTLE
+        - WOLF
+        - RAVEN
+
+    Companion:
+      type: object
+      required:
+        - companion_id
+        - tenant_id
+        - owner_gcid
+        - species
+        - level
+        - bonded_at
+      properties:
+        companion_id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        owner_gcid: { type: string, format: uuid }
+        species: { $ref: '#/components/schemas/CompanionSpecies' }
+        level:
+          type: integer
+          minimum: 1
+        digital_skin_id:
+          type: string
+          format: uuid
+          nullable: true
+        bonded_at: { type: string, format: date-time }
+        retired_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    RetireCompanionRequest:
+      type: object
+      properties:
+        reason:
+          type: string
+          maxLength: 200
+          description: Free-form admin reason for retirement
+
+    KnowledgeGraphEdgeType:
+      type: string
+      enum:
+        - PREREQUISITE_OF
+        - EXTENDS
+        - ANALOGY_OF
+        - CONTRASTS_WITH
+        - APPLIED_IN
+
+    KnowledgeGraphEdge:
+      type: object
+      required: [edge_id, source_node_id, target_node_id, edge_type]
+      properties:
+        edge_id: { type: string, format: uuid }
+        source_node_id: { type: string, format: uuid }
+        target_node_id: { type: string, format: uuid }
+        edge_type: { $ref: '#/components/schemas/KnowledgeGraphEdgeType' }
+        weight:
+          type: number
+          format: float
+          nullable: true
+
+    KnowledgeGraphEdgePage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/KnowledgeGraphEdge' }
+        next_cursor: { type: string, nullable: true }

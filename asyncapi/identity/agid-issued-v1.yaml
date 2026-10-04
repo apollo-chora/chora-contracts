@@ -1,0 +1,65 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Identity — AgidIssued
+  version: 1.0.0
+  description: |
+    Published when a new AGID (Agent Identity, distinct from GCID) is minted.
+    Internal crews are provisioned programmatically; external partner / BYOA
+    AGIDs are provisioned via H+ Hub+ admin onboarding.
+
+    AGIDs CANNOT hold TenantMembership (per ddd-enforcement aggregate
+    invariant #10).
+
+    - Domain: Identity (`chora_identity` DB)
+    - Topic: `chora.identity.agid.issued.v1`
+    - Source proto: `proto/events/identity/agid.proto`
+       message `chora.identity.v1.AgidIssued`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  agidIssued:
+    address: chora.identity.agid.issued.v1
+    messages:
+      agidIssued:
+        $ref: '#/components/messages/AgidIssued'
+
+operations:
+  publishAgidIssued:
+    action: send
+    channel:
+      $ref: '#/channels/agidIssued'
+    messages:
+      - $ref: '#/channels/agidIssued/messages/agidIssued'
+
+  consumeAgidIssued:
+    action: receive
+    channel:
+      $ref: '#/channels/agidIssued'
+    description: |
+      Consumers: AI Kernel (crew composition), Governance (audit),
+      A2A Gateway (external partner / BYOA registration).
+    messages:
+      - $ref: '#/channels/agidIssued/messages/agidIssued'
+
+components:
+  messages:
+    AgidIssued:
+      name: AgidIssued
+      title: AGID Issued
+      summary: A new Agent Identity has been minted
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/identity/agid.proto#/chora.identity.v1.AgidIssued'

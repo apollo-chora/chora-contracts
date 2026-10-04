@@ -1,0 +1,128 @@
+// =============================================================================
+// chora.ai_kernel.v1 — Guardrail evaluation events
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 3
+//   (risk-tiered guardrails per agent — regex / DLP / Model Armor / output
+//    validators)
+// + .claude/skills/ai-runtime-guardrails/SKILL.md
+//
+// Owning domain : AI Kernel (chora_ai_kernel database)
+// Owning team   : Team 3 (Platform)
+// Topic prefix  : chora.ai_kernel.guardrail.*
+//
+// Guardrail evaluation runs per invocation per tier. Each agent's YAML
+// declares which tiers apply. Results: PASS / BLOCK / REDACT / FLAG.
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.ai_kernel.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/ai_kernel/v1;aikernelv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// GuardrailTier — tier of guardrail being evaluated.
+// -----------------------------------------------------------------------------
+enum GuardrailTier {
+  GUARDRAIL_TIER_UNSPECIFIED = 0;
+  GUARDRAIL_TIER_REGEX = 1;             // Cheap regex baseline (always-on)
+  GUARDRAIL_TIER_DLP = 2;                // Cloud DLP — PII detection / redaction
+  GUARDRAIL_TIER_MODEL_ARMOR = 3;        // Cloud Model Armor — prompt injection, jailbreak
+  GUARDRAIL_TIER_OUTPUT_VALIDATOR = 4;   // Domain-specific output validation
+}
+
+// -----------------------------------------------------------------------------
+// GuardrailResult — outcome of a tier evaluation.
+// -----------------------------------------------------------------------------
+enum GuardrailResult {
+  GUARDRAIL_RESULT_UNSPECIFIED = 0;
+  GUARDRAIL_RESULT_PASS = 1;     // Content cleared; proceed
+  GUARDRAIL_RESULT_BLOCK = 2;    // Hard block; invocation aborted
+  GUARDRAIL_RESULT_REDACT = 3;   // Content sanitised; proceed with redacted form
+  GUARDRAIL_RESULT_FLAG = 4;      // Allow but flag for governance review
+}
+
+// -----------------------------------------------------------------------------
+// GuardrailEvaluated — chora.ai_kernel.guardrail.evaluated.v1
+// -----------------------------------------------------------------------------
+//
+// Published for EVERY tier evaluation (PASS or otherwise). High-volume —
+// one event per (invocation × tier × direction). Direction is captured
+// in violation_type when relevant ("INPUT_*" vs "OUTPUT_*").
+message GuardrailEvaluated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — guardrail eval record identifier.
+  string eval_id = 2;
+
+  // Correlation to ModelInvoked / Completed / Failed events.
+  string invocation_id = 3;
+
+  GuardrailTier tier = 4;
+
+  GuardrailResult result = 5;
+
+  // UPPER_SNAKE_CASE classification when result != PASS
+  // (e.g., "INPUT_PII_DETECTED", "OUTPUT_HATE_SPEECH",
+  // "INPUT_PROMPT_INJECTION", "OUTPUT_HALLUCINATION",
+  // "OUTPUT_OFF_DOMAIN"). Empty when PASS.
+  string violation_type = 6;
+
+  // Latency of this tier evaluation in milliseconds (for SLO tracking).
+  int64 latency_ms = 7;
+
+  google.protobuf.Timestamp evaluated_at = 8;
+}
+
+// -----------------------------------------------------------------------------
+// GuardrailTriggered — chora.ai_kernel.guardrail.triggered.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a guardrail evaluation result requires governance
+// follow-up (BLOCK / REDACT / FLAG). Distinct from GuardrailEvaluated which
+// is the per-tier ledger — Triggered fans out to Governance + Notifications.
+message GuardrailTriggered {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string eval_id = 2;
+  string invocation_id = 3;
+  GuardrailTier tier = 4;
+  GuardrailResult result = 5;
+  string violation_type = 6;
+
+  // Tenant-scope policy_id that defined the guardrail behaviour.
+  string policy_id = 7;
+
+  google.protobuf.Timestamp triggered_at = 8;
+}
+
+// -----------------------------------------------------------------------------
+// GuardrailBypassed — chora.ai_kernel.guardrail.bypassed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when an authorised principal explicitly bypasses a guardrail
+// (e.g., admin-driven override for a known false positive). HIGHLY audited —
+// ALL bypass events feed the IMDA D4 Safety + Security evidence chain and
+// surface in O+ moderation queue.
+message GuardrailBypassed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string eval_id = 2;
+  string invocation_id = 3;
+  GuardrailTier tier = 4;
+
+  // GCID of the human who authorised the bypass (NEVER an AGID — only
+  // humans can bypass).
+  string bypassed_by_gcid = 5;
+
+  // Free-text justification (max 1024 chars). Required.
+  string justification = 6;
+
+  google.protobuf.Timestamp bypassed_at = 7;
+}

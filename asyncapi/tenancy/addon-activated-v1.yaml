@@ -1,0 +1,65 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Tenancy — AddonActivated
+  version: 1.0.0
+  description: |
+    Published when a tenant activates an add-on plan. Activates feature
+    flags for the tenant; downstream surfaces refresh entitlements.
+
+    Add-Ons are composable feature toggles, NOT pricing tiers.
+    DigitalSkin is NEVER part of an add-on plan (it is earned, not
+    purchased — see chora.sharing.* events).
+
+    - Domain: Tenancy + Billing (`chora_tenancy` DB)
+    - Topic: `chora.tenancy.addon.activated.v1`
+    - Source proto: `proto/events/tenancy/addon.proto`
+       message `chora.tenancy.v1.AddonActivated`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  addonActivated:
+    address: chora.tenancy.addon.activated.v1
+    messages:
+      addonActivated:
+        $ref: '#/components/messages/AddonActivated'
+
+operations:
+  publishAddonActivated:
+    action: send
+    channel:
+      $ref: '#/channels/addonActivated'
+    messages:
+      - $ref: '#/channels/addonActivated/messages/addonActivated'
+
+  consumeAddonActivated:
+    action: receive
+    channel:
+      $ref: '#/channels/addonActivated'
+    description: |
+      Consumers: ALL surfaces (refresh entitlement / feature flag),
+      AI Kernel (LoRA add-on enablement), Notifications.
+    messages:
+      - $ref: '#/channels/addonActivated/messages/addonActivated'
+
+components:
+  messages:
+    AddonActivated:
+      name: AddonActivated
+      title: Add-On Activated
+      summary: A tenant has activated an add-on plan
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/tenancy/addon.proto#/chora.tenancy.v1.AddonActivated'

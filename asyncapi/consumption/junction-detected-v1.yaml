@@ -1,0 +1,71 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Content Consumption — JunctionDetected
+  version: 1.0.0
+  description: |
+    Published by chora-fog-orchestrator (detect_junctions node) when fog
+    generation discovers that one of the 6 candidate neighbors is also a
+    focal atom in another of the user's active clusters (per ADR-143).
+
+    Triggers the `Subscription.junctionDetected` GraphQL push that
+    surfaces the "Join these maps?" modal (STITCH-A-KG-4).
+
+    - Domain: Content Consumption (`chora_consumption` DB)
+    - Aggregate root: `JunctionOpportunity` (transient — never persisted)
+    - Topic: `chora.consumption.kg_junction.detected.v1`
+    - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
+    - Source proto: `proto/events/consumption/knowledge_graph.proto`
+       message `chora.consumption.v1.JunctionDetected`
+
+    Embeds the mandatory `chora.common.v1.EventEnvelope` as field 1.
+  contact:
+    name: Chora Content Team (Team 1) + Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+    description: Google Cloud Pub/Sub (chora-489812 platform host)
+
+channels:
+  junctionDetected:
+    address: chora.consumption.kg_junction.detected.v1
+    description: Single-event topic for JunctionDetected.
+    messages:
+      junctionDetected:
+        $ref: '#/components/messages/JunctionDetected'
+
+operations:
+  publishJunctionDetected:
+    action: send
+    channel:
+      $ref: '#/channels/junctionDetected'
+    summary: Publish a JunctionDetected event
+
+  consumeJunctionDetected:
+    action: receive
+    channel:
+      $ref: '#/channels/junctionDetected'
+    summary: Subscribe to JunctionDetected events
+    description: |
+      Primary consumers:
+      - Notifications — proactive surface (push to user via WebSocket Subscription)
+      - Sharing — cross-topic curiosity bonus signal
+      - Observability — engagement loop signal (junction detection rate)
+
+components:
+  messages:
+    JunctionDetected:
+      name: JunctionDetected
+      title: Junction Detected
+      summary: Fog generation found a neighbor atom that is a focal in another cluster
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/consumption/knowledge_graph.proto#/chora.consumption.v1.JunctionDetected'

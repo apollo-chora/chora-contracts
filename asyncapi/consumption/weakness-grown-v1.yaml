@@ -1,0 +1,83 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Content Consumption — WeaknessGrown
+  version: 1.0.0
+  description: |
+    Published when a Growth Edge (`learner_weakness`) transitions active→"grown" —
+    its shakiness recovered to <= MasteredStrengthThreshold (~0). This is the
+    Curiosity-REWARD trigger (ADR-196): sub-phase A (CHO-1895) made practice MOVE
+    an edge; this event makes the GROW moment observable + rewardable instead of a
+    silent status flip.
+
+    - Domain: Content Consumption (`chora_consumption` DB)
+    - Aggregate root: `learner_weakness` (per-GCID Growth Edges)
+    - Topic: `chora.consumption.weakness.grown.v1`
+    - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
+    - Source proto: `proto/events/consumption/weakness.proto`
+       message `chora.consumption.v1.WeaknessGrown`
+
+    LEARNER-FACING term is "Growth Edge"; the internal term is "weakness"
+    (3-audience explainability). Emitted once per real transition (idempotent via
+    the envelope idempotency_key); a re-grow after a fresh weakness re-raised the
+    edge is a new event. Embeds the mandatory `chora.common.v1.EventEnvelope` as
+    field 1.
+  contact:
+    name: Team 1 (Content) + Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+    description: Google Cloud Pub/Sub (chora-489812 platform host)
+
+channels:
+  weaknessGrown:
+    address: chora.consumption.weakness.grown.v1
+    description: Single-event topic for WeaknessGrown.
+    messages:
+      weaknessGrown:
+        $ref: '#/components/messages/WeaknessGrown'
+
+operations:
+  publishWeaknessGrown:
+    action: send
+    channel:
+      $ref: '#/channels/weaknessGrown'
+    summary: Publish a WeaknessGrown event
+    description: |
+      Emitted by chora-consumption from the Growth-Edge recovery paths
+      (drill-atom completion per CHO-1895, or sustained concept mastery /
+      Ebbinghaus) the moment an edge crosses the mastery threshold.
+    messages:
+      - $ref: '#/channels/weaknessGrown/messages/weaknessGrown'
+
+  consumeWeaknessGrown:
+    action: receive
+    channel:
+      $ref: '#/channels/weaknessGrown'
+    summary: Subscribe to WeaknessGrown events
+    description: |
+      Primary consumers (loosely-coupled, attach later — ADR-196 B3, deferred):
+      - Sharing — award the Three-Currency Economy (XP / Coins / Reputation)
+      - Consumption (Companion) — companion reaction / XP
+      - Observability — engagement / D1 evidence
+      The A+ FE celebrates the grow by reading status='grown' directly (no subscribe).
+    messages:
+      - $ref: '#/channels/weaknessGrown/messages/weaknessGrown'
+
+components:
+  messages:
+    WeaknessGrown:
+      name: WeaknessGrown
+      title: Weakness Grown (Growth Edge mastered)
+      summary: A learner's Growth Edge reached "grown" (mastered)
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/consumption/weakness.proto#/chora.consumption.v1.WeaknessGrown'

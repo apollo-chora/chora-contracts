@@ -1,0 +1,63 @@
+// =============================================================================
+// GENERATED — DO NOT EDIT.
+// Source : events/ai_kernel/invocation.proto message ModelInvocationCompleted
+// Tool   : chora-contracts/internal/protoflatten
+// Why    : GCP Pub/Sub Schema Registry rejects (a) schemas with `import`
+//          statements and (b) schemas with more than one top-level message.
+//          This flat copy contains exactly ONE top-level message;
+//          EventEnvelope + Timestamp + transitive deps are nested inside.
+// Path C : see chora-contracts/CHANGELOG.md and m10-data-plane main.tf.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.ai_kernel.v1;
+
+message ModelInvocationCompleted {
+  // Inlined chora.common.v1.EventEnvelope (nested for self-contained schema).
+  message Envelope {
+    string event_id = 1;
+    string idempotency_key = 2;
+    string tenant_id = 3;
+    string gcid = 4;
+    Timestamp occurred_at = 5;
+    Timestamp published_at = 6;
+    string traceparent = 7;
+    string tracestate = 8;
+    string source_project = 9;
+    string source_service = 10;
+    int32 schema_version = 11;
+    string correlation_id = 12;
+    string causation_id = 13;
+    string chora_imda_dimension = 14;
+    string imda_lifecycle_stage = 15;
+  }
+
+  // Inlined google.protobuf.Timestamp (nested; wire-compatible).
+  message Timestamp {
+    int64 seconds = 1;
+    int32 nanos = 2;
+  }
+
+  // Inlined enum dep: ModelKind
+  enum ModelKind {
+    MODEL_KIND_UNSPECIFIED = 0;
+    MODEL_KIND_GEMINI_FLASH = 1;
+    MODEL_KIND_GEMINI_PRO = 2;
+    MODEL_KIND_GEMMA_TENANT_LORA = 3;
+    MODEL_KIND_EMBEDDING = 4;
+    MODEL_KIND_CLASSIFIER = 5;
+  }
+
+  Envelope envelope = 1;
+  string invocation_id = 2;
+  string model_id = 3;
+  ModelKind model_kind = 4;
+  string agid = 5;
+  string prompt_hash = 6;
+  string response_hash = 7;
+  int64 latency_ms = 8;
+  int64 tokens_in = 9;
+  int64 tokens_out = 10;
+  Timestamp completed_at = 11;
+}

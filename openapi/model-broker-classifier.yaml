@@ -1,0 +1,237 @@
+openapi: "3.2.0"
+info:
+  title: "Chora Model Broker Classifier API"
+  version: "1.0.0"
+  description: |
+    REST API for the Classifier arm of the 3-service Model Broker
+    (Router + Gateway + Classifier per Tier 2 D6).
+
+    Owning domain : AI Kernel (`chora_ai_kernel` database)
+    Owning team   : Team 3 (Platform)
+    Project       : `chora-489812` (platform host)
+    Surface       : O+ Observability+ (admin only)
+
+    AP-01: This contract exists BEFORE implementation.
+
+    The Classifier Service performs intent classification on a routing
+    request and returns:
+
+      - `intent`     — one of the canonical Model Broker intents
+      - `tier`       — recommended tier 1/2/3
+      - `agent_id`   — recommended agent (per crew-composition)
+      - `confidence` — 0..1 score
+
+    M10 skeleton: deterministic keyword + risk + heuristic mapping.
+    M15 will swap in a fine-tuned Gemma classifier head with a small-model
+    inference stack (per Tier 2 D6 — owns its own training/registry/A-B).
+
+    Authorization: Bearer JWT (mesh internal mTLS) + X-Tenant-Id +
+    gcid headers.
+  contact:
+    name: "Chora Platform Team (Team 3)"
+  license:
+    name: "Proprietary"
+
+servers:
+  - url: "https://api.chora.app"
+    description: "Production"
+  - url: "http://localhost:8080"
+    description: "Local development"
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Health
+    description: "Health + readiness"
+  - name: Classifier
+    description: "Intent classification + intent catalogue"
+
+paths:
+  /healthz:
+    get:
+      operationId: healthz
+      summary: "Liveness probe"
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          $ref: "#/components/responses/Healthy"
+
+  /readyz:
+    get:
+      operationId: readyz
+      summary: "Readiness probe — checks classifier wiring"
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          $ref: "#/components/responses/Healthy"
+        "503":
+          description: "Classifier uninitialised"
+
+  /classifier/intent:
+    post:
+      operationId: classifyIntent
+      summary: "Classify a routing request — returns intent + tier + agent"
+      description: |
+        Pure-function classification: input prompt excerpt + intent hint +
+        risk tier → output intent + tier + agent_id + confidence.
+        Stateless. Idempotent. Append-only audit row persisted.
+      tags: [Classifier]
+      parameters:
+        - $ref: "#/components/parameters/TenantHeader"
+        - $ref: "#/components/parameters/GcidHeader"
+        - $ref: "#/components/parameters/Traceparent"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ClassifyRequest"
+      responses:
+        "200":
+          description: "Classification returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClassifyResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /classifier/intents:
+    get:
+      operationId: listIntents
+      summary: "Catalogue of canonical Model Broker intents"
+      description: |
+        Returns the full intent catalogue with descriptions + the agent_id
+        and recommended tier per intent. Used by the Gateway (debug),
+        admin tooling, and IMDA D2 transparency surface.
+      tags: [Classifier]
+      security: []
+      responses:
+        "200":
+          description: "Intent catalogue"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IntentCatalogResponse"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    TenantHeader:
+      name: X-Tenant-Id
+      in: header
+      required: true
+      description: "Tenant UUID propagated from edge (mesh-injected)."
+      schema: { type: string, format: uuid }
+    GcidHeader:
+      name: gcid
+      in: header
+      required: true
+      description: "Global Chora ID UUIDv7 (caller's identity)."
+      schema: { type: string, format: uuid }
+    Traceparent:
+      name: traceparent
+      in: header
+      required: false
+      description: "W3C traceparent header for cross-service trace stitching."
+      schema: { type: string }
+  responses:
+    Healthy:
+      description: "OK"
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              status: { type: string }
+              time: { type: string, format: date-time }
+    BadRequest:
+      description: "Invalid request body or headers"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string, example: "CLASSIFIER_INVALID_BODY" }
+        message: { type: string }
+    Intent:
+      type: string
+      description: "Canonical Model Broker intent (per crew-composition)."
+      enum:
+        - atom_authoring
+        - consumption_query
+        - moderation_check
+        - delivery_admin
+        - sharing_social
+        - a2a_handoff
+        - generic_chat
+    Tier:
+      type: integer
+      description: "Recommended tier (1=fast, 2=balanced, 3=premium)."
+      enum: [1, 2, 3]
+    ClassifyRequest:
+      type: object
+      required: [prompt_excerpt, risk_tier]
+      properties:
+        prompt_excerpt:
+          type: string
+          description: "First ~512 chars of the user prompt."
+          example: "Generate 10 MCQ on Agile Estimation"
+        agent_intent_hint:
+          type: string
+          description: "Optional caller-provided intent hint."
+        risk_tier:
+          type: string
+          enum: [low, medium, high]
+        prompt_token_count_est:
+          type: integer
+          minimum: 0
+    ClassifyResponse:
+      type: object
+      required: [classification_id, intent, tier, agent_id, confidence, classified_at]
+      properties:
+        classification_id: { type: string, format: uuid }
+        intent:
+          $ref: "#/components/schemas/Intent"
+        tier:
+          $ref: "#/components/schemas/Tier"
+        agent_id:
+          type: string
+          example: "chora-creation-author-mcq"
+        confidence:
+          type: number
+          format: double
+          minimum: 0.0
+          maximum: 1.0
+        reason: { type: string }
+        classified_at: { type: string, format: date-time }
+        traceparent: { type: string }
+    IntentCatalogEntry:
+      type: object
+      required: [intent, description, agent_id, default_tier]
+      properties:
+        intent:
+          $ref: "#/components/schemas/Intent"
+        description: { type: string }
+        agent_id: { type: string }
+        default_tier:
+          $ref: "#/components/schemas/Tier"
+    IntentCatalogResponse:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/IntentCatalogEntry" }
+        total: { type: integer }

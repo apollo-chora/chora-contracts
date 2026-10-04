@@ -1,0 +1,143 @@
+// =============================================================================
+// chora.delivery.v1 — TestSet domain events (authoring lifecycle)
+// =============================================================================
+//
+// Source-of-truth: chora-contracts/openapi/delivery-test-sets.yaml +
+//   docs/architecture/adrs/adr-155-assessment-grading-dispatch.md
+// + .claude/rules/ddd-enforcement.md
+// + .claude/skills/domain-content-delivery/SKILL.md
+//
+// Owning domain  : Content Delivery (chora_delivery database)
+// Owning team    : Team 2 (Delivery)
+// Topic prefix   : chora.delivery.test_set.*
+//
+// TestSet is a curated, point-weighted collection of Questions (authored in
+// chora-creation). Once PUBLISHED the question list is immutable (ADR-155 D5).
+// Cross-domain reference: each TestSetQuestion holds a UUIDv7
+// question_atom_id pointing into chora_creation.questions (no FK; existence
+// validated via gRPC at add-time).
+//
+// Five topics defined here:
+//
+//   chora.delivery.test_set.created.v1           — POST /test-sets lands
+//   chora.delivery.test_set.question_added.v1    — POST /{id}/questions
+//   chora.delivery.test_set.question_updated.v1  — PUT  /{id}/questions/{qId}
+//   chora.delivery.test_set.question_removed.v1  — DELETE /{id}/questions/{qId}
+//   chora.delivery.test_set.published.v1         — POST /{id}/publish
+//
+// Append-only after publish: PublishedTestSet.question_count + total_points
+// are immutable from that point — any subsequent question_added/_updated/
+// _removed event for the same test_set_id is a protocol violation.
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.delivery.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/delivery/v1;deliveryv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// TestSetState — TestSet lifecycle (mirrors OpenAPI TestSetState enum)
+// -----------------------------------------------------------------------------
+enum TestSetState {
+  TEST_SET_STATE_UNSPECIFIED = 0;
+  TEST_SET_STATE_DRAFT       = 1;
+  TEST_SET_STATE_PUBLISHED   = 2;
+  TEST_SET_STATE_ARCHIVED    = 3;
+}
+
+// -----------------------------------------------------------------------------
+// TestSetCreated — chora.delivery.test_set.created.v1
+// -----------------------------------------------------------------------------
+//
+// Published when an author creates a new test-set. The test-set is born in
+// DRAFT state with zero questions.
+message TestSetCreated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 of the newly created TestSet.
+  string test_set_id = 2;
+
+  // Tenant that owns the test-set.
+  string tenant_id = 3;
+
+  // GCID of the author (instructor / admin).
+  string author_gcid = 4;
+
+  // Instructor-facing title.
+  string title = 5;
+
+  // Created-at timestamp (mirrors envelope.occurred_at).
+  google.protobuf.Timestamp created_at = 6;
+}
+
+// -----------------------------------------------------------------------------
+// TestSetQuestionAdded — chora.delivery.test_set.question_added.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a question inclusion is added to a DRAFT test-set.
+message TestSetQuestionAdded {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string test_set_id          = 2;
+  string test_set_question_id = 3; // UUIDv7 of the inclusion row
+  string question_atom_id     = 4; // cross-domain ref to chora_creation
+  string question_type        = 5; // mcq | oe (matches creation-questions.yaml)
+  int32  display_order        = 6;
+  double points               = 7;
+  google.protobuf.Timestamp added_at = 8;
+}
+
+// -----------------------------------------------------------------------------
+// TestSetQuestionUpdated — chora.delivery.test_set.question_updated.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a question inclusion's points / display_order is updated.
+// The question_atom_id + question_type are immutable; to swap atoms, callers
+// remove + re-add.
+message TestSetQuestionUpdated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string test_set_id          = 2;
+  string test_set_question_id = 3;
+  int32  display_order        = 4;
+  double points               = 5;
+  google.protobuf.Timestamp updated_at = 6;
+}
+
+// -----------------------------------------------------------------------------
+// TestSetQuestionRemoved — chora.delivery.test_set.question_removed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a question inclusion is soft-deleted from a DRAFT test-set.
+// The underlying Question in chora_creation is unchanged.
+message TestSetQuestionRemoved {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string test_set_id          = 2;
+  string test_set_question_id = 3;
+  google.protobuf.Timestamp removed_at = 4;
+}
+
+// -----------------------------------------------------------------------------
+// TestSetPublished — chora.delivery.test_set.published.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a test-set transitions DRAFT → PUBLISHED. The question list
+// becomes immutable from this point (ADR-155 D5). Downstream Assessment
+// instantiation (delivery-assessments.yaml) is then enabled.
+message TestSetPublished {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string test_set_id     = 2;
+  string tenant_id       = 3;
+  string author_gcid     = 4;
+  int32  question_count  = 5;
+  double total_points    = 6;
+  google.protobuf.Timestamp published_at = 7;
+}

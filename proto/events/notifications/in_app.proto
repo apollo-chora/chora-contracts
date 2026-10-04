@@ -1,0 +1,107 @@
+// =============================================================================
+// chora.notifications.v1 — In-app notification events
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 4 D16
+//   (Integrative UI — role-driven feature visibility per surface)
+//
+// Owning domain : Notifications (chora_notifications database)
+// Owning team   : Team 3 (Platform)
+// Topic prefix  : chora.notifications.in_app.*
+//
+// In-app notifications are persistent platform notifications surfaced in
+// the notification tray of each surface (A+ / C+ / H+ / O+ / R+). Distinct
+// from email + push — these always live within the platform.
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.notifications.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/notifications/v1;notificationsv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// InAppKind — semantic taxonomy for in-app notifications.
+// -----------------------------------------------------------------------------
+//
+// Drives surface-side rendering (icon, color, click destination):
+// SOCIAL     — Sharing-domain notifications (mention, follow, reaction)
+// ACADEMIC   — Consumption / Delivery (path step due, cert issued)
+// SYSTEM     — Platform housekeeping (maintenance window, version note)
+// BILLING    — Tenancy + Billing (invoice issued, dunning, subscription renewed)
+// GOVERNANCE — Governance (policy update notice, attestation due)
+enum InAppKind {
+  IN_APP_KIND_UNSPECIFIED = 0;
+  IN_APP_KIND_SOCIAL = 1;
+  IN_APP_KIND_ACADEMIC = 2;
+  IN_APP_KIND_SYSTEM = 3;
+  IN_APP_KIND_BILLING = 4;
+  IN_APP_KIND_GOVERNANCE = 5;
+}
+
+// -----------------------------------------------------------------------------
+// InAppNotificationCreated — chora.notifications.in_app.created.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a new in-app notification is materialised for a recipient.
+// Surfaces subscribe (via WebSocket / SSE bridge) for real-time tray updates.
+message InAppNotificationCreated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — InAppNotification aggregate root identifier.
+  string notif_id = 2;
+
+  // Recipient GCID.
+  string recipient_gcid = 3;
+
+  InAppKind kind = 4;
+
+  // Display title (max 80 chars).
+  string title = 5;
+
+  // Optional short body / preview (max 256 chars).
+  string body = 6;
+
+  // Optional click-through deep link (e.g., "/aplus/path/01HXYZ...",
+  // "/oplus/policy/01HABC...").
+  string deeplink = 7;
+
+  google.protobuf.Timestamp created_at = 8;
+}
+
+// -----------------------------------------------------------------------------
+// InAppNotificationRead — chora.notifications.in_app.read.v1
+// -----------------------------------------------------------------------------
+//
+// Published when the recipient reads / opens the notification. Fans out to
+// counter widgets across surfaces.
+message InAppNotificationRead {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string notif_id = 2;
+  string recipient_gcid = 3;
+  InAppKind kind = 4;
+
+  google.protobuf.Timestamp read_at = 5;
+}
+
+// -----------------------------------------------------------------------------
+// InAppNotificationDismissed — chora.notifications.in_app.dismissed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when the recipient explicitly dismisses without reading
+// (swipe / X button). Soft-delete: notification record retained for audit.
+message InAppNotificationDismissed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string notif_id = 2;
+  string recipient_gcid = 3;
+  InAppKind kind = 4;
+
+  google.protobuf.Timestamp dismissed_at = 5;
+}

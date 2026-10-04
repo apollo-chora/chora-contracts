@@ -1,0 +1,65 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Identity — KycRejected
+  version: 1.0.0
+  description: |
+    Published when KYC verification fails (provider negative result,
+    manual reviewer rejection, document quality issue). User MAY retry
+    subject to fee re-charge for manual_doc unless retry_allowed is false
+    (terminal compliance hold).
+
+    - Domain: Identity (`chora_identity` DB)
+    - Topic: `chora.identity.kyc.rejected.v1`
+    - Source proto: `proto/events/identity/kyc.proto`
+       message `chora.identity.v1.KycRejected`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  kycRejected:
+    address: chora.identity.kyc.rejected.v1
+    messages:
+      kycRejected:
+        $ref: '#/components/messages/KycRejected'
+
+operations:
+  publishKycRejected:
+    action: send
+    channel:
+      $ref: '#/channels/kycRejected'
+    messages:
+      - $ref: '#/channels/kycRejected/messages/kycRejected'
+
+  consumeKycRejected:
+    action: receive
+    channel:
+      $ref: '#/channels/kycRejected'
+    description: |
+      Consumers: Notifications (rejection reason + retry guidance),
+      Observability (rejection-rate / reason-mix dashboard), Governance
+      (compliance audit), Billing (refund manual_doc fee when policy
+      requires).
+    messages:
+      - $ref: '#/channels/kycRejected/messages/kycRejected'
+
+components:
+  messages:
+    KycRejected:
+      name: KycRejected
+      title: KYC Rejected
+      summary: A KYC verification has failed
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/identity/kyc.proto#/chora.identity.v1.KycRejected'

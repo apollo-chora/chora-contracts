@@ -1,0 +1,116 @@
+// =============================================================================
+// chora.delivery.v1 — Campus Operations events (rooms, equipment, incidents)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 2 D7+D8
+// + .claude/rules/ddd-enforcement.md.
+//
+// Owning domain  : Content Delivery (chora_delivery database)
+// Owning team    : Team 2 (Delivery)
+// Topic prefix   : chora.delivery.campusops.*
+//
+// Campus Operations covers physical + digital classroom resource bookings
+// (rooms, equipment) and incident reporting. The Resource child of the
+// Booking aggregate stores the canonical row; events are the cross-service
+// notification channel.
+//
+// Per ADR-129/130/131 collapse mandate, this proto absorbs what was
+// previously the standalone `chora.campusops.*` topics.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.delivery.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/delivery/v1;deliveryv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// IncidentSeverity — triage classification for campus incidents.
+// Drives notification routing + escalation rules.
+enum IncidentSeverity {
+  INCIDENT_SEVERITY_UNSPECIFIED = 0;
+  INCIDENT_SEVERITY_LOW = 1;
+  INCIDENT_SEVERITY_MEDIUM = 2;
+  INCIDENT_SEVERITY_HIGH = 3;
+  INCIDENT_SEVERITY_CRITICAL = 4;
+}
+
+// -----------------------------------------------------------------------------
+// RoomBooked — chora.delivery.campusops.room_booked.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a physical room is reserved for a Course / Class instance.
+// Drives Notifications (room confirmation) + signage updates.
+message RoomBooked {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 of the Booking child entry (room reservation).
+  string booking_id = 2;
+
+  // UUID of the Resource (room) within chora_delivery.
+  string resource_id = 3;
+
+  // Optional UUID of the Course bound to this booking. Empty for ad-hoc
+  // bookings not tied to a course.
+  string course_id = 4;
+
+  google.protobuf.Timestamp starts_at = 5;
+  google.protobuf.Timestamp ends_at = 6;
+}
+
+// -----------------------------------------------------------------------------
+// EquipmentReserved — chora.delivery.campusops.equipment_reserved.v1
+// -----------------------------------------------------------------------------
+//
+// Published when shared equipment is reserved (projector, lab kit, etc.).
+// Drives Notifications + inventory check-out.
+message EquipmentReserved {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 of the Booking child entry (equipment reservation).
+  string booking_id = 2;
+
+  // UUID of the Resource (equipment) within chora_delivery.
+  string resource_id = 3;
+
+  string course_id = 4;
+
+  google.protobuf.Timestamp starts_at = 5;
+  google.protobuf.Timestamp ends_at = 6;
+}
+
+// -----------------------------------------------------------------------------
+// IncidentReported — chora.delivery.campusops.incident_reported.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a campus incident is logged (broken equipment, behaviour,
+// safety, IT failure). Drives Notifications (admin paging) + workflow
+// (ticket creation).
+message IncidentReported {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 of the incident record (overloads booking_id slot for
+  // schema consistency across this proto's events).
+  string booking_id = 2;
+
+  // UUID of the affected Resource. May be empty for non-resource
+  // incidents (e.g., behaviour reports).
+  string resource_id = 3;
+
+  string course_id = 4;
+
+  google.protobuf.Timestamp starts_at = 5;
+  google.protobuf.Timestamp ends_at = 6;
+
+  IncidentSeverity incident_severity = 7;
+
+  // Optional human-readable incident description (max 1024 chars).
+  string description = 8;
+
+  // GCID of the actor who reported the incident.
+  string reported_by_gcid = 9;
+
+  google.protobuf.Timestamp reported_at = 10;
+}

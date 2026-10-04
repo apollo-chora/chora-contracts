@@ -1,0 +1,1842 @@
+openapi: 3.2.0
+info:
+  title: "Chora Content Creation Admin API"
+  version: "1.3.0"
+  description: |
+    Author-facing admin REST API for the Content Creation domain.
+
+    Surface (admin) : A+ Creator mode
+    Owning team     : Team 1 (Content)
+    Owning domain   : Content Creation (chora_creation database)
+    Topic prefix    : chora.creation.*
+
+    SCOPE — admin CRUD only:
+      * authoring  LearningAtom drafts, transitions, archive
+      * appending  AtomRevision (immutable, append-only per ddd-enforcement)
+      * uploading  Media assets (binds to atoms; processed asynchronously)
+
+    LEARNER reads are GraphQL (chora-contracts/graphql/creation.graphql) per
+    AP-01 + the protocol strategy in chora-contracts/CLAUDE.md §5.
+
+    All endpoints are bearer-authenticated against Identity Platform JWTs.
+    Tenant scope is derived from the JWT claim `tenant_id`; cross-tenant
+    requests are rejected at the auth interceptor.
+
+    Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 2 D8
+    + .claude/rules/ddd-enforcement.md
+  contact:
+    name: "Chora Platform Team — Content Track"
+  license:
+    name: "Proprietary"
+
+servers:
+  - url: "https://api.chora.site/creation/v1"
+    description: "Production"
+  - url: "https://api.staging.chora.site/creation/v1"
+    description: "Staging"
+  - url: "http://localhost:8081/creation/v1"
+    description: "Local dev"
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: atoms
+    description: "LearningAtom CRUD (admin-only mutations)."
+  - name: revisions
+    description: "AtomRevision append-only operations."
+  - name: media
+    description: "Media asset upload + retrieval."
+  - name: collections
+    description: |
+      Personal Collection CRUD (WS-6a, 2026-05-26) — curated, ordered lists
+      of LearningAtoms owned by a learner/creator across courses.
+
+paths:
+  # ---------------------------------------------------------------------------
+  # Atoms
+  # ---------------------------------------------------------------------------
+  /atoms:
+    post:
+      tags: [atoms]
+      operationId: createAtom
+      summary: "Create a new LearningAtom in DRAFT status"
+      description: |
+        Creates a new atom with no revisions. The author must subsequently
+        POST `/atoms/{atom_id}/revisions` to append the first revision and
+        then POST `/atoms/{atom_id}/publish` to make it learner-facing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAtomRequest"
+      responses:
+        "201":
+          description: "Atom created."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LearningAtom"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /atoms/batch:
+    post:
+      tags: [atoms]
+      operationId: createAtomsBatch
+      summary: "Create N AI-generated atoms in a single transaction"
+      description: |
+        Phyllis MVP §5.3 batch endpoint. Persists N AI-generated atoms in a
+        single transaction (typically 10 from AI Assist) and emits one
+        `chora.creation.atom.created.v1` event per atom.
+
+        Used by chora-bff-gateway after AI Assist + Guardrail screening
+        completes. Each atom in the request carries `screening_decision`
+        (approved / remediated / blocked) — blocked atoms are dropped at
+        the BFF before this call (chora-creation never persists BLOCKED).
+
+        Idempotent on the request-level `idempotency_key` — repeat calls
+        with the same key return the prior 201 response (no duplicate
+        atoms created).
+
+        Per audit-content-fillgaps §3.1 + audit-aikernel-fillgaps §3 (path
+        reconciled from `/v1/atoms:generate` to `/v1/atoms/batch` per
+        Phyllis MVP §5.3).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAtomsBatchRequest"
+      responses:
+        "201":
+          description: "Atoms created"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateAtomsBatchResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /atoms/{atom_id}:
+    parameters:
+      - $ref: "#/components/parameters/AtomIdPath"
+    get:
+      tags: [atoms]
+      operationId: getAtom
+      summary: "Fetch a single atom by ID"
+      responses:
+        "200":
+          description: "Atom retrieved."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LearningAtom"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      tags: [atoms]
+      operationId: updateAtomMetadata
+      summary: "Update atom-level metadata (DRAFT only)"
+      description: |
+        Updates atom-level metadata. Atom must be in DRAFT status — published
+        atoms are re-versioned via the revisions API instead.
+
+        ADR-156 Phase 1 mutable fields: `stem` (NEW), `title`, `subject` (NEW),
+        `cognitive_level` (NEW), `imda_dimension_tags` (NEW), `author_note`
+        (NEW), `media_assets` (NEW, ≤1 image), `topic_node_ids`, `difficulty`,
+        `locale`. `question_type` (renamed from `atom_type`) is immutable.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateAtomRequest"
+      responses:
+        "200":
+          description: "Atom updated."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LearningAtom"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /atoms/{atom_id}/publish:
+    parameters:
+      - $ref: "#/components/parameters/AtomIdPath"
+    post:
+      tags: [atoms]
+      operationId: publishAtom
+      summary: "Transition atom DRAFT -> PUBLISHED"
+      description: |
+        Transitions a LearningAtom from DRAFT to PUBLISHED.
+
+        **A22 Option α (auto-publish revisions)** — per FE A22 ack the
+        Question PATCH/POST handlers append immutable QuestionRevision rows at
+        save time (no separate revision-publish step). This handler only
+        flips the atom-level lifecycle state and emits the
+        `chora.creation.atom.published.v1` event.
+
+        **Idempotent re-publish** — calling publish on an atom that is
+        already PUBLISHED returns 200 with the same LearningAtom envelope
+        (no domain mutation, no event re-emission). FE's "Publish" CTA can
+        therefore retry safely without distinguishing first-publish vs.
+        re-publish.
+
+        **Discriminated 409 sub-codes** (per ADR-141 D4 — safety and
+        robustness + transparency):
+
+          * `CREATION_ATOM_NO_PUBLISHED_REVISION` — no Question/Revision
+            exists for this atom yet (FE help copy: "Save a question first
+            to enable Publish")
+          * `CREATION_ATOM_ARCHIVED` — atom is soft-deleted (defence in
+            depth; in-memory repo filters soft-deleted in Get, so the
+            common path is 404 instead)
+
+        **Response shape** — bare LearningAtom (no `{atom, ...}` wrap) with
+        `status` + `current_revision_id` + `current_revision_number`
+        populated so the FE "Published! (rev N is live)" toast renders
+        verbatim per A22.Q4.
+
+        Bridged via chora-gateway at the SAME path (verbatim proxy; no
+        body, no reshape).
+      responses:
+        "200":
+          description: |
+            Atom published. Response is the bare LearningAtom with
+            status=PUBLISHED + revision summary. Idempotent re-publish
+            returns the same envelope (no state change).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LearningAtom"
+        "404":
+          description: "Atom not found (or soft-deleted)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                atomNotFound:
+                  value:
+                    code: CREATION_ATOM_NOT_FOUND
+                    message: atom not found
+        "409":
+          description: |
+            Atom is in a state incompatible with publish. The error
+            envelope's `code` is one of the discriminated sub-codes
+            (CREATION_ATOM_NO_PUBLISHED_REVISION / CREATION_ATOM_ARCHIVED)
+            so the FE can localise + render specific help copy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublishAtomConflictError"
+              examples:
+                noPublishedRevision:
+                  value:
+                    code: CREATION_ATOM_NO_PUBLISHED_REVISION
+                    message: cannot publish atom without at least one published revision
+                archived:
+                  value:
+                    code: CREATION_ATOM_ARCHIVED
+                    message: cannot publish archived (soft-deleted) atom
+
+  /atoms/{atom_id}/reuse-visibility:
+    parameters:
+      - $ref: "#/components/parameters/AtomIdPath"
+    patch:
+      tags: [atoms]
+      operationId: changeAtomReuseVisibility
+      summary: "Change the author reuse-consent audience (ADR-229 WS-1)"
+      description: |
+        Sets the atom's reuse-consent audience (`private` | `friends` |
+        `tenant`). Reuse covers pickers, test-set snapshots, quiz arming and
+        duels — learner playback is untouched (ADR-229 D1).
+
+        **Author-only** — the caller's GCID must equal the atom's author
+        GCID (`learning_atoms.gcid`). This is the first author-level
+        authorization check in chora-creation; a non-author receives 403
+        `CREATION_NOT_AUTHOR`.
+
+        **Idempotent no-op** — setting the current value returns 200 and
+        emits nothing. A real change persists the flag and emits
+        `chora.creation.atom.reuse_visibility_changed.v1` via the outbox.
+
+        Per ADR-229 Amendment A1.1 narrowing NEVER revokes grants —
+        consumed-continuity is handled by the orphan-edition machinery
+        (successor story).
+
+        Bridged via chora-gateway at the SAME path (verbatim proxy).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reuse_visibility]
+              properties:
+                reuse_visibility:
+                  $ref: "#/components/schemas/ReuseVisibility"
+      responses:
+        "200":
+          description: |
+            Audience applied (or already at the requested value). Response
+            is the bare LearningAtom with the effective reuse_visibility.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LearningAtom"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          description: "Caller is not the atom's author (CREATION_NOT_AUTHOR)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                notAuthor:
+                  value:
+                    code: CREATION_NOT_AUTHOR
+                    message: only the atom author may change this
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: "Atom is archived (soft-deleted); audience is frozen."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                archived:
+                  value:
+                    code: CREATION_ATOM_ARCHIVED
+                    message: cannot change reuse visibility of archived atom
+
+  /atoms/{atom_id}/archive:
+    parameters:
+      - $ref: "#/components/parameters/AtomIdPath"
+    post:
+      tags: [atoms]
+      operationId: archiveAtom
+      summary: "Soft-delete (archive) an atom"
+      description: |
+        Per ddd-enforcement aggregate invariant #5, this is a SOFT delete
+        (sets `deleted_at`, transitions status to ARCHIVED). Never a hard
+        delete. Publishes a `chora.creation.atom.archived.v1` event.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ArchiveAtomRequest"
+      responses:
+        "200":
+          description: "Atom archived."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LearningAtom"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /atoms/{atom_id}/clone:
+    parameters:
+      - $ref: "#/components/parameters/AtomIdPath"
+    post:
+      tags: [atoms]
+      operationId: cloneAtom
+      summary: "Clone an atom + its question as a new DRAFT variant (owner = caller)"
+      description: |
+        ADR-199 clone-as-variant (Wave 2). Reads the SOURCE atom + its live
+        question and creates a NEW atom (new atom_id, status=DRAFT) owned by the
+        CALLER, copying title (default `Copy of {source title}`, or the `title`
+        override) + stem / body / tags / subject / cognitive_level / difficulty /
+        question_type and the question payload (MCQ xor OE). Provenance
+        `cloned_from_atom_id` points at the source. The source is UNTOUCHED
+        (append-only respected — this is a new aggregate). 404 if the source is
+        not found in the caller's tenant.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CloneAtomRequest"
+      responses:
+        "201":
+          description: "The new cloned DRAFT atom."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LearningAtom"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---------------------------------------------------------------------------
+  # Atom media (ADR-156 Phase 1 — E2E-BE-ATOM-1 + E2E-BE-ATOM-GW)
+  # ---------------------------------------------------------------------------
+  /atoms/{atom_id}/media:
+    parameters:
+      - $ref: "#/components/parameters/AtomIdPath"
+    post:
+      tags: [atoms, media]
+      operationId: mintAtomMediaSignedUrl
+      summary: "Mint a V4 signed URL for atom-media image upload"
+      description: |
+        ADR-156 Phase 1 atom-media support. FE PUTs the image directly to GCS
+        using the returned signed URL — the BFF / API path never proxies the
+        bytes themselves (only the small JSON envelope). Bucket is
+        `chora-atom-media-dev` in `asia-southeast1` per E2E-INFRA-ATOM-1
+        (provisioned at Infra commit `4df66f51`); env var `ATOM_MEDIA_BUCKET`
+        sources the bucket name on the chora-creation pod.
+
+        **Phase 1 constraints**:
+          - ≤1 image entry per atom
+          - MIME validated server-side: `image/jpeg` | `image/png` | `image/webp`
+          - Size cap via `TenantEntitlement.atom_media_max_bytes` (default 2MB)
+          - URL expires after 15 minutes — caller MUST upload within window
+
+        Storage class: STANDARD with 365d auto-Coldline lifecycle.
+        Public read via signed URL only (uniform_bucket_level_access:
+        public_access_prevention=enforced).
+
+        On the `LearningAtom` aggregate, the resulting `media_assets[]` entry
+        is set by a subsequent `PATCH /atoms/{atom_id}` carrying the canonical
+        GCS object URL + alt_text per ADR-156 Decision #5.
+
+        Cloud Armor priority 996 covers this path via the prefix-match regex
+        landed at Infra `1052db87`; chora-gateway proxy at `af8173a0` provides
+        the BFF passthrough.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MintAtomMediaSignedUrlRequest"
+      responses:
+        "200":
+          description: "Signed URL minted. FE PUTs the image bytes to `upload_url`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AtomMediaSignedUrl"
+        "400":
+          description: "Invalid request body (bad mime / size_bytes out of range)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: "Caller is not the atom's author + lacks the instructor/admin role."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "413":
+          description: "`size_bytes` exceeds `TenantEntitlement.atom_media_max_bytes`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "415":
+          description: "`mime` not in the supported set (jpeg/png/webp)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: "`ATOM_MEDIA_BUCKET` unset on the deployment — handler MUST fail loud per `feedback_no_inline_config`. Envelope: `{code: 'CREATION_ATOM_MEDIA_NOT_WIRED'}`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  # ---------------------------------------------------------------------------
+  # Revisions
+  # ---------------------------------------------------------------------------
+  /atoms/{atom_id}/revisions:
+    parameters:
+      - $ref: "#/components/parameters/AtomIdPath"
+    get:
+      tags: [revisions]
+      operationId: listAtomRevisions
+      summary: "List revisions of an atom"
+      parameters:
+        - name: cursor
+          in: query
+          schema: { type: string }
+          description: "Opaque pagination cursor (UUIDv7-based)."
+        - name: limit
+          in: query
+          schema: { type: integer, default: 20, minimum: 1, maximum: 100 }
+      responses:
+        "200":
+          description: "Revisions retrieved."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AtomRevisionPage"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      tags: [revisions]
+      operationId: publishAtomRevision
+      summary: "Append + publish a new AtomRevision (append-only)"
+      description: |
+        Per ddd-enforcement aggregate invariant #4, AtomRevision is
+        APPEND-ONLY — never UPDATE or DELETE in place. The new revision
+        receives a monotonically-increasing revision_number and becomes the
+        atom's `current_revision_id`. Publishes a
+        `chora.creation.revision.published.v1` event.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PublishRevisionRequest"
+      responses:
+        "201":
+          description: "Revision published."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AtomRevision"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---------------------------------------------------------------------------
+  # Media
+  # ---------------------------------------------------------------------------
+  /media:
+    post:
+      tags: [media]
+      operationId: uploadMedia
+      summary: "Upload a media asset (multipart)"
+      description: |
+        Accepts a multipart/form-data upload. The asset is staged in GCS and
+        a `chora.creation.media.uploaded.v1` event is published; processing
+        is asynchronous (security scan + moderation + variant generation).
+        Wait for `chora.creation.media.processed.v1` before binding to a
+        learner-facing surface.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/UploadMediaRequest"
+      responses:
+        "202":
+          description: "Upload accepted; processing pending."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Media"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "413":
+          description: "Payload too large."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /media/{media_id}:
+    parameters:
+      - $ref: "#/components/parameters/MediaIdPath"
+    get:
+      tags: [media]
+      operationId: getMedia
+      summary: "Fetch a media asset by ID"
+      responses:
+        "200":
+          description: "Media retrieved."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Media"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---------------------------------------------------------------------------
+  # Personal Collections (WS-6a, 2026-05-26)
+  #
+  # Curated, ordered lists of LearningAtoms owned by a learner/creator across
+  # courses. LearningAtom remains the PRIMARY AGGREGATE ROOT per CLAUDE.md
+  # §1 — collections query atoms, they NEVER own atom content.
+  # ---------------------------------------------------------------------------
+  /collections:
+    post:
+      tags: [collections]
+      operationId: createCollection
+      summary: "Create a new personal Collection"
+      description: |
+        Creates a new Collection owned by the authenticated caller (gcid from
+        Identity Platform JWT). Default visibility is PRIVATE; cross-tenant
+        atom inclusion is permitted ONLY when visibility = PUBLIC (per BP-01
+        learner-ownership in CLAUDE.md §5).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCollectionRequest"
+      responses:
+        "201":
+          description: "Collection created."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Collection"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /me/collections:
+    get:
+      tags: [collections]
+      operationId: listMyCollections
+      summary: "List the caller's personal Collections"
+      description: |
+        Returns Collections owned by the authenticated gcid in the caller's
+        tenant. Soft-deleted Collections are filtered out (per
+        ddd-enforcement Aggregate Invariant #6).
+      responses:
+        "200":
+          description: "Collections listed."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CollectionListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /collections/{collection_id}:
+    parameters:
+      - $ref: "#/components/parameters/CollectionIdPath"
+    get:
+      tags: [collections]
+      operationId: getCollection
+      summary: "Fetch a Collection by ID (visibility-gated)"
+      description: |
+        Returns the Collection iff (a) it belongs to the caller's tenant OR
+        (b) its visibility = PUBLIC. Cross-tenant PUBLIC reads require the
+        chora_creation RLS policy to be broadened in a follow-up migration;
+        until then, only tenant-local rows are visible.
+      responses:
+        "200":
+          description: "Collection retrieved."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Collection"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      tags: [collections]
+      operationId: patchCollection
+      summary: "Update Collection metadata (owner only)"
+      description: |
+        Partial update of title / description / visibility. Caller MUST be
+        the Collection owner (gcid == owner_gcid); otherwise returns 403.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchCollectionRequest"
+      responses:
+        "200":
+          description: "Collection updated."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Collection"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [collections]
+      operationId: deleteCollection
+      summary: "Soft-delete a Collection (owner only)"
+      description: |
+        Soft-deletes the Collection (sets deleted_at; cascades soft-delete
+        to collection_atoms child rows per Aggregate Invariant #8). Hard
+        delete is RESERVED for crypto-shred / cold archive (per
+        ddd-enforcement Aggregate Invariant #5).
+      responses:
+        "204":
+          description: "Collection soft-deleted."
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /collections/{collection_id}/atoms:
+    parameters:
+      - $ref: "#/components/parameters/CollectionIdPath"
+    post:
+      tags: [collections]
+      operationId: addCollectionAtom
+      summary: "Add an atom to a Collection"
+      description: |
+        Appends the supplied atom_id to the Collection. The atom is
+        validated for existence in chora_creation.learning_atoms via the
+        AtomLookup domain service (per ddd-enforcement Aggregate Invariant
+        #3 — cross-aggregate UUID reference, no FK constraint).
+
+        Cross-tenant atom inclusion is permitted ONLY when the Collection's
+        visibility = PUBLIC (per BP-01 learner-ownership).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddCollectionAtomRequest"
+      responses:
+        "201":
+          description: "Atom added; returns the updated Collection."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Collection"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: "Forbidden — caller is not owner OR cross-tenant atom on non-PUBLIC collection."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: "Collection or atom not found."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: "Atom is already in the Collection."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          description: "500-atom cap exceeded."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /collections/{collection_id}/atoms/{atom_id}:
+    parameters:
+      - $ref: "#/components/parameters/CollectionIdPath"
+      - $ref: "#/components/parameters/AtomIdPath"
+    delete:
+      tags: [collections]
+      operationId: removeCollectionAtom
+      summary: "Remove an atom from a Collection"
+      description: |
+        Removes the atom from the Collection + compacts remaining atom
+        positions. The LearningAtom itself is NOT affected — CollectionAtom
+        is a curation row, not an atom owner.
+      responses:
+        "204":
+          description: "Atom removed."
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+# =============================================================================
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: "Identity Platform JWT bearer token."
+
+  parameters:
+    AtomIdPath:
+      name: atom_id
+      in: path
+      required: true
+      description: "UUIDv7 atom identifier."
+      schema:
+        type: string
+        format: uuid
+    MediaIdPath:
+      name: media_id
+      in: path
+      required: true
+      description: "UUIDv7 media identifier."
+      schema:
+        type: string
+        format: uuid
+    CollectionIdPath:
+      name: collection_id
+      in: path
+      required: true
+      description: "UUIDv7 Collection identifier (WS-6a)."
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    BadRequest:
+      description: "Invalid request payload."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: "Missing or invalid bearer token."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: "Authenticated but lacks the required role/entitlement."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: "Resource does not exist (or is not visible to this tenant)."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Conflict:
+      description: "Resource is in a state incompatible with the requested transition."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  schemas:
+    # -------------------------------------------------------------------------
+    # Enums
+    # -------------------------------------------------------------------------
+    QuestionType:
+      type: string
+      description: |
+        Type of LearningAtom question payload — drives the content schema + validation
+        strategy. Renamed from `AtomType` per ADR-156 Phase 1 (Decision #2).
+
+        CHO-2178 — this enum now declares exactly what the domain can REPRESENT.
+        It previously advertised ten values while chora-creation's vocabulary
+        (`mcq | flashcard | video | essay | outline`) had five, and the handler's
+        fallback arm lowercased any unrecognised string straight into a
+        free-text column. So `TRUE_FALSE`, `MATCHING`, `ORDERING`, `CODE` and
+        `SIMULATION` each minted an atom the domain calls INVALID and the event
+        wire cannot carry — published, 200 OK, and invisible to every other
+        domain forever. Those five are withdrawn; the write boundary now rejects
+        an unrepresentable type with 400 `CREATION_ATOM_TYPE_UNSUPPORTED`
+        instead of accepting it and losing the atom.
+
+        Each value below maps onto exactly one domain flavour. The uppercase
+        aliases are retained because the A+ / R+ authoring UIs send them.
+      enum:
+        - MULTIPLE_CHOICE   # -> mcq
+        - SHORT_ANSWER      # -> essay  (A+ / R+ authoring send this)
+        - ESSAY             # -> essay
+        - FILL_BLANK        # -> flashcard
+        - MULTIMEDIA        # -> video
+        - OUTLINE           # -> outline  (was un-declarable; 4 live atoms were stranded)
+
+    AtomType:
+      type: string
+      deprecated: true
+      description: |
+        DEPRECATED — alias of `QuestionType` retained for one release cycle per
+        ADR-156 Phase 1 backwards-compat shim. Will be removed in the next
+        minor release. New callers MUST use `QuestionType`.
+      enum:
+        - MULTIPLE_CHOICE
+        - FILL_BLANK
+        - TRUE_FALSE
+        - SHORT_ANSWER
+        - MATCHING
+        - ORDERING
+        - CODE
+        - ESSAY
+        - MULTIMEDIA
+        - SIMULATION
+
+    CognitiveLevel:
+      type: string
+      description: |
+        Bloom's 6-level cognitive taxonomy (ADR-156 Decision #3). Optional
+        initially; mandatory after curriculum onboarding lands. Lowercase
+        enum per OpenAPI convention.
+      enum:
+        - knowledge
+        - comprehension
+        - application
+        - analysis
+        - synthesis
+        - evaluation
+
+    ImdaDimensionTag:
+      type: string
+      description: |
+        IMDA Model AI Governance Framework 4-dimension tag (ADR-156 Decision #6
+        + ADR-141 canonical labels). Optional initially; gate before public
+        catalog later.
+      enum:
+        - accountability
+        - transparency
+        - safety_robustness
+        - fairness_human_oversight
+
+    MediaAssetType:
+      type: string
+      description: |
+        Atom media asset type. Phase 1 supports only `image` per ADR-156
+        Decision #5; `audio` + `video` deferred to Phase 4.
+      enum:
+        - image
+
+    AtomMediaAsset:
+      type: object
+      description: |
+        Embedded media asset on `LearningAtom.media_assets`. Phase 1 ≤1
+        image entry per ADR-156 Decision #5. `url` is the canonical gs://
+        URL persisted after the `POST /atoms/{atom_id}/media` signed-URL
+        upload completes.
+      required: [type, url, mime, size_bytes]
+      properties:
+        type:
+          $ref: "#/components/schemas/MediaAssetType"
+        url:
+          type: string
+          format: uri
+          description: "Canonical `gs://chora-atom-media-{env}/...` URL."
+        alt_text:
+          type: string
+          maxLength: 280
+          description: "Accessibility alt text (≤280 chars)."
+        mime:
+          type: string
+          enum: [image/jpeg, image/png, image/webp]
+          description: "MIME type. Phase 1 jpeg/png/webp only."
+        size_bytes:
+          type: integer
+          format: int64
+          minimum: 1
+          description: "Image size in bytes (tenant-cap enforced server-side)."
+
+    AtomStatus:
+      type: string
+      description: "Lifecycle state of a LearningAtom."
+      enum:
+        - DRAFT
+        - PUBLISHED
+        - ARCHIVED
+
+    ValidationRuleType:
+      type: string
+      description: "Strategy for evaluating a learner's answer."
+      enum:
+        - EXACT_MATCH
+        - REGEX
+        - RANGE
+        - KEYWORD
+        - MANUAL
+        - LLM_GRADED
+
+    MediaType:
+      type: string
+      enum:
+        - IMAGE
+        - VIDEO
+        - AUDIO
+        - DOCUMENT
+        - INTERACTIVE
+
+    MediaProcessingStatus:
+      type: string
+      enum:
+        - PENDING
+        - SCANNING
+        - MODERATING
+        - EXTRACTING
+        - GENERATING_VARIANTS
+        - READY
+        - QUARANTINED
+        - FAILED
+
+    # -------------------------------------------------------------------------
+    # Aggregates
+    # -------------------------------------------------------------------------
+    LearningAtom:
+      type: object
+      description: |
+        The PRIMARY AGGREGATE ROOT of the Chora platform. Collections in
+        other domains query atoms but do NOT own them.
+
+        ADR-156 Phase 1 (Decision #1-#6 + #8):
+          - `stem` (NEW) — required, ≤4096 chars, canonical question prompt.
+            Backfilled from `mcq_payload.prompt` / `oe_payload.prompt` in the
+            0014 migration. FE auto-derives a `display_label` from `stem` when
+            `title` is empty.
+          - `title` — relaxed from NOT NULL to optional (≤256).
+          - `question_type` — RENAMED from `atom_type` (wire-compatible).
+          - `subject` (NEW) — free-text ≤64; vocabulary curation later.
+          - `cognitive_level` (NEW) — Bloom enum; mandatory after curriculum
+            onboarding.
+          - `imda_dimension_tags` (NEW) — IMDA D1-D4 enum array.
+          - `author_note` (NEW) — author's private free-text note.
+          - `media_assets` (NEW) — Phase 1 ≤1 image entry.
+      required:
+        - atom_id
+        - tenant_id
+        - question_type
+        - status
+        - stem
+        - author_gcid
+        - difficulty
+        - locale
+        - created_at
+        - updated_at
+      properties:
+        atom_id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        question_type:
+          $ref: "#/components/schemas/QuestionType"
+        atom_type:
+          allOf:
+            - $ref: "#/components/schemas/AtomType"
+          deprecated: true
+          description: |
+            DEPRECATED — alias of `question_type` retained for one release
+            cycle per ADR-156 backwards-compat shim. New callers MUST use
+            `question_type`.
+        status:
+          $ref: "#/components/schemas/AtomStatus"
+        stem:
+          type: string
+          maxLength: 4096
+          description: |
+            Canonical question prompt (NEW, REQUIRED per ADR-156 Decision #1
+            structural change). Backfilled from `mcq_payload.prompt` /
+            `oe_payload.prompt` in migration 0014. FE renders `display_label`
+            from this when `title` is empty.
+        title:
+          type: string
+          maxLength: 256
+          description: |
+            Optional display title (RELAXED from required per ADR-156
+            Decision #1). FE auto-derives a `display_label` from `stem` when
+            empty.
+        subject:
+          type: string
+          maxLength: 64
+          description: |
+            Optional free-text subject (e.g. "biology", "algebra") per
+            ADR-156 Decision #4. Vocabulary curation deferred.
+        cognitive_level:
+          allOf:
+            - $ref: "#/components/schemas/CognitiveLevel"
+          description: |
+            Optional Bloom's taxonomy level per ADR-156 Decision #3. Will be
+            mandatory after curriculum onboarding lands.
+        imda_dimension_tags:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImdaDimensionTag"
+          maxItems: 4
+          description: |
+            Optional IMDA governance dimension tags per ADR-156 Decision #6 +
+            ADR-141 canonical labels. Will gate public catalog later.
+        author_note:
+          type: string
+          description: |
+            Author's private free-text note (NEW per ADR-156). Distinct
+            semantics from `title` — author scratchpad / context-for-editors.
+        media_assets:
+          type: array
+          items:
+            $ref: "#/components/schemas/AtomMediaAsset"
+          maxItems: 1
+          description: |
+            Embedded media assets per ADR-156 Decision #5. Phase 1 supports
+            ≤1 image entry; audio/video deferred to Phase 4. URL is the
+            canonical `gs://` returned from `POST /atoms/{atom_id}/media`.
+        author_gcid:
+          type: string
+          format: uuid
+        topic_node_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+        difficulty:
+          type: integer
+          minimum: 0
+          maximum: 5
+          description: "1..5 difficulty; 0 = unscored."
+        locale:
+          type: string
+          example: "en-SG"
+        current_revision_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            UUIDv7 of the latest published QuestionRevision for this atom.
+            Populated by publishAtom on success per A22.Q4 so the FE
+            success toast renders verbatim. Nullable when the atom has no
+            question revision (DRAFT atom that has never been saved).
+        current_revision_number:
+          type: integer
+          minimum: 0
+          description: |
+            Monotonically-increasing integer of the latest published
+            revision. 0 if no published revision yet. Populated by
+            publishAtom on success.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        deleted_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: "Soft-delete timestamp; null when active."
+        reuse_visibility:
+          $ref: "#/components/schemas/ReuseVisibility"
+
+    ReuseVisibility:
+      type: string
+      enum: [private, friends, tenant]
+      default: private
+      description: |
+        ADR-229 author-consent audience for atom REUSE (pickers, snapshots,
+        quiz arming — learner playback untouched). Server default is
+        `private` (consent-first); mutation is author-only via
+        PATCH /atoms/{atom_id}/reuse-visibility. The `friends` value ships
+        server-side but stays hidden in the A+ authoring UI until the
+        social-graph friendship UX is live (Amendment A1.4).
+
+    AtomRevision:
+      type: object
+      description: |
+        Append-only content snapshot. Content + validation rules are
+        IMMUTABLE once published. revision_number is monotonically
+        increasing within an atom.
+      required:
+        - revision_id
+        - atom_id
+        - revision_number
+        - content_hash
+        - validation_rule_type
+        - published_by_gcid
+        - published_at
+      properties:
+        revision_id:
+          type: string
+          format: uuid
+        atom_id:
+          type: string
+          format: uuid
+        revision_number:
+          type: integer
+          minimum: 1
+        content:
+          type: object
+          additionalProperties: true
+          description: "Atom-type-specific content payload (JSONB)."
+        content_hash:
+          type: string
+          description: "Hex SHA-256 of the canonical content JSONB."
+        validation_rule_type:
+          $ref: "#/components/schemas/ValidationRuleType"
+        published_by_gcid:
+          type: string
+          format: uuid
+        published_at:
+          type: string
+          format: date-time
+
+    Media:
+      type: object
+      required:
+        - media_id
+        - tenant_id
+        - media_type
+        - mime_type
+        - size_bytes
+        - processing_status
+        - uploaded_by_gcid
+        - uploaded_at
+      properties:
+        media_id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        atom_id:
+          type: string
+          format: uuid
+          nullable: true
+        media_type:
+          $ref: "#/components/schemas/MediaType"
+        mime_type:
+          type: string
+          example: "image/png"
+        size_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        duration_ms:
+          type: integer
+          format: int64
+          minimum: 0
+          description: "0 for non-temporal media (IMAGE / DOCUMENT / INTERACTIVE)."
+        processing_status:
+          $ref: "#/components/schemas/MediaProcessingStatus"
+        gcs_uri:
+          type: string
+          description: "GCS URI (do NOT serve to learners until status=READY)."
+        uploaded_by_gcid:
+          type: string
+          format: uuid
+        uploaded_at:
+          type: string
+          format: date-time
+
+    # -------------------------------------------------------------------------
+    # Request bodies
+    # -------------------------------------------------------------------------
+    CloneAtomRequest:
+      type: object
+      description: |
+        Optional overrides for POST /atoms/{atom_id}/clone. Empty body is valid
+        (the clone title defaults to "Copy of {source title}").
+      properties:
+        title:
+          type: string
+          maxLength: 256
+          description: 'Override the clone title. Default: "Copy of {source title}".'
+
+    CreateAtomRequest:
+      type: object
+      description: |
+        Create-atom request envelope. ADR-156 Phase 1:
+          - `question_type` REPLACES `atom_type` (deprecated alias accepted
+            for one release cycle).
+          - `stem` REQUIRED; `title` relaxed to optional.
+          - New optional fields: `subject`, `cognitive_level`,
+            `imda_dimension_tags`, `author_note`, `media_assets`.
+      required: [question_type, stem, locale]
+      properties:
+        question_type:
+          $ref: "#/components/schemas/QuestionType"
+        atom_type:
+          allOf:
+            - $ref: "#/components/schemas/AtomType"
+          deprecated: true
+          description: |
+            DEPRECATED — accepted as a synonym for `question_type` for one
+            release cycle. When both are supplied, `question_type` wins.
+        stem:
+          type: string
+          maxLength: 4096
+          description: |
+            REQUIRED — canonical question prompt per ADR-156 Decision #1
+            structural change.
+        title:
+          type: string
+          maxLength: 256
+          description: "Optional display title (relaxed per ADR-156 Decision #1)."
+        subject:
+          type: string
+          maxLength: 64
+          description: "Optional free-text subject per ADR-156 Decision #4."
+        cognitive_level:
+          allOf:
+            - $ref: "#/components/schemas/CognitiveLevel"
+          description: "Optional Bloom level per ADR-156 Decision #3."
+        imda_dimension_tags:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImdaDimensionTag"
+          maxItems: 4
+          description: "Optional IMDA D1-D4 tags per ADR-156 Decision #6."
+        author_note:
+          type: string
+          description: "Optional author's private free-text note."
+        media_assets:
+          type: array
+          items:
+            $ref: "#/components/schemas/AtomMediaAsset"
+          maxItems: 1
+          description: "Optional embedded media assets (Phase 1 ≤1 image)."
+        topic_node_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+        difficulty:
+          type: integer
+          minimum: 0
+          maximum: 5
+        locale:
+          type: string
+
+    CreateAtomsBatchRequest:
+      type: object
+      required: [idempotency_key, atoms]
+      description: |
+        Batch create N atoms transactionally. All atoms persisted in a
+        single TX; one chora.creation.atom.created.v1 event per atom.
+        Idempotent on idempotency_key.
+      properties:
+        idempotency_key:
+          type: string
+          format: uuid
+          description: "UUIDv7. Same key returns the prior 201 response."
+        atoms:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items:
+            $ref: "#/components/schemas/BatchAtomEntry"
+
+    BatchAtomEntry:
+      type: object
+      required: [question_type, stem, locale, content, validation_rule_type, screening_decision]
+      description: |
+        Single atom in a batch — combines CreateAtomRequest + initial
+        AtomRevision body + Gatekeeper screening verdict. Blocked atoms
+        SHOULD be filtered at the BFF before this call.
+
+        ADR-156 Phase 1: `question_type` replaces `atom_type` (deprecated
+        alias accepted), `stem` required, `title` relaxed to optional.
+      properties:
+        question_type:
+          $ref: "#/components/schemas/QuestionType"
+        atom_type:
+          allOf:
+            - $ref: "#/components/schemas/AtomType"
+          deprecated: true
+          description: "DEPRECATED — alias of `question_type` (one release cycle)."
+        stem:
+          type: string
+          maxLength: 4096
+          description: "REQUIRED canonical question prompt per ADR-156."
+        title:
+          type: string
+          maxLength: 256
+          description: "Optional display title (relaxed per ADR-156 Decision #1)."
+        subject:
+          type: string
+          maxLength: 64
+        cognitive_level:
+          $ref: "#/components/schemas/CognitiveLevel"
+        imda_dimension_tags:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImdaDimensionTag"
+          maxItems: 4
+        author_note:
+          type: string
+        media_assets:
+          type: array
+          items:
+            $ref: "#/components/schemas/AtomMediaAsset"
+          maxItems: 1
+        topic_node_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+        difficulty:
+          type: integer
+          minimum: 0
+          maximum: 5
+        locale:
+          type: string
+        content:
+          type: object
+          description: "Atom-type-specific body (MCQ stem + options, etc.)"
+          additionalProperties: true
+        validation_rule_type:
+          type: string
+        screening_decision:
+          type: string
+          enum: [approved, remediated]
+          description: |
+            Gatekeeper verdict (per ScreenContent RPC). 'blocked' atoms are
+            never persisted. 'remediated' carries rewritten content.
+        rewritten_content:
+          type: object
+          description: "Set when screening_decision = remediated"
+          additionalProperties: true
+        created_by_agent:
+          type: string
+          description: "Producer agent role (e.g., 'ai_assist')"
+        imda_dimension:
+          type: string
+          enum: [accountability, transparency, safety_and_robustness, fairness_and_human_oversight]
+          description: "ADR-141 canonical IMDA dimension for this atom's screening evidence"
+
+    CreateAtomsBatchResponse:
+      type: object
+      required: [atoms_created, idempotency_key]
+      properties:
+        idempotency_key:
+          type: string
+          format: uuid
+        atoms_created:
+          type: array
+          items:
+            $ref: "#/components/schemas/LearningAtom"
+        events_emitted:
+          type: integer
+          description: "Count of chora.creation.atom.created.v1 events emitted."
+
+    UpdateAtomRequest:
+      type: object
+      description: |
+        Partial update — only provided fields are mutated.
+
+        ADR-156 Phase 1: extends UPDATE surface with the new optional
+        fields (`stem`, `subject`, `cognitive_level`, `imda_dimension_tags`,
+        `author_note`, `media_assets`). `question_type` is immutable post-
+        create (the rename here is on the read/projection side only).
+      properties:
+        stem:
+          type: string
+          maxLength: 4096
+          description: "Update the canonical question prompt (ADR-156 Decision #1)."
+        title:
+          type: string
+          maxLength: 256
+        subject:
+          type: string
+          maxLength: 64
+        tags:
+          type: array
+          items:
+            type: string
+            maxLength: 64
+          description: |
+            Atom classification tags (ADR-156). Replaces the atom's tag set on
+            PATCH. Documented to match the live handler, which has long accepted
+            the legacy `{title, body, tags, mode}` shape (CHO-1899 W2.D
+            tags/subject edit). Searchable via the GET /api/atoms/questions/search
+            `tag` filter.
+        cognitive_level:
+          $ref: "#/components/schemas/CognitiveLevel"
+        imda_dimension_tags:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImdaDimensionTag"
+          maxItems: 4
+        author_note:
+          type: string
+        media_assets:
+          type: array
+          items:
+            $ref: "#/components/schemas/AtomMediaAsset"
+          maxItems: 1
+          description: |
+            Phase 1 ≤1 image entry. Use the canonical `object_url` from
+            `POST /atoms/{atom_id}/media` here after the GCS upload completes.
+        topic_node_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+        difficulty:
+          type: integer
+          minimum: 0
+          maximum: 5
+        locale:
+          type: string
+
+    ArchiveAtomRequest:
+      type: object
+      properties:
+        reason:
+          type: string
+          maxLength: 512
+
+    MintAtomMediaSignedUrlRequest:
+      type: object
+      required: [mime, size_bytes]
+      description: |
+        Request body for `POST /atoms/{atom_id}/media`. Caller declares the
+        intended object's MIME + size up-front so the server can
+        (a) reject unsupported types at 415 + (b) enforce
+        `TenantEntitlement.atom_media_max_bytes` at 413 BEFORE minting the
+        signed URL.
+      properties:
+        mime:
+          type: string
+          enum: [image/jpeg, image/png, image/webp]
+          description: "MUST match one of the Phase 1 supported types."
+        size_bytes:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 10485760
+          description: |
+            Image size in bytes. Server enforces the per-tenant cap
+            (`TenantEntitlement.atom_media_max_bytes`, default 2_097_152
+            bytes = 2 MiB). The schema-level `maximum: 10485760` is an outer
+            10 MiB safety bound — actual cap is tighter per tenant config.
+        alt_text:
+          type: string
+          maxLength: 280
+          description: "Optional alt text — stamped on the GCS object metadata as `x-goog-meta-alt-text` for accessibility audit trail."
+
+    AtomMediaSignedUrl:
+      type: object
+      required: [upload_url, expires_at, object_url, max_size_bytes]
+      description: |
+        Server response to `POST /atoms/{atom_id}/media`. The FE:
+          1. PUTs the image bytes to `upload_url` (Content-Type MUST match the
+             `mime` from the request).
+          2. PATCHes the atom (`PATCH /atoms/{atom_id}`) with `media_assets[0]`
+             set to `{type: 'image', url: object_url, alt_text, mime, size_bytes}`
+             per ADR-156 Decision #5.
+        `expires_at` is when the V4 signed URL stops accepting uploads
+        (typically 15 minutes from mint time per `secrets-and-env` skill
+        default).
+      properties:
+        upload_url:
+          type: string
+          format: uri
+          description: "V4 signed URL for `PUT`. Single-use; expires per `expires_at`."
+        expires_at:
+          type: string
+          format: date-time
+          description: "ISO-8601 UTC timestamp when `upload_url` stops accepting uploads."
+        object_url:
+          type: string
+          format: uri
+          description: |
+            Canonical `gs://chora-atom-media-{env}/tenants/{tenant_id}/atoms/{atom_id}/{object_id}`
+            URL the FE persists to `media_assets[0].url` on the subsequent
+            PATCH atom call. Distinct from `upload_url` (which carries the
+            time-limited signature).
+        max_size_bytes:
+          type: integer
+          format: int64
+          description: |
+            The actual server-enforced size cap for this tenant — may be
+            tighter than the request's `size_bytes` if the latter slipped
+            past the schema-level outer bound. FE MUST honour this on the
+            PUT (the GCS upload rejects above this).
+
+    PublishRevisionRequest:
+      type: object
+      required: [content, validation_rule_type]
+      properties:
+        content:
+          type: object
+          additionalProperties: true
+          description: "Atom-type-specific content payload (JSONB)."
+        validation_rule_type:
+          $ref: "#/components/schemas/ValidationRuleType"
+        change_reason:
+          type: string
+          maxLength: 512
+          description: "Optional author-supplied change rationale (audit-trail)."
+
+    UploadMediaRequest:
+      type: object
+      required: [file, media_type]
+      properties:
+        file:
+          type: string
+          format: binary
+          description: "Binary asset payload."
+        media_type:
+          $ref: "#/components/schemas/MediaType"
+        atom_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: "Optional FK to a parent LearningAtom."
+
+    # -------------------------------------------------------------------------
+    # Pagination + error envelope
+    # -------------------------------------------------------------------------
+    AtomRevisionPage:
+      type: object
+      required: [items, page_info]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AtomRevision"
+        page_info:
+          $ref: "#/components/schemas/PageInfo"
+
+    PageInfo:
+      type: object
+      required: [has_next_page]
+      properties:
+        has_next_page:
+          type: boolean
+        end_cursor:
+          type: string
+          nullable: true
+
+    Error:
+      type: object
+      description: "Standard error envelope (matches the error-handling skill)."
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: "Domain-prefixed UPPER_SNAKE_CASE error code (e.g., CREATION_ATOM_NOT_FOUND)."
+        message:
+          type: string
+        request_id:
+          type: string
+          description: "X-Request-ID propagated for correlation."
+        details:
+          type: object
+          additionalProperties: true
+          description: "Optional structured error context."
+
+    PublishAtomConflictError:
+      type: object
+      description: |
+        Discriminated 409 error envelope for publishAtom. The `code` field is
+        constrained to the publish-specific sub-codes so the FE can localise
+        per-code help copy (A22.Q3 + ADR-141 D4 transparency).
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum:
+            - CREATION_ATOM_NO_PUBLISHED_REVISION
+            - CREATION_ATOM_ARCHIVED
+          description: |
+            Discriminated publish-conflict sub-code:
+              * CREATION_ATOM_NO_PUBLISHED_REVISION — no Question/Revision exists for the atom
+              * CREATION_ATOM_ARCHIVED              — atom is soft-deleted (defence in depth)
+        message:
+          type: string
+        request_id:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+
+    # -------------------------------------------------------------------------
+    # Personal Collections (WS-6a, 2026-05-26)
+    # -------------------------------------------------------------------------
+    CollectionVisibility:
+      type: string
+      description: |
+        Audience of a personal Collection — ADR-233 D7.
+
+        ONE shared audience vocabulary across the platform: these are the SAME
+        three values an atom carries in `reuse_visibility`, so `friends`
+        resolves against the SAME friend set the reuse gate uses (ADR-230).
+          * private — only the owning learner can read
+          * friends — the owner plus the owner's friend set (ADR-230)
+          * tenant  — any GCID in the owning tenant can read
+
+        BREAKING (2026-07-14): the former `PRIVATE` / `TENANT_INTERNAL` /
+        `PUBLIC` enum is RETIRED. Storage moved from a PG enum to
+        `TEXT CHECK (visibility IN ('private','friends','tenant'))` in migration
+        `chora-creation/0031_collection_audience`, which remapped
+        `PRIVATE → private`, `TENANT_INTERNAL → tenant`, `PUBLIC → tenant`.
+        The uppercase values are REJECTED by the domain value object
+        (`internal/domain/audience`) — sending one is a 400.
+
+        `PUBLIC` is retired rather than renamed: RLS on `collections` is
+        `tenant_id = current_setting('chora.tenant_id')`, so a "public"
+        collection was never readable across tenants — the row is simply
+        invisible. Collapsing it to `tenant` preserves its EFFECTIVE audience
+        exactly. Cross-tenant distribution is a SYNDICATION concern (ADR-229
+        fork (a): clone + provenance), never a visibility level — which also
+        retires the incoherent BP-01 cross-tenant atom-membership rule that
+        keyed off `PUBLIC`.
+      enum:
+        - private
+        - friends
+        - tenant
+
+    CollectionAtomRef:
+      type: object
+      description: "Child membership row — references a LearningAtom by UUID."
+      required: [collection_id, atom_id, position, added_at]
+      properties:
+        collection_id:
+          type: string
+          format: uuid
+        atom_id:
+          type: string
+          format: uuid
+          description: |
+            UUIDv7 of the referenced LearningAtom (cross-aggregate UUID
+            reference per ddd-enforcement Aggregate Invariant #3 — no FK
+            constraint; existence validated by the domain service).
+        position:
+          type: integer
+          minimum: 0
+          description: "0-based ordering slot within the Collection."
+        added_at:
+          type: string
+          format: date-time
+
+    Collection:
+      type: object
+      description: |
+        Curation aggregate root. Tracks ordered atom_id references but does
+        NOT own atom content. LearningAtom remains the primary aggregate
+        root per CLAUDE.md §1.
+      required:
+        - collection_id
+        - tenant_id
+        - owner_gcid
+        - title
+        - visibility
+        - created_at
+        - updated_at
+      properties:
+        collection_id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        owner_gcid:
+          type: string
+          format: uuid
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          type: string
+          maxLength: 2000
+        visibility:
+          $ref: "#/components/schemas/CollectionVisibility"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        deleted_at:
+          type: string
+          format: date-time
+          nullable: true
+        atoms:
+          type: array
+          description: "Ordered atom membership rows."
+          items:
+            $ref: "#/components/schemas/CollectionAtomRef"
+
+    CreateCollectionRequest:
+      type: object
+      required: [title]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          type: string
+          maxLength: 2000
+        visibility:
+          $ref: "#/components/schemas/CollectionVisibility"
+          description: "Defaults to PRIVATE when omitted."
+
+    PatchCollectionRequest:
+      type: object
+      description: |
+        Partial update — fields omitted are left unchanged. Tightening
+        visibility (e.g., PUBLIC → PRIVATE) on a Collection containing
+        cross-tenant atoms is permitted at the aggregate level; the FE
+        SHOULD warn the author before applying.
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          type: string
+          maxLength: 2000
+        visibility:
+          $ref: "#/components/schemas/CollectionVisibility"
+
+    AddCollectionAtomRequest:
+      type: object
+      required: [atom_id]
+      properties:
+        atom_id:
+          type: string
+          format: uuid
+        position:
+          type: integer
+          minimum: 0
+          description: |
+            Optional 0-based ordering slot. Omitted ⇒ append at next free
+            position. NOTE: WS-6a Phase 3 only honours append semantics;
+            arbitrary positional insert is deferred.
+
+    CollectionListResponse:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Collection"
+        total:
+          type: integer
+          minimum: 0

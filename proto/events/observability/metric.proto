@@ -1,0 +1,59 @@
+// =============================================================================
+// chora.observability.v1 — KPI metric events
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 3
+// + memory project_chora_concerns.md
+//
+// Owning domain : Observability (chora_observability database)
+// Owning team   : Team 3 (Platform)
+// Topic prefix  : chora.observability.metric.*
+//
+// KPI metrics are business-level (DAU/MAU, atoms-per-learner, completion
+// rates, conversion funnels) emitted via Pub/Sub for BigQuery streaming
+// and Looker Studio dashboards. Distinct from Cloud Monitoring's
+// infra-level metrics (CPU, memory, request rate) which flow direct to
+// Cloud Monitoring without Pub/Sub.
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.observability.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/observability/v1;observabilityv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// KpiMetricRecorded — chora.observability.metric.kpi_recorded.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a service computes and emits a business-KPI sample.
+// Examples: "engagement.dau", "completion_rate.path", "conversion.signup",
+// "ai.guardrail_block_rate", "billing.mrr".
+//
+// Dimensions are arbitrary key-value pairs for downstream slicing
+// (e.g., {"surface": "aplus", "tenant_tier": "enterprise"}).
+message KpiMetricRecorded {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // Metric name (snake_case + dot-namespaced; e.g., "engagement.dau").
+  string metric_name = 2;
+
+  // Numeric sample value.
+  double value = 3;
+
+  // Optional tenant scope — empty / "platform" for cross-tenant metrics.
+  string tenant_id = 4;
+
+  // Arbitrary slicing dimensions.
+  map<string, string> dimensions = 5;
+
+  // Optional unit hint (e.g., "count", "ms", "bytes", "ratio").
+  string unit = 6;
+
+  google.protobuf.Timestamp recorded_at = 7;
+}

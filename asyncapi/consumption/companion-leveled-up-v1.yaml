@@ -1,0 +1,72 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Content Consumption — CompanionLeveledUp
+  version: 1.0.0
+  description: |
+    Published when a Companion's level changes (game-mechanic level-up).
+
+    - Domain: Content Consumption (`chora_consumption` DB)
+    - Aggregate root: `Companion` (DOMAIN ENTITY)
+    - Topic: `chora.consumption.companion.leveled_up.v1`
+    - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
+    - Source proto: `proto/events/consumption/companion.proto`
+       message `chora.consumption.v1.CompanionLeveledUp`
+
+    `Companion` is the RPG companion ENTITY (not an AI agent). The AI agent
+    behind Companion responses lives in AI Kernel.
+
+    Embeds the mandatory `chora.common.v1.EventEnvelope` as field 1.
+  contact:
+    name: Chora Platform Team (Team 3) + Team 1 (Content)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+    description: Google Cloud Pub/Sub (chora-489812 platform host)
+
+channels:
+  companionLeveledUp:
+    address: chora.consumption.companion.leveled_up.v1
+    description: Single-event topic for CompanionLeveledUp.
+    messages:
+      companionLeveledUp:
+        $ref: '#/components/messages/CompanionLeveledUp'
+
+operations:
+  publishCompanionLeveledUp:
+    action: send
+    channel:
+      $ref: '#/channels/companionLeveledUp'
+    summary: Publish a CompanionLeveledUp event
+    messages:
+      - $ref: '#/channels/companionLeveledUp/messages/companionLeveledUp'
+
+  consumeCompanionLeveledUp:
+    action: receive
+    channel:
+      $ref: '#/channels/companionLeveledUp'
+    summary: Subscribe to CompanionLeveledUp events
+    description: |
+      Primary consumers:
+      - Sharing — celebration post + reputation bump
+      - Notifications — level-up congratulations
+    messages:
+      - $ref: '#/channels/companionLeveledUp/messages/companionLeveledUp'
+
+components:
+  messages:
+    CompanionLeveledUp:
+      name: CompanionLeveledUp
+      title: Companion Leveled Up
+      summary: A Companion entity reached a new level
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/consumption/companion.proto#/chora.consumption.v1.CompanionLeveledUp'

@@ -1,0 +1,96 @@
+asyncapi: 3.0.0
+info:
+  title: Chora AI Kernel — AgentTerminated
+  version: 1.0.0
+  description: |
+    Published when ANY Chora agentic runtime terminates an execution (success
+    OR failure). One event per execution lifecycle — agents do NOT emit
+    multiple AgentTerminated events for the same execution_id.
+
+    - Domain: AI Kernel (`chora_ai_kernel` DB)
+    - Topic: `chora.ai_kernel.agent.terminated.v1`
+    - DLQ:   `chora.dlq.ai_kernel.agent.terminated.v1`
+    - Source proto: `proto/events/ai_kernel/agent.proto`
+       message `chora.ai_kernel.v1.AgentTerminated`
+
+    Per M11.10.W3 foundation audit (2026-05-12): this is the structured
+    terminate-event primitive that EVERY Chora agent (LangGraph orchestrator,
+    ADK Go agent, ADK Python agent, legacy Go executor) MUST publish at the
+    end of every execution lifecycle. Producer-side D6.2 path:
+
+      1. Insert AgentTerminated row into the producing service's outbox
+         (atomically with the agent's terminal state write).
+      2. OutboxDispatcher publishes to chora.ai_kernel.agent.terminated.v1.
+      3. Subscribers ACK after downstream processing (per
+         agentic-resilience-d6 skill Pillar 2).
+      4. DLQ awareness: failed deliveries land on
+         chora.dlq.ai_kernel.agent.terminated.v1; orchestrator emits a
+         chora.ai_kernel.crew.run_failed.v1 with replay metadata OR alerts
+         operators directly.
+
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  agentTerminated:
+    address: chora.ai_kernel.agent.terminated.v1
+    messages:
+      agentTerminated:
+        $ref: '#/components/messages/AgentTerminated'
+
+operations:
+  publishAgentTerminated:
+    action: send
+    channel:
+      $ref: '#/channels/agentTerminated'
+    description: |
+      Publishers: closure-orchestrator (LangGraph), ai-kernel-orchestrator
+      (LangGraph), Companion (ADK Go), Multi-Companion (ADK Go), QGen P2
+      (ADK Go), and any future agentic runtime.
+
+      Producers use the canonical outbox dispatcher path per
+      agentic-resilience-d6 skill Pillar 2. SHOULD include the most-
+      proximate termination_code (not the root cause); MAY include a
+      truncated partial_state snapshot for forensics.
+    messages:
+      - $ref: '#/channels/agentTerminated/messages/agentTerminated'
+
+  consumeAgentTerminated:
+    action: receive
+    channel:
+      $ref: '#/channels/agentTerminated'
+    description: |
+      Consumers:
+        - O+ Observability dashboard (per-agent termination stream;
+          chaos-test forensics).
+        - chora-observability service (Cloud Trace span enrichment +
+          aggregate KPIs per agent_id + tenant_id).
+        - chora-governance audit log (per ADR-141 IMDA D3 evidence;
+          GUARDRAIL_REJECTED terminations correlate with
+          ContentPolicyViolationLog events).
+        - Multi-crew chaos test driver (Pillar 3 + Scenario (j) cascade
+          containment verification).
+    messages:
+      - $ref: '#/channels/agentTerminated/messages/agentTerminated'
+
+components:
+  messages:
+    AgentTerminated:
+      name: AgentTerminated
+      title: Agent Terminated
+      summary: A Chora agent execution has terminated (success or failure)
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/ai_kernel/agent.proto#/chora.ai_kernel.v1.AgentTerminated'

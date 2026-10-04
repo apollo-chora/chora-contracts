@@ -1,0 +1,69 @@
+// =============================================================================
+// Chora Content Sharing: social profile tags on the bus
+// =============================================================================
+//
+// ADR-254 D1/D4 (R1): a learner's social profile tags are conjured by the
+// profile_conjurer agent through the kennel, never by an HTTP call from
+// chora-sharing (PROFILE_CONJURER_GKE_ENDPOINT is deleted). POST
+// /v1/me/profile/generate persists the profile as "tags pending", publishes
+// this request in the same transaction and returns 202; the result updates the
+// profile and pushes profile_ready / profile_error on the profile WebSocket.
+//
+// Wire (ADR-254 D4): JSON on the bus, schema-less; envelope in attributes and
+// field 1; envelope.idempotency_key = profile_request_id.
+//
+//   Request : chora.sharing.profile_tags.requested.v1
+//   Result  : chora.sharing.profile_tags.completed.v1
+//             (sharing pulls chora-sharing.profile-tags-completed)
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.sharing.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/sharing/v1;sharingv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// Topic: chora.sharing.profile_tags.requested.v1
+message ProfileTagsRequested {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 minted by sharing per generate request (the idempotency key).
+  string profile_request_id = 2;
+
+  // The learner whose profile is conjured (also envelope.gcid).
+  string gcid = 3;
+
+  // Opaque JSON of the interest signals the conjurer reads (recent atoms,
+  // reactions, duels, declared interests) as sharing composes them today.
+  string signals = 4;
+
+  // BCP-47 locale for the tag copy.
+  string locale = 5;
+
+  google.protobuf.Timestamp requested_at = 6;
+}
+
+// Topic: chora.sharing.profile_tags.completed.v1
+message ProfileTagsCompleted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string profile_request_id = 2;
+  string gcid = 3;
+
+  // "OK" | "FAILED" | "REJECTED".
+  string status = 4;
+  string error_code = 5;
+  string workflow_id = 6;
+  string generated_by_model_id = 7;
+
+  // The conjured tags (ordered, deduplicated).
+  repeated string tags = 8;
+
+  // Optional one-line profile blurb the conjurer writes.
+  string blurb = 9;
+
+  google.protobuf.Timestamp completed_at = 10;
+}

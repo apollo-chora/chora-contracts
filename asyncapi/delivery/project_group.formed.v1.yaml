@@ -1,0 +1,80 @@
+asyncapi: "3.0.0"
+info:
+  title: "chora.delivery.project_group.formed.v1"
+  version: "1.0.0"
+  description: |
+    Published when a project group is formed (members assigned). Drives
+    introductions + workspace provisioning.
+    Companion to `proto/events/delivery/project_group.proto` message `ProjectGroupFormed`.
+  contact: { name: "Chora Platform Team" }
+  license: { name: "Proprietary" }
+
+defaultContentType: application/x-protobuf
+
+servers:
+  local: { host: "localhost:8085", protocol: googlepubsub, description: "Pub/Sub Emulator" }
+  production: { host: "pubsub.googleapis.com", protocol: googlepubsub, description: "Google Cloud Pub/Sub" }
+
+channels:
+  projectGroupFormed:
+    address: chora.delivery.project_group.formed.v1
+    description: |
+      Carries ProjectGroupFormed Protobuf payload.
+
+      Downstream consumers:
+        - chora-notifications : kick-off email
+        - chora-sharing       : provision group workspace
+    messages:
+      projectGroupFormed:
+        $ref: "#/components/messages/ProjectGroupFormed"
+
+operations:
+  publishProjectGroupFormed:
+    action: send
+    channel: { $ref: "#/channels/projectGroupFormed" }
+    summary: "Publish ProjectGroupFormed"
+    messages: [ { $ref: "#/channels/projectGroupFormed/messages/projectGroupFormed" } ]
+  consumeProjectGroupFormed:
+    action: receive
+    channel: { $ref: "#/channels/projectGroupFormed" }
+    summary: "Consume ProjectGroupFormed"
+    messages: [ { $ref: "#/channels/projectGroupFormed/messages/projectGroupFormed" } ]
+
+components:
+  messages:
+    ProjectGroupFormed:
+      name: ProjectGroupFormed
+      title: "Project Group Formed"
+      summary: "A project group was formed."
+      contentType: application/x-protobuf
+      payload:
+        type: object
+        description: "Mirrors chora.delivery.v1.ProjectGroupFormed."
+        properties:
+          envelope: { $ref: "#/components/schemas/EventEnvelope" }
+          group_id: { type: string, format: uuid }
+          course_id: { type: string, format: uuid }
+          member_gcids:
+            type: array
+            items: { type: string }
+          formed_by_gcid: { type: string }
+          formed_at: { type: string, format: date-time }
+  schemas:
+    EventEnvelope:
+      type: object
+      description: "Mirrors chora.common.v1.EventEnvelope."
+      required: [event_id, idempotency_key, tenant_id, occurred_at, published_at, traceparent, source_project, source_service, schema_version]
+      properties:
+        event_id: { type: string, format: uuid }
+        idempotency_key: { type: string }
+        tenant_id: { type: string }
+        gcid: { type: string }
+        occurred_at: { type: string, format: date-time }
+        published_at: { type: string, format: date-time }
+        traceparent: { type: string }
+        tracestate: { type: string }
+        source_project: { type: string }
+        source_service: { type: string }
+        schema_version: { type: integer }
+        correlation_id: { type: string }
+        causation_id: { type: string }

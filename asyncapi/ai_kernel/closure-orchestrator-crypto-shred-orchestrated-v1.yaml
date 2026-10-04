@@ -1,0 +1,71 @@
+asyncapi: 3.0.0
+info:
+  title: Chora AI Kernel — ClosureSagaCryptoShredOrchestrated [DEPRECATED v2.0]
+  version: 1.0.0
+  description: |
+    **DEPRECATED v2.0** — Replaced by `chora.closure.crypto_shred_complete.v1`
+    + `chora.closure.closed.v1`. See `asyncapi/closure/`. Per ADR-141 the
+    canonical IMDA dimension for crypto-shred audit is `accountability` (D1),
+    NOT `safety_and_robustness` (D3) as the v1 description implied.
+
+    Original purpose: published when the Closure Orchestrator has executed
+    the terminal crypto-shred (DEK deletion via Cloud KMS). The associated
+    user data is permanently unrecoverable.
+
+    HIGHLY audited — feeds IMDA D1 Accountability evidence chain.
+
+    - Domain: AI Kernel (`chora_ai_kernel` DB)
+    - Topic (deprecated): `chora.ai_kernel.closure_orchestrator.crypto_shred_orchestrated.v1`
+    - Canonical replacement: `chora.closure.crypto_shred_complete.v1` + `chora.closure.closed.v1`
+    - Source proto: `proto/events/ai_kernel/closure_orchestrator.proto`
+       message `chora.ai_kernel.v1.ClosureSagaCryptoShredOrchestrated`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  closureSagaCryptoShredOrchestrated:
+    address: chora.ai_kernel.closure_orchestrator.crypto_shred_orchestrated.v1
+    messages:
+      closureSagaCryptoShredOrchestrated:
+        $ref: '#/components/messages/ClosureSagaCryptoShredOrchestrated'
+
+operations:
+  publishClosureSagaCryptoShredOrchestrated:
+    action: send
+    channel:
+      $ref: '#/channels/closureSagaCryptoShredOrchestrated'
+    messages:
+      - $ref: '#/channels/closureSagaCryptoShredOrchestrated/messages/closureSagaCryptoShredOrchestrated'
+
+  consumeClosureSagaCryptoShredOrchestrated:
+    action: receive
+    channel:
+      $ref: '#/channels/closureSagaCryptoShredOrchestrated'
+    description: |
+      Consumers: Identity (advance AccountLifecycleChanged to
+      CRYPTO_SHREDDED), Governance (terminal audit trail + IMDA evidence),
+      Observability (compliance KPI).
+    messages:
+      - $ref: '#/channels/closureSagaCryptoShredOrchestrated/messages/closureSagaCryptoShredOrchestrated'
+
+components:
+  messages:
+    ClosureSagaCryptoShredOrchestrated:
+      name: ClosureSagaCryptoShredOrchestrated
+      title: Closure Saga Crypto-Shred Orchestrated
+      summary: Terminal crypto-shred has been executed (DEK deleted)
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/ai_kernel/closure_orchestrator.proto#/chora.ai_kernel.v1.ClosureSagaCryptoShredOrchestrated'

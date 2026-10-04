@@ -1,0 +1,83 @@
+asyncapi: "3.0.0"
+info:
+  title: "chora.delivery.skillsfutures.approved.v1"
+  version: "1.0.0"
+  description: |
+    Published when SSG approves a SkillsFutures claim (callback / poll).
+    Triggers learner notification + downstream disbursement scheduling.
+    Companion to `proto/events/delivery/skillsfutures.proto` message `SkillsFutureClaimApproved`.
+  contact: { name: "Chora Platform Team" }
+  license: { name: "Proprietary" }
+
+defaultContentType: application/x-protobuf
+
+servers:
+  local: { host: "localhost:8085", protocol: googlepubsub, description: "Pub/Sub Emulator" }
+  production: { host: "pubsub.googleapis.com", protocol: googlepubsub, description: "Google Cloud Pub/Sub" }
+
+channels:
+  skillsFutureApproved:
+    address: chora.delivery.skillsfutures.approved.v1
+    description: |
+      Carries SkillsFutureClaimApproved Protobuf payload.
+
+      Downstream consumers:
+        - chora-notifications : approval email
+        - chora-delivery (sfa) : disbursement scheduling
+    messages:
+      skillsFutureApproved:
+        $ref: "#/components/messages/SkillsFutureClaimApproved"
+
+operations:
+  publishSkillsFutureApproved:
+    action: send
+    channel: { $ref: "#/channels/skillsFutureApproved" }
+    summary: "Publish SkillsFutureClaimApproved"
+    messages: [ { $ref: "#/channels/skillsFutureApproved/messages/skillsFutureApproved" } ]
+  consumeSkillsFutureApproved:
+    action: receive
+    channel: { $ref: "#/channels/skillsFutureApproved" }
+    summary: "Consume SkillsFutureClaimApproved"
+    messages: [ { $ref: "#/channels/skillsFutureApproved/messages/skillsFutureApproved" } ]
+
+components:
+  messages:
+    SkillsFutureClaimApproved:
+      name: SkillsFutureClaimApproved
+      title: "SkillsFutures Claim Approved"
+      summary: "SSG approved the claim."
+      contentType: application/x-protobuf
+      payload:
+        type: object
+        description: "Mirrors chora.delivery.v1.SkillsFutureClaimApproved."
+        properties:
+          envelope: { $ref: "#/components/schemas/EventEnvelope" }
+          claim_id: { type: string, format: uuid }
+          learner_gcid: { type: string }
+          course_id: { type: string, format: uuid }
+          claim_amount: { type: integer }
+          claim_status: { $ref: "#/components/schemas/ClaimStatus" }
+          ssg_reference_id: { type: string }
+          approved_at: { type: string, format: date-time }
+  schemas:
+    EventEnvelope:
+      type: object
+      description: "Mirrors chora.common.v1.EventEnvelope."
+      required: [event_id, idempotency_key, tenant_id, occurred_at, published_at, traceparent, source_project, source_service, schema_version]
+      properties:
+        event_id: { type: string, format: uuid }
+        idempotency_key: { type: string }
+        tenant_id: { type: string }
+        gcid: { type: string }
+        occurred_at: { type: string, format: date-time }
+        published_at: { type: string, format: date-time }
+        traceparent: { type: string }
+        tracestate: { type: string }
+        source_project: { type: string }
+        source_service: { type: string }
+        schema_version: { type: integer }
+        correlation_id: { type: string }
+        causation_id: { type: string }
+    ClaimStatus:
+      type: string
+      enum: [CLAIM_STATUS_UNSPECIFIED, CLAIM_STATUS_SUBMITTED, CLAIM_STATUS_UNDER_REVIEW, CLAIM_STATUS_APPROVED, CLAIM_STATUS_REJECTED, CLAIM_STATUS_DISBURSED]

@@ -1,0 +1,141 @@
+asyncapi: 3.0.0
+info:
+  title: Chora AI Kernel — CrewAtomsReady
+  version: 1.0.0
+  description: |
+    Published when the Content Creation AI-Assist crew finalises a batch of
+    LearningAtoms. The Reporter agent stamps each atom with a
+    `governance_status` verdict from the Guardrail Screen
+    (`approved` / `remediated` / `blocked`).
+
+    chora-creation subscribes to this topic and persists every non-blocked
+    atom with `SourceType=ai_assist`, then emits
+    `chora.creation.atom.created.v1` with IMDA accountability evidence
+    (D1 per ADR-141, lifecycle_stage=runtime).
+
+    - Domain: AI Kernel (`chora_ai_kernel` DB)
+    - Topic: `chora.ai_kernel.crew.atoms_ready.v1`
+    - Schema: defined inline below; promoted to
+      `proto/events/ai_kernel/crew_atoms_ready.proto` once codegen for the
+      Schema Registry is wired in M11.4.
+    - IMDA evidence: subscribers (chora-creation) annotate downstream
+      atom.created.v1 with `chora.imda.dimension=accountability`.
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  crewAtomsReady:
+    address: chora.ai_kernel.crew.atoms_ready.v1
+    messages:
+      crewAtomsReady:
+        $ref: '#/components/messages/CrewAtomsReady'
+
+operations:
+  publishCrewAtomsReady:
+    action: send
+    channel:
+      $ref: '#/channels/crewAtomsReady'
+    description: |
+      Publisher: chora-ai-kernel-orchestrator (Python LangGraph) — emitted
+      after the 6-agent content gate (Validator → Classifier → Web Researcher
+      → Q&A Generator → Evaluator → Reporter) reaches the Reporter terminal
+      step with at least one non-blocked atom.
+    messages:
+      - $ref: '#/channels/crewAtomsReady/messages/crewAtomsReady'
+
+  consumeCrewAtomsReady:
+    action: receive
+    channel:
+      $ref: '#/channels/crewAtomsReady'
+    description: |
+      Consumers:
+      - chora-creation (`AtomsReadySubscriber`) — persists each non-blocked
+        atom + emits chora.creation.atom.created.v1 with IMDA accountability.
+      - chora-observability — token-usage cross-check against the run.
+      - chora-governance — Reporter trail audit.
+    messages:
+      - $ref: '#/channels/crewAtomsReady/messages/crewAtomsReady'
+
+components:
+  messages:
+    CrewAtomsReady:
+      name: CrewAtomsReady
+      title: Crew Atoms Ready
+      summary: AI Assist crew has finalised a batch of atoms with governance verdicts
+      contentType: application/json
+      schemaFormat: application/schema+json;version=draft-07
+      payload:
+        type: object
+        required:
+          - event_id
+          - idempotency_key
+          - tenant_id
+          - gcid
+          - course_id
+          - content_type
+          - difficulty
+          - atoms
+        properties:
+          event_id:
+            type: string
+            format: uuid
+            description: UUIDv7 event identity (= idempotency_key by default).
+          idempotency_key:
+            type: string
+            description: Subscriber-side dedup key. Defaults to event_id.
+          tenant_id:
+            type: string
+            format: uuid
+          gcid:
+            type: string
+            format: uuid
+            description: Author GCID — receives credit for the persisted atoms.
+          course_id:
+            type: string
+            format: uuid
+          traceparent:
+            type: string
+            description: W3C trace context (envelope mandate).
+          tracestate:
+            type: string
+          content_type:
+            type: string
+            enum: [mcq, flashcard, video, essay, outline]
+          difficulty:
+            type: integer
+            minimum: 0
+            maximum: 5
+          model_used:
+            type: string
+            description: e.g. vertex/gemini-2.5-pro
+          prompt_hash:
+            type: string
+          orchestrator_run_id:
+            type: string
+          atoms:
+            type: array
+            minItems: 1
+            items:
+              type: object
+              required: [title, body, governance_status]
+              properties:
+                title:
+                  type: string
+                  maxLength: 256
+                body:
+                  type: string
+                governance_status:
+                  type: string
+                  enum: [approved, remediated, blocked]
+                guardrail_remarks:
+                  type: string
+                  description: Reporter's human-readable verdict. Optional.

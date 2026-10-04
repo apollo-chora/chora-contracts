@@ -1,0 +1,71 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Identity — GcidIssued
+  version: 1.0.0
+  description: |
+    Published when a brand-new GCID is minted (registration / first IdP login).
+
+    - Domain: Identity (`chora_identity` DB)
+    - Aggregate root: `GlobalChoraID`
+    - Topic: `chora.identity.gcid.issued.v1`
+    - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
+    - Source proto: `proto/events/identity/gcid.proto`
+       message `chora.identity.v1.GcidIssued`
+
+    Embeds the mandatory `chora.common.v1.EventEnvelope` as field 1.
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+    description: Google Cloud Pub/Sub (chora-489812 platform host)
+
+channels:
+  gcidIssued:
+    address: chora.identity.gcid.issued.v1
+    description: Single-event topic for GcidIssued.
+    messages:
+      gcidIssued:
+        $ref: '#/components/messages/GcidIssued'
+
+operations:
+  publishGcidIssued:
+    action: send
+    channel:
+      $ref: '#/channels/gcidIssued'
+    summary: Publish a GcidIssued event
+    messages:
+      - $ref: '#/channels/gcidIssued/messages/gcidIssued'
+
+  consumeGcidIssued:
+    action: receive
+    channel:
+      $ref: '#/channels/gcidIssued'
+    summary: Subscribe to GcidIssued events
+    description: |
+      Primary consumers:
+      - Tenancy — membership eligibility check
+      - Notifications — welcome email
+      - Observability — registration funnel KPI
+      - AI Kernel — Companion persona seeding for the new learner
+    messages:
+      - $ref: '#/channels/gcidIssued/messages/gcidIssued'
+
+components:
+  messages:
+    GcidIssued:
+      name: GcidIssued
+      title: GCID Issued
+      summary: A new Global Chora ID has been minted
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/identity/gcid.proto#/chora.identity.v1.GcidIssued'

@@ -1,0 +1,506 @@
+openapi: "3.2.0"
+info:
+  title: "Chora Model Broker Router API"
+  version: "1.0.0"
+  description: |
+    REST API for the Router arm of the 3-service Model Broker
+    (Router + Gateway + Classifier per Tier 2 D6).
+
+    Owning domain : AI Kernel (`chora_ai_kernel` database)
+    Owning team   : Team 3 (Platform)
+    Project       : `chora-489812` (platform host)
+    Surface       : O+ Observability+ (admin only); /generate is BFF-internal
+                    (called by chora-bff-gateway for AI Assist on A+).
+
+    AP-01: This contract exists BEFORE implementation.
+
+    Authorization: Bearer JWT (mesh internal mTLS) + X-Tenant-Id +
+    gcid headers.
+
+    The /generate endpoint is the AI Assist surface for Phyllis MVP step 4
+    (Comic Ch6 P12-P13). It orchestrates the canned content generator with
+    chora-guardrail screening (Cloud Model Armor + DLP + regex tier-4) and
+    returns generated artefacts plus a screening decision (allow|rewrite|
+    refuse). M15 will swap the canned generator for real Vertex Gemini /
+    self-hosted Gemma 4 with per-tenant LoRA adapters.
+  contact:
+    name: "Chora Platform Team (Team 3)"
+  license:
+    name: "Proprietary"
+
+servers:
+  - url: "https://api.chora.app"
+    description: "Production"
+  - url: "http://localhost:8080"
+    description: "Local development"
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Health
+    description: "Health + readiness"
+  - name: Catalog
+    description: "Per-tenant model catalog (RoutableModel) management"
+  - name: Routing
+    description: "Deterministic routing — `/api/route` selects a model"
+  - name: Decisions
+    description: "RoutingDecision append-only audit history"
+  - name: Generate
+    description: "AI Assist /generate — Phyllis MVP step 4 (Ch6 P12)"
+
+paths:
+  /healthz:
+    get:
+      operationId: healthz
+      summary: "Liveness probe"
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          $ref: "#/components/responses/Healthy"
+
+  /readyz:
+    get:
+      operationId: readyz
+      summary: "Readiness probe — checks repo wiring"
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          $ref: "#/components/responses/Healthy"
+        "503":
+          description: "Repos uninitialised"
+
+  /api/route:
+    post:
+      operationId: routeRequest
+      summary: "Route a RoutingRequest to the best RoutableModel"
+      description: |
+        Deterministic-rules-first routing per Tier 2 D6. Filters models by
+        capability threshold (≥60 per intent), estimated cost cap, and risk
+        tier governance gate (high-risk → only PlatformControlled). Returns
+        the selected model + endpoint + reason. Persists Request + Decision
+        as append-only audit rows.
+      tags: [Routing]
+      parameters:
+        - $ref: "#/components/parameters/TenantHeader"
+        - $ref: "#/components/parameters/GcidHeader"
+        - $ref: "#/components/parameters/Traceparent"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RouteRequest"
+      responses:
+        "200":
+          description: "Routing decision returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RouteResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+
+  /api/catalog/models:
+    parameters:
+      - $ref: "#/components/parameters/TenantHeader"
+      - $ref: "#/components/parameters/GcidHeader"
+    get:
+      operationId: listCatalogModels
+      summary: "List RoutableModels in this tenant's catalog"
+      tags: [Catalog]
+      responses:
+        "200":
+          description: "Models listed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelListResponse"
+    post:
+      operationId: registerCatalogModel
+      summary: "Register a RoutableModel into this tenant's catalog"
+      tags: [Catalog]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterModelRequest"
+      responses:
+        "201":
+          description: "Model registered"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoutableModel"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /api/decisions:
+    parameters:
+      - $ref: "#/components/parameters/TenantHeader"
+      - $ref: "#/components/parameters/GcidHeader"
+    get:
+      operationId: queryDecisions
+      summary: "Query the routing decisions ledger"
+      tags: [Decisions]
+      parameters:
+        - name: tenant_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          schema: { type: string, format: date-time }
+      responses:
+        "200":
+          description: "Decisions listed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DecisionListResponse"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/decisions/{decisionId}:
+    parameters:
+      - name: decisionId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      - $ref: "#/components/parameters/TenantHeader"
+      - $ref: "#/components/parameters/GcidHeader"
+    get:
+      operationId: getDecision
+      summary: "Fetch a single RoutingDecision"
+      tags: [Decisions]
+      responses:
+        "200":
+          description: "Decision found"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoutingDecision"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /generate:
+    post:
+      operationId: aiAssistGenerate
+      summary: "AI Assist content generation with guardrail screening"
+      description: |
+        Phyllis MVP step 4 (Comic Ch6 P12-P13). Generates `count` canned
+        artefacts for the requested `content_type` (mcq | explanation |
+        atom_outline | flashcard) and screens the prompt through
+        chora-guardrail (Cloud Model Armor + DLP + regex baseline +
+        output validators).
+
+        Tier routing (MVP, trivial difficulty mapping):
+
+          - difficulty 1-2 → tier1_fast    (gemini-1.5-flash, $0.01)
+          - difficulty 3-4 → tier2_balanced (gemini-1.5-pro,   $0.04)
+          - difficulty 5   → tier3_premium  (gemma-4-loRA-mtm-tenant-v1, $0.20)
+
+        `model_preference=auto` defers to the difficulty mapping;
+        explicit tier values force-override.
+
+        Screening decisions (mapped from chora-guardrail):
+
+          - `allow`   — items returned as-is
+          - `rewrite` — items returned + `screening_explanation` describes
+                        the policy nudge (Comic Ch6 P13: "balanced
+                        comparison question instead...")
+          - `refuse`  — items array is empty; `screening_explanation`
+                        contains the policy reason
+
+        MVP behaviour: in-memory canned responses with simple keyword
+        matching against the prompt to vary content by topic
+        (Agile / Scrum / Story Point / Estimation). M15 swaps in
+        Vertex Gemini + per-tenant Gemma LoRA endpoints.
+      tags: [Generate]
+      parameters:
+        - $ref: "#/components/parameters/TenantHeader"
+        - $ref: "#/components/parameters/GcidHeader"
+        - $ref: "#/components/parameters/Traceparent"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GenerateRequest"
+      responses:
+        "200":
+          description: "Generation complete (allow / rewrite / refuse)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenerateResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "502":
+          description: "Downstream guardrail or generator failure"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: "/generate disabled — GUARDRAIL_BASE_URL not configured"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    TenantHeader:
+      name: X-Tenant-Id
+      in: header
+      required: true
+      description: "Tenant UUID propagated from edge (mesh-injected)."
+      schema: { type: string, format: uuid }
+    GcidHeader:
+      name: gcid
+      in: header
+      required: true
+      description: "Global Chora ID UUIDv7 (caller's identity)."
+      schema: { type: string, format: uuid }
+    Traceparent:
+      name: traceparent
+      in: header
+      required: false
+      description: "W3C traceparent header for cross-service trace stitching."
+      schema: { type: string }
+  responses:
+    Healthy:
+      description: "OK"
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              status: { type: string }
+              time: { type: string, format: date-time }
+    BadRequest:
+      description: "Invalid request body or headers"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: "Tenant mismatch"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: "Resource not found"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unprocessable:
+      description: "No model passed all routing gates"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string, example: "ROUTER_INVALID_BODY" }
+        message: { type: string }
+    Tier:
+      type: string
+      description: "Routed tier number (1=fast, 2=balanced, 3=premium)."
+      enum: [1, 2, 3]
+    ContentType:
+      type: string
+      enum: [mcq, explanation, atom_outline, flashcard]
+    ModelPreference:
+      type: string
+      enum: [auto, tier1_fast, tier2_balanced, tier3_premium]
+      default: auto
+    ScreeningDecision:
+      type: string
+      description: |
+        Canonical /generate screening verdict. Mapped from chora-guardrail:
+
+          - allowed  → allow
+          - redacted → rewrite
+          - blocked  → refuse
+      enum: [allow, rewrite, refuse]
+    Item:
+      type: object
+      required: [id, type, stem]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: "Opaque item id (UUIDv7); the canonical atom id is issued downstream by chora-creation."
+        type:
+          type: string
+          example: "mcq"
+        stem: { type: string }
+        options:
+          type: array
+          items: { type: string }
+        correct:
+          type: integer
+          minimum: 0
+          description: "Index of the correct option (mcq only)."
+        rationale:
+          type: string
+          description: "Explanation/back-of-card. Non-empty for flashcards."
+    GenerateRequest:
+      type: object
+      required: [tenant_id, gcid, agent_id, prompt, content_type, difficulty, count]
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+          description: "Tenant UUIDv7. Must match X-Tenant-Id header."
+        gcid:
+          type: string
+          format: uuid
+          description: "Caller GCID UUIDv7."
+        agent_id:
+          type: string
+          example: "chora-creation-author-mcq"
+        prompt:
+          type: string
+          example: "Generate 10 MCQ questions on Agile Estimation Techniques, difficulty level 3"
+        content_type:
+          $ref: "#/components/schemas/ContentType"
+        difficulty:
+          type: integer
+          minimum: 1
+          maximum: 5
+        count:
+          type: integer
+          minimum: 1
+          maximum: 20
+        model_preference:
+          $ref: "#/components/schemas/ModelPreference"
+    GenerateResponse:
+      type: object
+      required: [request_id, model_used, tier, estimated_cost_sgd, screening_decision, items]
+      properties:
+        request_id:
+          type: string
+          format: uuid
+        model_used:
+          type: string
+          example: "gemini-1.5-pro"
+        tier:
+          $ref: "#/components/schemas/Tier"
+        estimated_cost_sgd:
+          type: number
+          format: double
+          example: 0.04
+        screening_decision:
+          $ref: "#/components/schemas/ScreeningDecision"
+        screening_explanation:
+          type: string
+        items:
+          type: array
+          description: "Empty when screening_decision=refuse; otherwise len = clamp(count, 1, 20)."
+          items:
+            $ref: "#/components/schemas/Item"
+    RouteRequest:
+      type: object
+      required: [agent_intent, prompt_token_count_est, max_tokens, max_cost_usd_micros, risk_tier]
+      properties:
+        agid:
+          type: string
+          format: uuid
+        agent_intent:
+          type: string
+          enum: [chat, summarize, classify, embed, code]
+        prompt_token_count_est: { type: integer, minimum: 0 }
+        max_tokens: { type: integer, minimum: 0 }
+        max_cost_usd_micros: { type: integer, format: int64, minimum: 0 }
+        risk_tier:
+          type: string
+          enum: [low, medium, high]
+    RouteResponse:
+      type: object
+      properties:
+        decision_id: { type: string, format: uuid }
+        request_id: { type: string, format: uuid }
+        selected_model_id: { type: string }
+        routed_endpoint:
+          type: string
+          enum: [vertex-ai, cloud-run-gpu, autopilot-gpu]
+        reason: { type: string }
+        decided_at: { type: string, format: date-time }
+        traceparent: { type: string }
+    RegisterModelRequest:
+      type: object
+      required: [model_id, family, capability_score, cost_per_1k_tokens_micros, latency_ms_p50]
+      properties:
+        model_id: { type: string }
+        family:
+          type: string
+          enum: [gemini, gemma, embedding]
+        capability_score:
+          type: integer
+          minimum: 0
+          maximum: 100
+        intent_scores:
+          type: object
+          additionalProperties:
+            type: integer
+            minimum: 0
+            maximum: 100
+        cost_per_1k_tokens_micros: { type: integer, format: int64, minimum: 0 }
+        latency_ms_p50: { type: integer, minimum: 0 }
+        platform_controlled: { type: boolean }
+    RoutableModel:
+      type: object
+      properties:
+        model_catalog_id: { type: string, format: uuid }
+        model_id: { type: string }
+        family: { type: string }
+        capability_score: { type: integer }
+        cost_per_1k_tokens_micros: { type: integer, format: int64 }
+        latency_ms_p50: { type: integer }
+        platform_controlled: { type: boolean }
+        created_at: { type: string, format: date-time }
+    ModelListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/RoutableModel" }
+        total: { type: integer }
+    RoutingDecision:
+      type: object
+      properties:
+        decision_id: { type: string, format: uuid }
+        request_id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        selected_model_id: { type: string }
+        routed_endpoint: { type: string }
+        reason: { type: string }
+        traceparent: { type: string }
+        decided_at: { type: string, format: date-time }
+    DecisionListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/RoutingDecision" }
+        total: { type: integer }

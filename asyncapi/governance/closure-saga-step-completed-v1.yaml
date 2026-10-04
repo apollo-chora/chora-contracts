@@ -1,0 +1,63 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Governance — ClosureSagaStepCompleted
+  version: 1.0.0
+  description: |
+    Published by EACH domain when it has completed its local closure step
+    (e.g., chora_creation has tokenized its PII fields per its
+    PII_Closure_Map.yaml). The Closure Orchestrator aggregates these to
+    determine when the GCID can advance to the next saga state.
+
+    - Domain: Governance (`chora_governance` DB) — saga visibility + audit
+    - Topic: `chora.governance.closure.saga_step_completed.v1`
+    - Source proto: `proto/events/governance/closure.proto`
+       message `chora.governance.v1.ClosureSagaStepCompleted`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  closureSagaStepCompleted:
+    address: chora.governance.closure.saga_step_completed.v1
+    messages:
+      closureSagaStepCompleted:
+        $ref: '#/components/messages/ClosureSagaStepCompleted'
+
+operations:
+  publishClosureSagaStepCompleted:
+    action: send
+    channel:
+      $ref: '#/channels/closureSagaStepCompleted'
+    messages:
+      - $ref: '#/channels/closureSagaStepCompleted/messages/closureSagaStepCompleted'
+
+  consumeClosureSagaStepCompleted:
+    action: receive
+    channel:
+      $ref: '#/channels/closureSagaStepCompleted'
+    description: |
+      Consumers: AI Kernel Closure Orchestrator (saga step aggregation),
+      Identity (advance AccountLifecycleChanged), Audit log.
+    messages:
+      - $ref: '#/channels/closureSagaStepCompleted/messages/closureSagaStepCompleted'
+
+components:
+  messages:
+    ClosureSagaStepCompleted:
+      name: ClosureSagaStepCompleted
+      title: Closure Saga Step Completed
+      summary: A per-domain closure saga step has completed
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/governance/closure.proto#/chora.governance.v1.ClosureSagaStepCompleted'

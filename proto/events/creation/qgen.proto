@@ -1,0 +1,363 @@
+// =============================================================================
+// Chora Content Creation — Question Generation (QGen) crew lifecycle events
+// =============================================================================
+//
+// Aggregate root : question_drafts (chora_creation DB)
+// Owning domain  : Content Creation (chora_creation)
+// Topic prefix   : chora.creation.qgen.*
+//
+// Two QGen crews (per ADR-147 §2 + docs/architecture/qgen-crew-composition-2026-05-12.md):
+//   - qgen_batch         : chora-doc-parser (Hybrid OOXML + multimodal LLM) → 5 reusable agents
+//   - qgen_per_question  : 5 reusable agents (no doc parse stage)
+//
+// Five reusable agents — the "basic package" per user lingo:
+//   qgen_assurance / qgen_fitness / qgen_generation / qgen_evaluation / qgen_delivery
+//
+// Phyllis-journey scope: MCQ + OE only (other types in backlog).
+//
+// Every event carries the full model attribution (tier / provider / model_id /
+// location / response_id) where applicable — per ADR-141 IMDA D2 transparency.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.creation.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/creation/v1;creationv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// QgenQuestionType — Phyllis scope, per qgen-crew-composition-2026-05-12.md §2.4.
+// Additive enum (other types extend the catalogue when they enter scope).
+enum QgenQuestionType {
+  QGEN_QUESTION_TYPE_UNSPECIFIED = 0;
+  QGEN_QUESTION_TYPE_MCQ = 1;  // Multiple-Choice — deterministically graded downstream
+  QGEN_QUESTION_TYPE_OE = 2;   // Open-Ended — LLM-graded downstream
+}
+
+// QgenCrewKind — which crew produced the question(s).
+enum QgenCrewKind {
+  QGEN_CREW_KIND_UNSPECIFIED = 0;
+  QGEN_CREW_KIND_BATCH = 1;         // qgen_batch
+  QGEN_CREW_KIND_PER_QUESTION = 2;  // qgen_per_question
+}
+
+// QgenAgentKind — which reusable agent emitted the event.
+enum QgenAgentKind {
+  QGEN_AGENT_KIND_UNSPECIFIED = 0;
+  QGEN_AGENT_KIND_ASSURANCE = 1;       // qgen_assurance
+  QGEN_AGENT_KIND_FITNESS = 2;         // qgen_fitness
+  QGEN_AGENT_KIND_GENERATION = 3;      // qgen_generation
+  QGEN_AGENT_KIND_EVALUATION = 4;      // qgen_evaluation
+  QGEN_AGENT_KIND_DELIVERY = 5;        // qgen_delivery
+  QGEN_AGENT_KIND_DOC_PARSER_INGEST = 6;  // chora-doc-parser Hybrid stage (multimodal LLM)
+}
+
+// ModelTier — three-tier Gemini 3.x taxonomy per ADR-147 §2 + crew-composition skill §2.1.
+enum ModelTier {
+  MODEL_TIER_UNSPECIFIED = 0;
+  MODEL_TIER_T1 = 1;  // gemini-3.1-pro-preview (multimodal ingest + LLM-as-judge)
+  MODEL_TIER_T2 = 2;  // gemini-3-flash-preview  (general generation + orchestration)
+  MODEL_TIER_T3 = 3;  // gemini-3.1-flash-lite   (classification + redaction)
+}
+
+// QGenBatchCompleted — emitted by qgen_delivery on successful batch run.
+//
+// Topic: chora.creation.qgen.batch_completed.v1
+// Consumers: chora-examadmin (or downstream content delivery — pull approved
+//            question_drafts for exam blueprint), Sharing (XP credit to
+//            author Phyllis), Observability + O+ (per-crew SLO + cost dash).
+message QGenBatchCompleted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // Job identifier — groups all questions produced in one batch upload.
+  string batch_job_id = 2;
+
+  // Author (Phyllis) GCID — same as envelope.gcid; duplicated for filter-friendly subscribers.
+  string author_gcid = 3;
+
+  // Reference document this batch was generated from (gs:// URI of the .docx).
+  string source_doc_uri = 4;
+
+  // Number of question_drafts produced + approved.
+  int32 questions_approved_count = 5;
+
+  // Number of candidates rejected by qgen_evaluation across the batch.
+  int32 questions_rejected_count = 6;
+
+  // Mix of question types in the batch.
+  int32 mcq_count = 7;
+  int32 oe_count = 8;
+
+  // List of question_drafts.id (UUIDv7) approved in this batch. Consumers
+  // SHOULD fetch full metadata via gRPC if needed; this list is the canonical
+  // handoff to ExamAdmin.
+  repeated string approved_question_ids = 9;
+
+  // Aggregate cost telemetry (informational; canonical cost lives in BigQuery
+  // billing export per ADR-146 §7).
+  int64 total_input_tokens = 10;
+  int64 total_output_tokens = 11;
+
+  google.protobuf.Timestamp completed_at = 12;
+}
+
+// QGenSingleCompleted — emitted by qgen_delivery on successful per-question run.
+//
+// Topic: chora.creation.qgen.single_completed.v1
+// Consumers: chora-examadmin, A+ Creator-mode UI (refresh question list),
+//            Sharing (XP credit), Observability + O+.
+message QGenSingleCompleted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // The approved question_draft (UUIDv7) produced by this run.
+  string question_id = 2;
+
+  string author_gcid = 3;
+
+  // Question type (Phyllis scope: MCQ or OE).
+  QgenQuestionType question_type = 4;
+
+  // qgen_evaluation score in [0,1].
+  float eval_score = 5;
+
+  // Number of source atoms cited in the generated question.
+  int32 citations_count = 6;
+
+  // Aggregate cost telemetry.
+  int64 total_input_tokens = 7;
+  int64 total_output_tokens = 8;
+
+  google.protobuf.Timestamp completed_at = 9;
+}
+
+// QGenAssuranceRejected — emitted when qgen_assurance rejects raw input or RAG
+// chunks for policy/PII reasons. Halts the crew run; no question_draft created.
+//
+// Topic: chora.creation.qgen.assurance_rejected.v1
+// Consumers: chora-governance (record ContentPolicyViolationLog per ai-runtime-
+//            guardrails skill), O+ (audit), Notifications (notify author of
+//            input rejection w/ redacted reason).
+message QGenAssuranceRejected {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // The crew run that was rejected.
+  string crew_run_id = 2;
+
+  QgenCrewKind crew_kind = 3;
+
+  string author_gcid = 4;
+
+  // Reason category. One of:
+  //   "pii_detected" | "policy_violation_intent" | "out_of_scope" |
+  //   "jailbreak_attempt" | "guardrail_redaction_excess"
+  string reason_category = 5;
+
+  // Human-readable reason (safe to surface in UI; do NOT include detected PII).
+  string redacted_reason = 6;
+
+  // Guardrail Service evaluation id for cross-reference.
+  string guardrail_eval_id = 7;
+
+  google.protobuf.Timestamp rejected_at = 8;
+}
+
+// QGenEvaluationRejected — emitted when qgen_evaluation rejects ALL candidates
+// produced by qgen_generation in a single crew run. Distinct from per-candidate
+// reject (which is captured in qgen_provenance ledger rows with decision='POLICY_DROPPED').
+//
+// Topic: chora.creation.qgen.evaluation_rejected.v1
+// Consumers: Observability + O+ (eval-suite quality dashboards), A+ UI
+//            (surface to Phyllis: "no questions met the rubric — adjust settings"),
+//            chora-governance (audit if persistent reject rate triggers policy review).
+message QGenEvaluationRejected {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string crew_run_id = 2;
+
+  QgenCrewKind crew_kind = 3;
+
+  string author_gcid = 4;
+
+  // Total candidates qgen_generation produced.
+  int32 candidates_produced = 5;
+
+  // All rejected (= candidates_produced in this event; the event fires only
+  // when ALL are rejected).
+  int32 candidates_rejected = 6;
+
+  // Reason histogram across rejections. Keys: "ungrounded" | "ambiguous_correct" |
+  // "weak_distractors_mcq" | "rubric_undercoverage_oe" | "difficulty_mismatch" |
+  // "plagiarism_match" | "low_quality_score".
+  map<string, int32> reason_histogram = 7;
+
+  // Whether the crew attempted a one-shot re-generation (per qgen-crew-composition
+  // §8.1 Option B) before this final rejection.
+  bool one_shot_retry_attempted = 8;
+
+  google.protobuf.Timestamp rejected_at = 9;
+}
+
+// -----------------------------------------------------------------------------
+// QuestionGenerated — chora.creation.question.generated.v1
+// -----------------------------------------------------------------------------
+//
+// NOTE: This message's TOPIC AGGREGATE is `question`, NOT `qgen` — the topic
+// name is chora.creation.question.generated.v1. The protoflatten tool reads
+// the `Topic:` comment header (authoritative) and routes the generated flat
+// proto to events-flat/creation/question/generated.proto alongside
+// QuestionAuthored / QuestionGenerationRequested / QuestionGenerationCompleted
+// (from question.proto). It lives in this file (qgen.proto) because the
+// qgen_pipeline crew is the emitter and the per-candidate lifecycle is QGen-
+// internal; semantically the artefact is a Question.
+//
+// Emitted by qgen_pipeline (qgen_generation agent) when a single candidate
+// Question is produced from a generation run. This is the per-candidate
+// completion event — NOT the user-accepted Question (which fires
+// QuestionAuthored from chora.creation.question.authored.v1 in question.proto)
+// and NOT the batch-level rollup (QGenBatchCompleted above).
+//
+// Distinct from QGenSingleCompleted: QGenSingleCompleted is the qgen_delivery
+// terminal event for an approved-and-graded single-question run; this
+// QuestionGenerated event is the generation-side per-candidate emission used
+// for live UI streaming (so authors see candidates pop in as they generate)
+// + per-candidate cost accounting.
+//
+// Topic: chora.creation.question.generated.v1
+// Consumers: chora-creation (write to candidate_questions_jsonb projection),
+//            chora-observability (D2 IMDA transparency — per-candidate model
+//            attribution evidence per ADR-141), A+ Creator-mode UI (live
+//            stream of candidates as they're produced).
+message QuestionGenerated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 candidate identifier. NOT yet a persisted Question — the Question
+  // is created later via /accept (and emits QuestionAuthored).
+  string question_id = 2;
+
+  // UUIDv7 of the parent LearningAtom. For BATCH_SOURCE_MATERIAL jobs this is
+  // the job's target atom (or the auto-created atom if the batch creates one).
+  string atom_id = 3;
+
+  // Question type (Phyllis scope: mcq | oe). Matches the QuestionType enum
+  // in chora-contracts/proto/events/creation/question.proto.
+  string question_type = 4;
+
+  // The user prompt (or truncated/redacted source seed for batch path) the
+  // candidate was generated from. Truncated to ≤ 2 KiB for envelope-size
+  // hygiene; canonical full prompt lives in question_generation_jobs.
+  string source_prompt = 5;
+
+  // Serialized MCQPayload / OEPayload JSON (mirrors candidate_questions_jsonb
+  // shape — see services/chora-creation/migrations/0008). Stays in JSON to
+  // keep the proto schema additive when new payload fields land.
+  string generated_payload_json = 6;
+
+  // Model attribution for IMDA D2 transparency. Examples:
+  //   "gemini-3-flash-preview" | "gemini-3.1-pro-preview" |
+  //   "vertex-endpoint:gemma-4-tenant-{tenant_id}"
+  string model_used = 7;
+
+  // Token count for this single-candidate generation. Aggregate cost lives in
+  // QGenProvenanceRecorded; this field is the per-candidate breakdown.
+  int32 token_count = 8;
+
+  google.protobuf.Timestamp generated_at = 9;
+}
+
+// -----------------------------------------------------------------------------
+// QuestionEvaluated — chora.creation.question.evaluated.v1
+// -----------------------------------------------------------------------------
+//
+// NOTE: Same aggregate-naming rule as QuestionGenerated above — the topic
+// name is chora.creation.question.evaluated.v1, so the flatten tool routes
+// the generated flat proto to events-flat/creation/question/evaluated.proto.
+//
+// Emitted by qgen_pipeline (qgen_evaluation agent) after a single candidate
+// is scored against the rubric. Distinct from QGenEvaluationRejected which
+// fires only when ALL candidates in a run are rejected; this event fires per
+// candidate with the score + pass hint.
+//
+// Topic: chora.creation.question.evaluated.v1
+// Consumers: chora-creation (update candidate_questions_jsonb.score +
+//            evaluation_notes; promote `passed=true` candidates to the
+//            review queue), chora-observability (D2 IMDA transparency —
+//            evaluator score distribution telemetry).
+message QuestionEvaluated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 candidate identifier (matches QuestionGenerated.question_id).
+  string question_id = 2;
+
+  // UUIDv7 of the parent LearningAtom.
+  string atom_id = 3;
+
+  // Evaluator score in [0,1]. Mirrors QGenSingleCompleted.eval_score but at
+  // the per-candidate granularity (QGenSingleCompleted is the post-promotion
+  // single-question run terminal event).
+  double evaluation_score = 4;
+
+  // Human-readable evaluator notes (safe to surface in UI). Examples:
+  //   "Strong distractors; correct answer unambiguous."
+  //   "Rubric coverage weak — consider adding criterion for partial credit."
+  string evaluation_notes = 5;
+
+  // User-facing accept/reject hint derived from evaluation_score crossing
+  // the qgen_evaluation rubric threshold (default 0.7; tenant-configurable).
+  // Note: this is a HINT — the author can still accept/reject manually via
+  // /accept which emits QuestionAuthored. `passed=false` candidates are
+  // surfaced for review but with a warning chip.
+  bool passed = 6;
+
+  // AGID of the qgen_evaluation agent instance.
+  string evaluator_agent_id = 7;
+
+  google.protobuf.Timestamp evaluated_at = 8;
+}
+
+// QGenProvenanceRecorded — emitted in batched rollups when qgen_provenance ledger
+// rows are inserted. Batched to keep Pub/Sub topic volume manageable on large
+// batch runs (50 questions × ~10 chunks each = 500 rows per batch; this event
+// fires once per 100-row batch with the summary).
+//
+// The canonical, replay-safe ledger is chora_creation.qgen_provenance (append-only,
+// trigger-enforced no-UPDATE/DELETE). This event is the streaming projection for
+// BigQuery + O+ dashboards.
+//
+// Topic: chora.creation.qgen.provenance_recorded.v1
+// Consumers: Observability (BigQuery streaming insert), O+ (live per-tier +
+//            per-model cost split dashboards), chora-governance (IMDA D2
+//            evidence stream materialiser).
+message QGenProvenanceRecorded {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string crew_run_id = 2;
+
+  QgenCrewKind crew_kind = 3;
+  QgenAgentKind agent_kind = 4;
+
+  // Model attribution for this batch (homogeneous within a batch — same agent
+  // run, same model). Auditors trace question → batch_run → model_tier/id here.
+  ModelTier model_tier = 5;
+  string model_provider = 6;  // "vertex_ai" | "anthropic" | "vertex_endpoint"
+  string model_id = 7;        // "gemini-3.1-pro-preview" | "claude-opus-4-7" | ...
+  string model_location = 8;  // "global" | "asia-southeast1" | ...
+  string fallback_tier_used = 9;  // empty when primary tier worked
+
+  // Number of provenance rows in this batch.
+  int32 rows_count = 10;
+
+  // Distribution by decision (matches qgen_provenance.decision).
+  int32 cited_count = 11;
+  int32 context_only_count = 12;
+  int32 redacted_count = 13;
+  int32 policy_dropped_count = 14;
+
+  // Aggregate similarity score (min / max / mean — for quick anomaly detection).
+  float similarity_min = 15;
+  float similarity_max = 16;
+  float similarity_mean = 17;
+
+  google.protobuf.Timestamp recorded_at = 18;
+}

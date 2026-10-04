@@ -1,0 +1,70 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Content Consumption — PathStepCompleted
+  version: 1.0.0
+  description: |
+    Published when a learner completes a single step in a `LearningPath`.
+
+    - Domain: Content Consumption (`chora_consumption` DB)
+    - Aggregate root: `LearningPath`
+    - Topic: `chora.consumption.path.step_completed.v1`
+    - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
+    - Source proto: `proto/events/consumption/learning_path.proto`
+       message `chora.consumption.v1.PathStepCompleted`
+
+    Embeds the mandatory `chora.common.v1.EventEnvelope` as field 1.
+  contact:
+    name: Chora Platform Team (Team 3) + Team 1 (Content)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+    description: Google Cloud Pub/Sub (chora-489812 platform host)
+
+channels:
+  pathStepCompleted:
+    address: chora.consumption.path.step_completed.v1
+    description: Single-event topic for PathStepCompleted.
+    messages:
+      pathStepCompleted:
+        $ref: '#/components/messages/PathStepCompleted'
+
+operations:
+  publishPathStepCompleted:
+    action: send
+    channel:
+      $ref: '#/channels/pathStepCompleted'
+    summary: Publish a PathStepCompleted event
+    messages:
+      - $ref: '#/channels/pathStepCompleted/messages/pathStepCompleted'
+
+  consumePathStepCompleted:
+    action: receive
+    channel:
+      $ref: '#/channels/pathStepCompleted'
+    summary: Subscribe to PathStepCompleted events
+    description: |
+      Primary consumers:
+      - Sharing — per-step XP / streak award
+      - Notifications — encouragement / milestone nudges
+      - Observability — step-level funnel
+    messages:
+      - $ref: '#/channels/pathStepCompleted/messages/pathStepCompleted'
+
+components:
+  messages:
+    PathStepCompleted:
+      name: PathStepCompleted
+      title: Path Step Completed
+      summary: A learner completed a step in a LearningPath
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/consumption/learning_path.proto#/chora.consumption.v1.PathStepCompleted'

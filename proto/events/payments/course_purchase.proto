@@ -1,0 +1,172 @@
+// =============================================================================
+// Chora Payments — Course Purchase events (Stripe-driven, CJ#2 paid-course)
+// =============================================================================
+//
+// Aggregate root: CoursePurchase (1:1 with a Stripe Checkout session for a
+//                 paid course enrolment — CJ#2 flow per FE post-Checkout
+//                 landing page `/a/courses/:id/enrolled` from commit
+//                 `46df8b71`).
+// Owning domain : Payments (chora_payments DB, per ADR-164).
+// Topic prefix  : chora.payments.course_purchase.*
+//
+// These events describe the BILLING + PURCHASE lifecycle of a paid course
+// enrolment. The corresponding chora-delivery materialisation
+// (`EnrollmentRegistry.Register` + `chora.delivery.enrollment.created.v1`)
+// is emitted AFTER chora-delivery subscribes to
+// `chora.payments.course_purchase.payment_captured.v1` and provisions the
+// enrolment row.
+//
+// Free-course paths (price_sgd_cents == 0) DO NOT flow through these events
+// — they call `EnrollmentRegistry.Register` directly via the existing
+// POST /api/courses/{id}/enrol path.
+//
+// chora-payments creates the Stripe Checkout Session via the canonical
+// `stripe-go v78` SDK; chora-delivery is Stripe-agnostic post-ADR-164.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.payments.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/payments/v1;paymentsv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// CoursePurchaseCheckoutStarted — emitted when chora-payments creates a
+// Stripe Checkout Session for a paid course enrolment. The learner has
+// NOT yet paid; the Session URL is returned synchronously to FE, who
+// redirects the browser to Stripe-hosted Checkout.
+//
+// Topic: chora.payments.course_purchase.checkout_started.v1
+// Consumers: chora-observability (funnel telemetry, revenue-pipeline
+//            in-flight count), chora-governance (audit trail for
+//            IMDA D1 accountability).
+message CoursePurchaseCheckoutStarted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // CoursePurchase aggregate id (UUIDv7) — same id flows through every
+  // subsequent event in this lifecycle.
+  string purchase_id = 2;
+
+  // Learner who initiated checkout. Resolved by chora-delivery from the
+  // ChoraSession JWT + passed to chora-payments via the gRPC
+  // `CreateCourseCheckoutSession` call.
+  string learner_gcid = 3;
+
+  // Course being purchased. Soft FK to chora_delivery.courses; recipient
+  // resolves via Pub/Sub event subscription (cross-DB queries forbidden).
+  string course_id = 4;
+
+  // Stripe correlation handles.
+  string stripe_session_id = 5;
+  string stripe_checkout_url = 6;
+
+  // Pricing snapshot (captured at Session creation; Stripe price index).
+  int64  amount_cents = 7;
+  string currency = 8;            // ISO 4217 — "SGD" for the Phyllis demo
+
+  google.protobuf.Timestamp checkout_started_at = 9;
+}
+
+// CoursePurchasePaymentCaptured — emitted on Stripe's
+// `checkout.session.completed` webhook. chora-delivery subscribes + calls
+// `EnrollmentRegistry.Register(tenant_id, course_id, learner_gcid)`
+// idempotently, then emits `chora.delivery.enrollment.created.v1`.
+//
+// Topic: chora.payments.course_purchase.payment_captured.v1
+// Consumers: chora-delivery (PRIMARY — registers enrolment), chora-observability
+//            (revenue ledger), chora-notifications (receipt email),
+//            chora-governance (IMDA D1 evidence).
+message CoursePurchasePaymentCaptured {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string purchase_id = 2;
+  string learner_gcid = 3;
+  string course_id = 4;
+
+  string stripe_session_id = 5;
+  string stripe_payment_intent_id = 6;
+  string stripe_charge_id = 7;
+
+  int64  amount_cents_paid = 8;
+  int64  amount_cents_refunded = 9;  // 0 unless partial refund post-capture
+  string currency = 10;
+
+  google.protobuf.Timestamp paid_at = 11;
+}
+
+// CoursePurchasePaymentFailed — emitted when Stripe reports a payment
+// failure (`payment_intent.payment_failed` OR
+// `checkout.session.async_payment_failed` for offline methods). Cleanup
+// signal — chora-delivery does NOT provision an enrolment for this purchase.
+//
+// Topic: chora.payments.course_purchase.payment_failed.v1
+// Consumers: chora-delivery (closes the in-progress enrolment intent),
+//            chora-notifications (failure email), chora-governance.
+message CoursePurchasePaymentFailed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string purchase_id = 2;
+  string learner_gcid = 3;
+  string course_id = 4;
+
+  string stripe_session_id = 5;
+  string stripe_failure_code = 6;     // Stripe-defined reason
+  string stripe_failure_message = 7;  // human-readable
+
+  google.protobuf.Timestamp failed_at = 8;
+}
+
+// CoursePurchaseRefunded — emitted on a Stripe `charge.refunded` event
+// (full or partial). Triggered by:
+//   - support-initiated refund
+//   - customer-requested refund (per tenant refund policy)
+//   - duplicate-charge correction
+//   - fraud chargeback
+//
+// Topic: chora.payments.course_purchase.refunded.v1
+// Consumers: chora-delivery (revokes the enrolment + emits a corresponding
+//            `chora.delivery.enrollment.revoked.v1` if introduced),
+//            chora-notifications (refund-confirmation email), chora-observability,
+//            chora-governance.
+message CoursePurchaseRefunded {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string purchase_id = 2;
+  string learner_gcid = 3;
+  string course_id = 4;
+
+  string stripe_charge_id = 5;
+  string stripe_refund_id = 6;
+
+  int64  amount_cents_refunded = 7;
+  string currency = 8;
+
+  // Refund reason. One of:
+  //   support_initiated | customer_request | duplicate_charge | fraud |
+  //   expired_unhatched (reserved — not used for course purchases today)
+  string reason = 9;
+
+  google.protobuf.Timestamp refunded_at = 10;
+}
+
+// CoursePurchaseExpired — emitted when Stripe reports
+// `checkout.session.expired` (Checkout Session abandoned past Stripe's
+// 24-hour window without payment) OR when the chora-payments expiry
+// sweeper marks a stuck `checkout_started` row as expired.
+//
+// Topic: chora.payments.course_purchase.expired.v1
+// Consumers: chora-observability (funnel abandonment), chora-governance
+//            (audit close).
+message CoursePurchaseExpired {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string purchase_id = 2;
+  string learner_gcid = 3;
+  string course_id = 4;
+
+  string stripe_session_id = 5;
+
+  google.protobuf.Timestamp expired_at = 6;
+}

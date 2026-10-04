@@ -1,0 +1,78 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Observability — AgentDecisionLogged
+  version: 1.1.0
+  description: |
+    Published when an agent makes a discrete, observable decision.
+    HIGH-VOLUME — expect batching to BigQuery for explainability
+    dashboards + downstream LLM-as-Judge eval pipelines.
+
+    Feeds the IMDA Explainability dimension (D2) and the Three-Audience
+    Explainability surfaces.
+
+    - Domain: Observability (`chora_observability` DB)
+    - Topic: `chora.observability.agent_decision.logged.v1`
+    - Source proto: `proto/events/observability/agent_decision.proto`
+       message `chora.observability.v1.AgentDecisionLogged`
+
+    v1.1.0 — 2026-05-29, ADR-167 D5. Additive proto v1 extension.
+    New optional field on `AgentDecisionLogged`:
+      - `attributes` (map<string,string>, field 21) — agent-specific
+        extension attributes. The proto core stays GENERIC + cross-agent
+        (decision_id / decision_kind / confidence / model_id …);
+        per-agent detail that has no generic home rides here as
+        free-form string pairs rather than polluting the schema with
+        named single-agent fields. Example: qgen quality-gate emits
+        {"attempt_count":"2","max_retries":"3","quality_warning":"false"}.
+        Streamed to BigQuery as a REPEATED key/value RECORD column.
+    Older consumers MUST treat the absent map (field 21 zero value)
+    as an empty attribute set and MUST NOT reject the message.
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  agentDecisionLogged:
+    address: chora.observability.agent_decision.logged.v1
+    messages:
+      agentDecisionLogged:
+        $ref: '#/components/messages/AgentDecisionLogged'
+
+operations:
+  publishAgentDecisionLogged:
+    action: send
+    channel:
+      $ref: '#/channels/agentDecisionLogged'
+    messages:
+      - $ref: '#/channels/agentDecisionLogged/messages/agentDecisionLogged'
+
+  consumeAgentDecisionLogged:
+    action: receive
+    channel:
+      $ref: '#/channels/agentDecisionLogged'
+    description: |
+      Consumers: BigQuery (decision warehouse), O+ explainability views,
+      LLM-as-Judge eval pipelines, IMDA D2 evidence collector.
+    messages:
+      - $ref: '#/channels/agentDecisionLogged/messages/agentDecisionLogged'
+
+components:
+  messages:
+    AgentDecisionLogged:
+      name: AgentDecisionLogged
+      title: Agent Decision Logged
+      summary: A discrete agent decision has been logged
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/observability/agent_decision.proto#/chora.observability.v1.AgentDecisionLogged'

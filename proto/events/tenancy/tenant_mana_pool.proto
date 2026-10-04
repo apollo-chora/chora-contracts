@@ -1,0 +1,139 @@
+// =============================================================================
+// chora.tenancy.v1 — Tenant Mana Subsidy Pool events
+// =============================================================================
+//
+// Source-of-truth: docs/architecture/adrs/adr-142-per-user-economy-mana.md
+//   (Q2 = v1, tenant subsidy track)
+//   + chora-contracts/openapi/tenancy-admin.yaml v1.2
+//
+// Owning domain : Tenancy + Billing (chora_tenancy database)
+// Owning team   : Team 3 (Platform)
+// Topic prefix  : chora.tenancy.tenant_mana_pool.*
+//
+// TenantManaPool is a tenant-funded prepaid mana balance used to
+// subsidise per-learner Companion action costs (corporate L&D / cohort
+// sponsorship use case). Pool funding hits the tenant's existing Stripe
+// Customer; allocations debit the pool and (via Pub/Sub) credit the
+// learner's per-user UserMana wallet (chora.identity.user_mana.credited.v1
+// with reason=tenant_subsidy).
+//
+// Spend-order policy (per ADR-142): when a learner triggers
+// ManaService.DeductMana, subsidy slices are drained FIRST in
+// `expires_at ASC NULLS LAST`, `allocated_at ASC` order; personal
+// balance is the overflow.
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.tenancy.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/tenancy/v1;tenancyv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// AllocationPolicy — how the pool drips mana into per-learner allocations.
+// -----------------------------------------------------------------------------
+enum AllocationPolicy {
+  ALLOCATION_POLICY_UNSPECIFIED = 0;
+  ALLOCATION_POLICY_MANUAL = 1;
+  ALLOCATION_POLICY_ON_ENROLLMENT = 2;
+  ALLOCATION_POLICY_EQUAL_SPLIT = 3;
+  ALLOCATION_POLICY_TIER_BASED = 4;
+}
+
+// -----------------------------------------------------------------------------
+// TenantManaPoolCreated — chora.tenancy.tenant_mana_pool.created.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a tenant admin provisions a TenantManaPool. Pool may
+// be created with zero balance; the first usable funding event is a
+// TenantManaPoolToppedUp.
+message TenantManaPoolCreated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — TenantManaPool aggregate root.
+  string pool_id = 2;
+
+  string tenant_id = 3;
+
+  // Initial credit at creation time (may be 0).
+  int64 initial_balance_units = 4;
+
+  // Auto-renew amount (may be 0).
+  int64 monthly_topup_units = 5;
+
+  AllocationPolicy auto_allocation_policy = 6;
+
+  // GCID of the admin who created the pool.
+  string created_by_gcid = 7;
+
+  google.protobuf.Timestamp created_at = 8;
+}
+
+// -----------------------------------------------------------------------------
+// TenantManaPoolToppedUp — chora.tenancy.tenant_mana_pool.topped_up.v1
+// -----------------------------------------------------------------------------
+//
+// Published when the pool is funded — either via a manual one-time top-up
+// or via the monthly auto-renew billing job. Carries the Stripe
+// PaymentIntent for reconciliation.
+//
+// DEPRECATED: superseded by chora.payments.tenant_mana_topup.payment_captured.v1 per ADR-164. Drain by 2026-06-30.
+// Note: chora-tenancy continues to emit this topic as a legacy-bridge fan-out during the rollback window (per chora.payments.tenant_mana_topup.proto consumer note). The bridge retires at Wave-2 cleanup; subscribers must migrate to the chora.payments.* canonical topic by drain-by.
+message TenantManaPoolToppedUp {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string pool_id = 2;
+  string tenant_id = 3;
+
+  // Mana units credited to the pool.
+  int64 units_credited = 4;
+
+  // Stripe charge amount (minor units).
+  int64 charged_cents = 5;
+  string currency = 6;
+
+  string stripe_payment_intent_id = 7;
+
+  // True for monthly auto-renew, false for manual one-time top-ups.
+  bool auto_renew = 8;
+
+  // GCID of the admin (manual) or empty for auto-renew system events.
+  string topped_up_by_gcid = 9;
+
+  // Pool balance AFTER applying this top-up.
+  int64 balance_after_units = 10;
+
+  google.protobuf.Timestamp recorded_at = 11;
+}
+
+// -----------------------------------------------------------------------------
+// TenantManaPoolDepleted — chora.tenancy.tenant_mana_pool.depleted.v1
+// -----------------------------------------------------------------------------
+//
+// Published when the pool's balance crosses below the configurable
+// `low_balance_threshold` (default 10% of monthly_topup_units), and again
+// when the balance reaches 0. Drives admin notifications + auto-renew
+// pre-bill confirmation flows.
+message TenantManaPoolDepleted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string pool_id = 2;
+  string tenant_id = 3;
+
+  // Balance at the time of the threshold crossing.
+  int64 balance_units = 4;
+
+  // Threshold that was crossed (e.g., the configured low-balance
+  // threshold OR 0).
+  int64 threshold_units = 5;
+
+  // True only when balance reached zero.
+  bool fully_depleted = 6;
+
+  google.protobuf.Timestamp detected_at = 7;
+}

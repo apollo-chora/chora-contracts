@@ -1,0 +1,130 @@
+// =============================================================================
+// chora.delivery.v1 — Live classroom quiz-session events (ADR-168)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture/adrs/adr-168-classroom-realtime-redis-backplane.md
+// + .claude/rules/ddd-enforcement.md
+// + .claude/skills/domain-content-delivery/SKILL.md (LiveQuizSession — the
+//   Live Classroom aggregate).
+//
+// Owning domain  : Content Delivery (chora_delivery database)
+// Owning team    : Team 2 (Delivery)
+// Topic prefix   : chora.delivery.live_quiz_session.*
+//
+// A LiveQuizSession is one host-led run of a published LiveQuiz. Per ADR-168
+// the realtime hot path (per-vote tallies + live leaderboard) rides a Redis
+// backplane and is NEVER published as a domain event. Only these DURABLE
+// lifecycle + scoring events flow onto Pub/Sub for cross-domain consumers:
+//
+//   - started      : session went LIVE (instructor opened the room)
+//   - score_awarded : one graded answer credited cumulative points — consumed
+//                     by chora-sharing's leaderboard.Ranker (Three-Currency XP
+//                     economy). This is the load-bearing cross-domain event.
+//   - ended        : session CLOSED (final results frozen)
+//
+// Cross-domain references (no FK):
+//   - gcid (envelope) : Identity — the learner (score_awarded) / instructor
+//                       (started/ended) actor. UUIDv7, no FK.
+//   - live_quiz_id    : the published LiveQuiz template (same DB).
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.delivery.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/delivery/v1;deliveryv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// LiveQuizSessionStarted — chora.delivery.live_quiz_session.started.v1
+// -----------------------------------------------------------------------------
+//
+// Published when an instructor transitions a session ARMED → LIVE. Marks the
+// start of the live room; downstream consumers (observability, notifications)
+// use it to open per-session dashboards / notify enrolled learners.
+message LiveQuizSessionStarted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 identifier of the LiveQuizSession.
+  string session_id = 2;
+
+  // UUID of the published LiveQuiz the session runs (same DB).
+  string live_quiz_id = 3;
+
+  // GCID of the instructor who opened the room. Cross-domain — no FK.
+  string instructor_gcid = 4;
+
+  // When the session went LIVE.
+  google.protobuf.Timestamp started_at = 5;
+}
+
+// -----------------------------------------------------------------------------
+// LiveQuizSessionScoreAwarded — chora.delivery.live_quiz_session.score_awarded.v1
+// -----------------------------------------------------------------------------
+//
+// Published each time a learner's answer is graded (time-decay scoring).
+// The learner is the envelope.gcid. chora-sharing rolls awarded_points into the
+// durable cross-session Leaderboard (tenant weekly + all-time XP boards).
+message LiveQuizSessionScoreAwarded {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 identifier of the LiveQuizSession.
+  string session_id = 2;
+
+  // UUID of the published LiveQuiz the session runs (same DB).
+  string live_quiz_id = 3;
+
+  // The question that was answered.
+  string question_id = 4;
+
+  // Points awarded for THIS answer (time-decay applied; 0 when incorrect).
+  int32 awarded_points = 5;
+
+  // The learner's running cumulative score in the session after this award.
+  int32 cumulative_score = 6;
+
+  // Whether the answer was correct.
+  bool correct = 7;
+
+  // Milliseconds between question-open and this submission (for analytics).
+  int64 answer_millis = 8;
+
+  // -- Additions 2026-06-09 (additive within v1; no break) — CR-2 atoms-as-
+  // questions → mastery seam. When the live-quiz question was authored by
+  // LINKING an existing LearningAtom (R+ quiz-builder atom-picker), atom_id
+  // carries that atom's UUID (empty for ad-hoc questions). chora-consumption
+  // subscribes to score_awarded.v1 and maps (atom_id, correct) into
+  // topic_accuracy + the DERIVED Growth-Edge (weakness) signal — closing the
+  // classroom→mastery loop WITHOUT a new event (reuse > reinvent; this durable
+  // scoring event already flows cross-domain to chora-sharing's leaderboard).
+  string atom_id = 9;
+
+  // Topic tags the linked atom carries, denormalised so the consumer maps to
+  // topic_accuracy without a cross-DB read into chora_creation. Empty when the
+  // question is ad-hoc or the atom carried no tags.
+  repeated string topic_tags = 10;
+}
+
+// -----------------------------------------------------------------------------
+// LiveQuizSessionEnded — chora.delivery.live_quiz_session.ended.v1
+// -----------------------------------------------------------------------------
+//
+// Published when an instructor transitions a session LIVE → CLOSED. Final
+// results are frozen; downstream consumers settle session-level rollups.
+message LiveQuizSessionEnded {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 identifier of the LiveQuizSession.
+  string session_id = 2;
+
+  // UUID of the published LiveQuiz the session ran (same DB).
+  string live_quiz_id = 3;
+
+  // Total responses recorded across the session (all questions).
+  int32 total_responses = 4;
+
+  // When the session CLOSED.
+  google.protobuf.Timestamp ended_at = 5;
+}

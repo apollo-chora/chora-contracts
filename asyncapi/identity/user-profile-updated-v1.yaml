@@ -1,0 +1,113 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Identity — UserProfileUpdated
+  version: 1.0.0
+  description: |
+    Published whenever a user's display name is SET or CHANGED (Q3
+    GCID→display-name projection). chora-identity is the sole owner of the
+    (gcid → display_name) mapping; cross-DB reads are forbidden, so every
+    other domain that needs a human-readable name for a gcid (rosters, feeds,
+    leaderboards, …) subscribes to this event and projects it into a LOCAL
+    directory keyed by the GLOBAL gcid.
+
+    Emission (transactional outbox):
+    - pg.UserRepository.UpdateDisplayName enqueues this event in the SAME DB
+      transaction as the users.display_name UPDATE (H+ Members admin editor /
+      self-service PATCH). Fires ONLY on an actual change (unchanged name is a
+      no-op emit).
+    - The Identity Platform blocking function seeds it best-effort at first
+      login when the IdP supplies a non-empty display name (brand-new named
+      users get a directory row immediately).
+    - display_name starts empty at gcid-resolve and is populated later, so the
+      event fires on the empty→non-empty transition (first name-set) and on any
+      subsequent change.
+
+    - Domain: Identity (`chora_identity` DB)
+    - Aggregate root: `GlobalChoraID` (user)
+    - Topic: `chora.identity.user.profile_updated.v1`
+    - Schema format: JSON (SCHEMALESS topic — NO Pub/Sub Schema Registry binary
+      schema; identity's outbox JSON-marshals the payload). Diverges from the
+      binary-protobuf identity siblings by design.
+    - tenant_id on the envelope is acting/provenance only; consumers key their
+      directory by the global gcid and MUST ignore tenant_id.
+
+    The mandatory `chora.common.v1.EventEnvelope` rides as the outbox row's
+    envelope attribute set (source_service=chora-identity, schema_version=1, …).
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/json
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+    description: Google Cloud Pub/Sub (chora-489812 platform host)
+
+channels:
+  userProfileUpdated:
+    address: chora.identity.user.profile_updated.v1
+    description: Single-event topic for UserProfileUpdated (schemaless JSON).
+    messages:
+      userProfileUpdated:
+        $ref: '#/components/messages/UserProfileUpdated'
+
+operations:
+  publishUserProfileUpdated:
+    action: send
+    channel:
+      $ref: '#/channels/userProfileUpdated'
+    summary: Publish a UserProfileUpdated event
+    messages:
+      - $ref: '#/channels/userProfileUpdated/messages/userProfileUpdated'
+
+  consumeUserProfileUpdated:
+    action: receive
+    channel:
+      $ref: '#/channels/userProfileUpdated'
+    summary: Subscribe to UserProfileUpdated events
+    description: |
+      Primary consumers:
+      - Delivery — project gcid→display_name into the roster directory
+      - Sharing — feed / leaderboard author names
+      - Any domain needing a human-readable name for a gcid
+      Consumers key their local directory by the GLOBAL gcid (ignore tenant_id).
+    messages:
+      - $ref: '#/channels/userProfileUpdated/messages/userProfileUpdated'
+
+components:
+  messages:
+    UserProfileUpdated:
+      name: UserProfileUpdated
+      title: User Profile Updated
+      summary: A user's display name was set or changed
+      contentType: application/json
+      payload:
+        schemaFormat: application/schema+json;version=draft-07
+        schema:
+          type: object
+          additionalProperties: false
+          required:
+            - gcid
+            - display_name
+            - email
+            - updated_at
+          properties:
+            gcid:
+              type: string
+              format: uuid
+              description: Global Chora ID (opaque UUIDv7) — the directory key.
+            display_name:
+              type: string
+              minLength: 1
+              description: The new, non-empty display name to project.
+            email:
+              type: string
+              format: email
+              description: The user's current email (convenience for directories).
+            updated_at:
+              type: string
+              format: date-time
+              description: RFC3339 timestamp of the display-name write.

@@ -1,0 +1,756 @@
+// =============================================================================
+// Chora Payments Service (gRPC)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture/adrs/adr-164-chora-payments-service.md
+//   + .claude/rules/ddd-enforcement.md
+//   + chora-contracts/proto/events/payments/*.proto (8 source aggregate protos)
+//
+// Inter-service gRPC contract for the Chora Payments supporting domain
+// (chora_payments database, Team 3 / Platform). Owns the Stripe SDK +
+// 8 Purchase aggregates (course_purchase, application_payment,
+// companion_egg_purchase, tenant_mana_topup, user_mana_topup,
+// user_subscription, identity_kyc_fee, tenant_addon_purchase).
+//
+// Originating services (chora-delivery, chora-tenancy, chora-identity)
+// call this service synchronously to mint Stripe Checkout Sessions on
+// behalf of learners / tenants / admins. The webhook receive path is
+// HTTP-only (Stripe → chora-gateway → chora-payments) and is NOT
+// modelled here.
+//
+// Cross-DB queries FORBIDDEN — soft FKs (course_id, application_id, ...)
+// are UUIDs without referential constraints; the originating service
+// validates existence before invoking the matching Create*Session RPC.
+//
+// Deployed in chora-payments (Team 3 / Platform). mTLS via Cloud Service
+// Mesh; SPIFFE identity in mesh; W3C trace context in gRPC metadata.
+//
+// Per ADR-164 PROPOSED 2026-05-24 — Stripe-correlation extract from
+// chora-delivery / chora-tenancy / chora-identity.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.services.payments.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/payments/v1;paymentsv1";
+
+import "google/protobuf/timestamp.proto";
+
+// -----------------------------------------------------------------------------
+// Service
+// -----------------------------------------------------------------------------
+
+service PaymentService {
+  // CreateCourseCheckoutSession mints a Stripe Checkout Session for the
+  // CJ#2 paid-course flow (originating: chora-delivery). Idempotent on
+  // idempotency_key. Returns (purchase_id, checkout_url, session_id,
+  // status="processing").
+  rpc CreateCourseCheckoutSession(CreateCourseCheckoutSessionRequest)
+      returns (CreateCourseCheckoutSessionResponse);
+
+  // CreateApplicationCheckoutSession mints a Stripe Checkout Session for
+  // the Course-Application Singpass + SkillsFuture flow (originating:
+  // chora-delivery).
+  rpc CreateApplicationCheckoutSession(CreateApplicationCheckoutSessionRequest)
+      returns (CreateApplicationCheckoutSessionResponse);
+
+  // CreateCompanionEggCheckoutSession mints a Stripe Checkout Session for
+  // ADR-149 Companion-egg purchases (originating: chora-tenancy).
+  rpc CreateCompanionEggCheckoutSession(CreateCompanionEggCheckoutSessionRequest)
+      returns (CreateCompanionEggCheckoutSessionResponse);
+
+  // CreateManaTopUpSession mints a Stripe Checkout Session for tenant
+  // mana-pool top-ups (originating: chora-tenancy).
+  rpc CreateManaTopUpSession(CreateManaTopUpSessionRequest)
+      returns (CreateManaTopUpSessionResponse);
+
+  // CreateSubscription mints a Stripe Subscription Checkout Session for
+  // the per-learner Companion mana subscription (originating:
+  // chora-identity).
+  rpc CreateSubscription(CreateSubscriptionRequest)
+      returns (CreateSubscriptionResponse);
+
+  // CreateUserManaTopUpSession mints a Stripe Checkout Session for a
+  // per-learner FE-initiated mana purchase (6th aggregate, mirrors
+  // CreateManaTopUpSession but for learners not admins; originating:
+  // chora-identity). Closes Stage E debt: per-user mana top-up was
+  // previously retired from chora-identity without a payments-side
+  // counterpart.
+  rpc CreateUserManaTopUpSession(CreateUserManaTopUpSessionRequest)
+      returns (CreateUserManaTopUpSessionResponse);
+
+  // CreateIdentityKycFeeSession mints a Stripe Checkout Session for the
+  // one-time KYC manual-doc verification fee (7th aggregate; originating:
+  // chora-identity). Per ADR-142 Singpass-verified GCID is free, manual
+  // KYC is $9.99. Closes Stage E debt: chora-identity used to charge
+  // inline; the inline charge was retired without a payments-side
+  // replacement.
+  rpc CreateIdentityKycFeeSession(CreateIdentityKycFeeSessionRequest)
+      returns (CreateIdentityKycFeeSessionResponse);
+
+  // CreateTenantAddonCheckoutSession mints a Stripe Checkout Session for
+  // a H+ Marketplace tenant-add-on subscription (originating:
+  // chora-tenancy via the chora-gateway BFF alias
+  // `POST /api/v1/checkout/tenant-addon`). One-shot Stripe `payment`
+  // mode (tenancy holds the billing-cycle clock + auto-renew per
+  // ADR-142 sibling pattern). Idempotent on idempotency_key. Returns
+  // (purchase_id, checkout_url, session_id, state=CHECKOUT_STARTED).
+  //
+  // Per CHO-1736 H+ Marketplace Subscribe epic — completes the write
+  // side of the marketplace surface (CHO-1735 shipped the read side).
+  rpc CreateTenantAddonCheckoutSession(CreateTenantAddonCheckoutSessionRequest)
+      returns (CreateTenantAddonCheckoutSessionResponse);
+
+  // CancelSubscription cancels a UserSubscription on Stripe's side
+  // (graceful `cancel_at_period_end=true` by default, or immediate when
+  // cancel_at_period_end=false) + advances the chora-payments-side
+  // UserSubscription aggregate to LifecycleState=cancelled + emits the
+  // canonical `chora.payments.user_subscription.cancelled.v1` outbox
+  // event. Closes Stage E debt: FE-initiated cancel previously only
+  // flipped the chora-identity local FSM; Stripe-side cancel was a gap.
+  rpc CancelSubscription(CancelSubscriptionRequest)
+      returns (CancelSubscriptionResponse);
+
+  // GetPurchase returns the current state of a Purchase aggregate by
+  // (purchase_id, aggregate_type). Admin + originating-service lookup.
+  rpc GetPurchase(GetPurchaseRequest) returns (GetPurchaseResponse);
+
+  // RefundPurchase issues a Stripe Refund + transitions the Purchase
+  // aggregate to refunded state. Admin only (training-admin role).
+  // Idempotent on (purchase_id, stripe_refund_id).
+  rpc RefundPurchase(RefundPurchaseRequest) returns (RefundPurchaseResponse);
+}
+
+// -----------------------------------------------------------------------------
+// Shared enums
+// -----------------------------------------------------------------------------
+
+// AggregateType — which of the 8 Purchase aggregates the request targets.
+// 6 = user_mana_topup (per-user mana purchase, mirrors tenant_mana_topup).
+// 7 = identity_kyc_fee (one-time KYC manual-doc verification charge).
+// 8 = tenant_addon_purchase (H+ Marketplace Subscribe per CHO-1736).
+enum AggregateType {
+  AGGREGATE_TYPE_UNSPECIFIED = 0;
+  AGGREGATE_TYPE_COURSE_PURCHASE = 1;
+  AGGREGATE_TYPE_APPLICATION_PAYMENT = 2;
+  AGGREGATE_TYPE_COMPANION_EGG_PURCHASE = 3;
+  AGGREGATE_TYPE_TENANT_MANA_TOPUP = 4;
+  AGGREGATE_TYPE_USER_SUBSCRIPTION = 5;
+  AGGREGATE_TYPE_USER_MANA_TOPUP = 6;
+  AGGREGATE_TYPE_IDENTITY_KYC_FEE = 7;
+  AGGREGATE_TYPE_TENANT_ADDON_PURCHASE = 8;
+}
+
+// PurchaseState — payment-phase FSM state (shared across all 8 aggregates).
+enum PurchaseState {
+  PURCHASE_STATE_UNSPECIFIED = 0;
+  PURCHASE_STATE_CHECKOUT_STARTED = 1;
+  PURCHASE_STATE_PAYMENT_CAPTURED = 2;
+  PURCHASE_STATE_PAYMENT_FAILED = 3;
+  PURCHASE_STATE_REFUNDED = 4;
+  PURCHASE_STATE_EXPIRED = 5;
+}
+
+// RefundReason — canonical refund reason code (matches the SQL CHECK
+// constraint on refund_reason in migrations/0001_initial.up.sql).
+enum RefundReason {
+  REFUND_REASON_UNSPECIFIED = 0;
+  REFUND_REASON_SUPPORT_INITIATED = 1;
+  REFUND_REASON_CUSTOMER_REQUEST = 2;
+  REFUND_REASON_DUPLICATE_CHARGE = 3;
+  REFUND_REASON_FRAUD = 4;
+  REFUND_REASON_EXPIRED_UNHATCHED = 5;
+}
+
+// BillingPeriod — Stripe Price recurrence (user_subscription only).
+enum BillingPeriod {
+  BILLING_PERIOD_UNSPECIFIED = 0;
+  BILLING_PERIOD_MONTHLY = 1;
+  BILLING_PERIOD_ANNUALLY = 2;
+}
+
+// -----------------------------------------------------------------------------
+// Purchase — admin / originating-service projection
+// -----------------------------------------------------------------------------
+
+message Purchase {
+  // UUIDv7.
+  string purchase_id = 1;
+
+  // Tenant scope.
+  string tenant_id = 2;
+
+  // Buyer GCID.
+  string learner_gcid = 3;
+
+  // Which aggregate this Purchase belongs to.
+  AggregateType aggregate_type = 4;
+
+  // Current FSM state.
+  PurchaseState state = 5;
+
+  // Charged amount in minor units (cents).
+  int64 amount_cents = 6;
+  int64 amount_cents_paid = 7;
+  int64 amount_cents_refunded = 8;
+
+  // ISO 4217 3-letter currency code.
+  string currency = 9;
+
+  // Stripe handles.
+  string stripe_session_id = 10;
+  string stripe_payment_intent_id = 11;
+  string stripe_charge_id = 12;
+  string stripe_refund_id = 13;
+  string stripe_checkout_url = 14;
+  string stripe_failure_code = 15;
+  string stripe_failure_message = 16;
+
+  // Refund reason (set when state=REFUNDED).
+  RefundReason refund_reason = 17;
+
+  // Timestamps.
+  google.protobuf.Timestamp checkout_started_at = 18;
+  google.protobuf.Timestamp paid_at = 19;
+  google.protobuf.Timestamp failed_at = 20;
+  google.protobuf.Timestamp refunded_at = 21;
+  google.protobuf.Timestamp expired_at = 22;
+  google.protobuf.Timestamp created_at = 23;
+  google.protobuf.Timestamp updated_at = 24;
+
+  // Aggregate-specific fields (oneof would force unwrap on every consumer;
+  // flat fields with documented usage is the canonical Chora gRPC pattern).
+  //
+  // CoursePurchase / ApplicationPayment:
+  string course_id = 30;
+  // ApplicationPayment:
+  string application_id = 31;
+  // CompanionEggPurchase:
+  string egg_sku = 32;
+  string suggested_focal_atom_id = 33;
+  google.protobuf.Timestamp soft_expiry_at = 34;
+  google.protobuf.Timestamp hard_expiry_at = 35;
+  google.protobuf.Timestamp provisioned_at = 36;
+  bool refund_credit_only = 37;
+  // TenantManaTopUp:
+  string sku = 38;
+  int64 mana_units = 39;
+  int64 mana_units_debited = 40;
+  // UserSubscription:
+  string plan_sku = 41;
+  BillingPeriod billing_period = 42;
+  string lifecycle_state = 43; // "created" | "active" | "grace" | "paused" | "cancelled"
+  string stripe_subscription_id = 44;
+  string stripe_customer_id = 45;
+  google.protobuf.Timestamp current_period_start = 46;
+  google.protobuf.Timestamp current_period_end = 47;
+  int64 amount_cents_paid_total = 48;
+  // UserSubscription cancellation projection (set when CancelSubscription
+  // RPC has run or chora-payments has received Stripe's
+  // customer.subscription.deleted webhook).
+  bool cancel_at_period_end = 49;
+  string cancellation_reason = 50;
+  google.protobuf.Timestamp cancelled_at = 51;
+  google.protobuf.Timestamp effective_at = 52;
+  // IdentityKycFee aggregate-specific (UserManaTopUp reuses the existing
+  // sku/mana_units fields above):
+  string kyc_doc_type = 53;
+}
+
+// -----------------------------------------------------------------------------
+// CreateCourseCheckoutSession
+// -----------------------------------------------------------------------------
+
+message CreateCourseCheckoutSessionRequest {
+  // Idempotency key (UUIDv7). Required.
+  string idempotency_key = 1;
+
+  // Tenant scope.
+  string tenant_id = 2;
+
+  // Buyer GCID.
+  string learner_gcid = 3;
+
+  // Course being purchased.
+  string course_id = 4;
+
+  // Amount in minor units (cents). Required.
+  int64 amount_cents = 5;
+
+  // ISO 4217 3-letter currency code.
+  string currency = 6;
+
+  // Optional Stripe Checkout `success_url` / `cancel_url` overrides.
+  // When empty, the chora-payments service falls back to the
+  // STRIPE_DEFAULT_SUCCESS_URL / STRIPE_DEFAULT_CANCEL_URL env vars.
+  string success_url = 7;
+  string cancel_url = 8;
+}
+
+message CreateCourseCheckoutSessionResponse {
+  string purchase_id = 1;
+  string stripe_session_id = 2;
+  string stripe_checkout_url = 3;
+  PurchaseState state = 4; // canonical: CHECKOUT_STARTED
+}
+
+// -----------------------------------------------------------------------------
+// CreateApplicationCheckoutSession
+// -----------------------------------------------------------------------------
+
+message CreateApplicationCheckoutSessionRequest {
+  string idempotency_key = 1;
+  string tenant_id = 2;
+  string learner_gcid = 3;
+  string application_id = 4;
+  string course_id = 5;
+  int64 amount_cents = 6;
+  string currency = 7;
+  string success_url = 8;
+  string cancel_url = 9;
+}
+
+message CreateApplicationCheckoutSessionResponse {
+  string purchase_id = 1;
+  string stripe_session_id = 2;
+  string stripe_checkout_url = 3;
+  PurchaseState state = 4;
+}
+
+// -----------------------------------------------------------------------------
+// CreateCompanionEggCheckoutSession
+// -----------------------------------------------------------------------------
+
+message CreateCompanionEggCheckoutSessionRequest {
+  string idempotency_key = 1;
+  string tenant_id = 2;
+  string learner_gcid = 3;
+  string egg_sku = 4;
+  string suggested_focal_atom_id = 5;
+  int64 amount_cents = 6;
+  string currency = 7;
+  // ADR-149 soft + hard expiry deadlines (snapshot at checkout time).
+  google.protobuf.Timestamp soft_expiry_at = 8;
+  google.protobuf.Timestamp hard_expiry_at = 9;
+  string success_url = 10;
+  string cancel_url = 11;
+}
+
+message CreateCompanionEggCheckoutSessionResponse {
+  string purchase_id = 1;
+  string stripe_session_id = 2;
+  string stripe_checkout_url = 3;
+  PurchaseState state = 4;
+}
+
+// -----------------------------------------------------------------------------
+// CreateManaTopUpSession
+// -----------------------------------------------------------------------------
+
+message CreateManaTopUpSessionRequest {
+  string idempotency_key = 1;
+  string tenant_id = 2;
+  // The tenant admin GCID initiating the top-up. Persisted as learner_gcid
+  // in the Purchase row.
+  string admin_gcid = 3;
+  string sku = 4;
+  int64 mana_units = 5;
+  int64 amount_cents = 6;
+  string currency = 7;
+  string success_url = 8;
+  string cancel_url = 9;
+}
+
+message CreateManaTopUpSessionResponse {
+  string purchase_id = 1;
+  string stripe_session_id = 2;
+  string stripe_checkout_url = 3;
+  PurchaseState state = 4;
+}
+
+// -----------------------------------------------------------------------------
+// CreateSubscription
+// -----------------------------------------------------------------------------
+
+message CreateSubscriptionRequest {
+  string idempotency_key = 1;
+  string tenant_id = 2;
+  string learner_gcid = 3;
+  string plan_sku = 4;
+  BillingPeriod billing_period = 5;
+  int64 amount_cents = 6; // per-period amount
+  string currency = 7;
+  string success_url = 8;
+  string cancel_url = 9;
+}
+
+message CreateSubscriptionResponse {
+  string purchase_id = 1;
+  string stripe_session_id = 2;
+  string stripe_checkout_url = 3;
+  PurchaseState state = 4;
+}
+
+// -----------------------------------------------------------------------------
+// GetPurchase
+// -----------------------------------------------------------------------------
+
+message GetPurchaseRequest {
+  string purchase_id = 1;
+  string tenant_id = 2;
+  AggregateType aggregate_type = 3;
+}
+
+message GetPurchaseResponse {
+  Purchase purchase = 1;
+}
+
+// -----------------------------------------------------------------------------
+// RefundPurchase
+// -----------------------------------------------------------------------------
+
+message RefundPurchaseRequest {
+  string purchase_id = 1;
+  string tenant_id = 2;
+  AggregateType aggregate_type = 3;
+  // Refund amount in minor units. 0 = full refund of (amount_cents_paid -
+  // amount_cents_refunded).
+  int64 amount_cents = 4;
+  RefundReason reason = 5;
+  // Optional admin-supplied note (max 1000 chars).
+  string note = 6;
+}
+
+message RefundPurchaseResponse {
+  Purchase purchase = 1;
+}
+
+// -----------------------------------------------------------------------------
+// CreateUserManaTopUpSession (6th aggregate)
+// -----------------------------------------------------------------------------
+
+message CreateUserManaTopUpSessionRequest {
+  string idempotency_key = 1;
+  string tenant_id = 2;
+  // The learner initiating the per-user mana top-up.
+  string learner_gcid = 3;
+  string sku = 4;
+  int64 mana_units = 5;
+  int64 amount_cents = 6;
+  string currency = 7;
+  string success_url = 8;
+  string cancel_url = 9;
+}
+
+message CreateUserManaTopUpSessionResponse {
+  string purchase_id = 1;
+  string stripe_session_id = 2;
+  string stripe_checkout_url = 3;
+  PurchaseState state = 4; // canonical: CHECKOUT_STARTED
+}
+
+// -----------------------------------------------------------------------------
+// CreateIdentityKycFeeSession (7th aggregate)
+// -----------------------------------------------------------------------------
+
+message CreateIdentityKycFeeSessionRequest {
+  string idempotency_key = 1;
+  string tenant_id = 2;
+  // The learner whose identity is being verified.
+  string learner_gcid = 3;
+  // Type of KYC doc being verified (e.g., "manual_id_doc",
+  // "manual_passport", "manual_proof_of_address").
+  string kyc_doc_type = 4;
+  // Per ADR-142 the canonical manual-KYC fee is $9.99; passed explicitly
+  // for currency-aware deployments. Stripe Checkout caps reflected here.
+  int64 amount_cents = 5;
+  string currency = 6;
+  string success_url = 7;
+  string cancel_url = 8;
+}
+
+message CreateIdentityKycFeeSessionResponse {
+  string purchase_id = 1;
+  string stripe_session_id = 2;
+  string stripe_checkout_url = 3;
+  PurchaseState state = 4; // canonical: CHECKOUT_STARTED
+}
+
+// -----------------------------------------------------------------------------
+// CreateTenantAddonCheckoutSession (8th aggregate — CHO-1736 H+ Marketplace)
+// -----------------------------------------------------------------------------
+
+message CreateTenantAddonCheckoutSessionRequest {
+  // Idempotency key (UUIDv7). Required.
+  string idempotency_key = 1;
+  // Tenant whose admin is subscribing.
+  string tenant_id = 2;
+  // The tenant admin initiating the purchase. Resolved by chora-gateway
+  // from the ChoraSession JWT and stamped into the gRPC metadata; mirror
+  // it here for the outbox events.
+  string admin_gcid = 3;
+  // Marketplace catalog primary key — the AddOnPlan being subscribed to.
+  // Soft FK to chora_tenancy.addon_plans; recipient (tenancy subscriber)
+  // resolves via Pub/Sub event subscription (cross-DB queries forbidden).
+  string addon_plan_id = 4;
+  // Denormalised addon code (e.g., "knowledge_graph", "companion") — kept
+  // alongside addon_plan_id so downstream consumers can index without
+  // a tenancy lookup.
+  string addon_code = 5;
+  // Selected pricing tier (e.g., "starter", "pro").
+  string tier_code = 6;
+  // Resolved by the BFF against the catalog detail — currency-aware.
+  int64 amount_cents = 7;
+  string currency = 8;
+  // Optional URL overrides. Defaults:
+  //   success: /h/marketplace/{addon_plan_id}?checkout=success
+  //   cancel : /h/marketplace/{addon_plan_id}?checkout=cancel
+  string success_url = 9;
+  string cancel_url = 10;
+}
+
+message CreateTenantAddonCheckoutSessionResponse {
+  string purchase_id = 1;
+  string stripe_session_id = 2;
+  string stripe_checkout_url = 3;
+  PurchaseState state = 4; // canonical: CHECKOUT_STARTED
+}
+
+// -----------------------------------------------------------------------------
+// CancelSubscription
+// -----------------------------------------------------------------------------
+
+message CancelSubscriptionRequest {
+  string purchase_id = 1;
+  string tenant_id = 2;
+  // CancelAtPeriodEnd=true is the default graceful flow: Stripe schedules
+  // the cancellation at the end of the current billing period. =false
+  // cancels immediately (Stripe `subscription.cancel`); prorated refunds
+  // are NOT issued automatically — admins use RefundPurchase for that.
+  bool cancel_at_period_end = 3;
+  // Optional reason recorded on the aggregate + propagated to the
+  // outbox event (max 1000 chars).
+  string reason = 4;
+}
+
+message CancelSubscriptionResponse {
+  Purchase purchase = 1;
+}
+
+// =============================================================================
+// PaymentsAdminService — H+ Transaction History gRPC parity (Wave-2)
+// =============================================================================
+//
+// Mirrors the openapi/payments-admin.yaml HTTP surface in gRPC form for
+// Wave-2 inter-service traffic per ADR-140. V1 HTTP wire (consumed via
+// chora-gateway BFF) ships first; this RPC parity exists so internal
+// services (e.g. O+ governance projector, billing reconcilers) can consume
+// the same surface without round-tripping through the gateway.
+//
+// Cross-tenant scope is gated by the `tenant_id` field semantics — when
+// the caller is a tenant-scoped service-account the field is REQUIRED and
+// the response is scoped to that tenant; when the caller holds the
+// PLATFORM_OPERATOR service-account role the field is OPTIONAL (omit to
+// span every tenant).
+// =============================================================================
+
+service PaymentsAdminService {
+  // ListPurchaseHistory — unary cursor-paginated read across the 7 Purchase
+  // aggregates. Mirrors GET /api/v1/admin/payments/purchases.
+  rpc ListPurchaseHistory(ListPurchaseHistoryRequest)
+      returns (ListPurchaseHistoryResponse);
+
+  // IssueRefund — full-refund-only RPC parity for
+  // POST /api/v1/admin/payments/{purchase_id}/refund. Distinct from
+  // PaymentService.RefundPurchase (existing, partial-amount-aware) to
+  // match the V1 admin API contract; chora-payments may implement
+  // IssueRefund as a thin wrapper over RefundPurchase internally.
+  rpc IssueRefund(IssueRefundRequest) returns (IssueRefundResponse);
+
+  // StreamPaymentEvents — long-lived server-streaming RPC mirroring the
+  // SSE GET /api/v1/admin/payments/stream endpoint. Emits one PaymentEvent
+  // per state transition across the configured aggregate / tenant filter.
+  rpc StreamPaymentEvents(StreamPaymentEventsRequest)
+      returns (stream PaymentEvent);
+}
+
+// -----------------------------------------------------------------------------
+// PurchaseHistoryItem — projection mirroring the OpenAPI shape
+// -----------------------------------------------------------------------------
+
+message PurchaseHistoryItem {
+  // UUIDv7.
+  string purchase_id = 1;
+
+  // Which of the 7 Purchase aggregates this row belongs to.
+  AggregateType aggregate_type = 2;
+
+  // Tenant scope. Always populated.
+  string tenant_id = 3;
+
+  // Buyer GCID. For tenant_mana_topup this is the admin GCID that
+  // initiated the top-up.
+  string learner_gcid = 4;
+
+  // Buyer email at time of purchase. Empty when the GCID has been
+  // pseudonymised (post-closure crypto-shred).
+  string learner_email = 5;
+
+  // Charged amount in minor units (cents).
+  int64 amount_cents = 6;
+
+  // ISO-4217 3-letter currency code (lowercase).
+  string currency = 7;
+
+  // Normalised 4-value state. See AdminPurchaseState.
+  AdminPurchaseState state = 8;
+
+  // Stripe Checkout Session id.
+  string stripe_session_id = 9;
+
+  // Timestamp at which Stripe captured the payment. Empty when not yet
+  // captured (state = FAILED / EXPIRED before capture).
+  google.protobuf.Timestamp paid_at = 10;
+
+  // Timestamp at which the Stripe Refund was issued. Empty when not
+  // refunded.
+  google.protobuf.Timestamp refunded_at = 11;
+
+  // When the Purchase row was created.
+  google.protobuf.Timestamp created_at = 12;
+
+  // Free-form aggregate-specific projection as a JSON string. Carries
+  // course_id for course_purchase, sku + mana_units for tenant_mana_topup,
+  // plan_sku + billing_period for user_subscription, etc.
+  string metadata_json = 13;
+}
+
+// AdminPurchaseState — normalised 4-value surface state mirroring the
+// OpenAPI `PurchaseState` enum. Distinct from the gRPC `PurchaseState`
+// 5-value FSM enum above; the admin API collapses CHECKOUT_STARTED into
+// FAILED / EXPIRED / CAPTURED at projection time.
+enum AdminPurchaseState {
+  ADMIN_PURCHASE_STATE_UNSPECIFIED = 0;
+  ADMIN_PURCHASE_STATE_CAPTURED = 1;
+  ADMIN_PURCHASE_STATE_REFUNDED = 2;
+  ADMIN_PURCHASE_STATE_FAILED = 3;
+  ADMIN_PURCHASE_STATE_EXPIRED = 4;
+}
+
+// -----------------------------------------------------------------------------
+// ListPurchaseHistory
+// -----------------------------------------------------------------------------
+
+message ListPurchaseHistoryRequest {
+  // Opaque cursor from a prior next_page_token. Empty on the first call.
+  string page_token = 1;
+
+  // 10 | 20 | 50 | 100. Default 20 when unset (=0).
+  int32 page_size = 2;
+
+  // Optional. UNSPECIFIED returns rows across all 7 aggregates.
+  AggregateType aggregate_type = 3;
+
+  // Optional. UNSPECIFIED returns rows in any state.
+  AdminPurchaseState state = 4;
+
+  // Optional. Inclusive lower bound on Purchase.created_at.
+  google.protobuf.Timestamp from = 5;
+
+  // Optional. Exclusive upper bound on Purchase.created_at.
+  google.protobuf.Timestamp to = 6;
+
+  // Tenant scope. REQUIRED for tenant-scoped callers. OPTIONAL for
+  // PLATFORM_OPERATOR callers (omit to span every tenant).
+  string tenant_id = 7;
+}
+
+message ListPurchaseHistoryResponse {
+  repeated PurchaseHistoryItem items = 1;
+
+  // Opaque cursor for the next page. Empty on the final page.
+  string next_page_token = 2;
+
+  // True iff next_page_token != "". Provided for client convenience.
+  bool has_more = 3;
+}
+
+// -----------------------------------------------------------------------------
+// IssueRefund (V1 full-refund parity for the admin API)
+// -----------------------------------------------------------------------------
+
+message IssueRefundRequest {
+  // UUIDv7 of the Purchase aggregate.
+  string purchase_id = 1;
+
+  // REQUIRED. Routes the request to the correct aggregate handler.
+  AggregateType aggregate_type = 2;
+
+  // Tenant scope. REQUIRED.
+  string tenant_id = 3;
+
+  // Optional admin-supplied free-text justification (max 1000 chars).
+  string reason = 4;
+}
+
+message IssueRefundResponse {
+  // Stripe Refund id (re_…).
+  string refund_id = 1;
+
+  // When the refund was issued (server time).
+  google.protobuf.Timestamp refunded_at = 2;
+
+  // Refunded amount in minor units. V1 is full-refund only so this
+  // equals the original amount_cents_paid on the Purchase.
+  int64 amount_cents = 3;
+
+  // Resulting state. Always REFUNDED on the happy path.
+  AdminPurchaseState state = 4;
+}
+
+// -----------------------------------------------------------------------------
+// StreamPaymentEvents
+// -----------------------------------------------------------------------------
+
+message StreamPaymentEventsRequest {
+  // Optional. Filter the stream to a single aggregate.
+  AggregateType aggregate_type = 1;
+
+  // Tenant scope. REQUIRED for tenant-scoped callers. OPTIONAL for
+  // PLATFORM_OPERATOR callers.
+  string tenant_id = 2;
+}
+
+message PaymentEvent {
+  // UUIDv7 of the Purchase aggregate that transitioned.
+  string purchase_id = 1;
+
+  // Aggregate the Purchase belongs to.
+  AggregateType aggregate_type = 2;
+
+  // New state after the transition.
+  AdminPurchaseState state = 3;
+
+  // When the transition was observed (server time).
+  google.protobuf.Timestamp occurred_at = 4;
+
+  // Tenant scope.
+  string tenant_id = 5;
+
+  // Buyer GCID.
+  string learner_gcid = 6;
+
+  // Charged amount in minor units. Echoed for FE convenience so the SSE
+  // consumer can render a row without a second lookup.
+  int64 amount_cents = 7;
+
+  // ISO-4217 3-letter currency code.
+  string currency = 8;
+
+  // Stripe Checkout Session id.
+  string stripe_session_id = 9;
+
+  // Free-form aggregate-specific projection as a JSON string.
+  string metadata_json = 10;
+}

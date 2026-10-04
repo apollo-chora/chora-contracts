@@ -1,0 +1,102 @@
+asyncapi: "3.0.0"
+info:
+  title: "Chora Content Creation — collection.converted_to_study_list.v1"
+  version: "1.0.0"
+  description: |
+    Published when a learner converts a curated Collection into a
+    spaced-repetition study list (spec-001 US5 / FR-031, ADR-233).
+
+    R-11/R-17: chora-creation OWNS the Collection aggregate, therefore it owns
+    this transition AND this event. chora-sharing publishes NO collection
+    events. The consumer is chora-consumption, which builds a LearningPath from
+    `atom_ids[]` — with NO cross-domain database read, because the atom ids
+    travel in the payload.
+
+    CONSENT GATE (ADR-233 D10, amending ADR-229 D2/D4.4): conversion is the
+    third grant-write site alongside test-set snapshot and quiz/duel arm.
+    chora-creation evaluates the reuse disjunct
+        own ∪ (tenant-visible ∧ published) ∪ granted
+    per atom BEFORE emitting, and mints a GRANT_SCOPE_COLLECTION grant on the
+    tenant-visible leg. `atom_ids[]` therefore carries ONLY the atoms the actor
+    is entitled to reuse — non-entitled atoms are excluded at the API boundary
+    and reported to the caller, never smuggled into the event. Consumption does
+    NOT re-gate; the payload is already authoritative.
+
+    Idempotency: `study_list_event_id` is the consumption-side durable anchor.
+    Re-delivery of the same event is a no-op. A SECOND conversion of the same
+    collection carries a NEW study_list_event_id and performs an ADDITIVE
+    re-sync of the same derived path (ADR-233 D4 — a source may never retract
+    atoms from a derived path; learner progress is preserved).
+
+    Owning team    : Team 1 (Content)
+    Owning domain  : Content Creation (chora_creation database)
+
+    Source-of-truth: docs/architecture/adrs/adr-233-study-list-provenance-and-
+    consumption-boundary.md · specs/001-atom-sharing-redesign (US5, T065-T070)
+  contact:
+    name: "Chora Platform Team — Content Track"
+  license:
+    name: "Proprietary"
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  production:
+    host: "pubsub.googleapis.com"
+    protocol: googlepubsub
+    description: "Google Cloud Pub/Sub (production)"
+  emulator:
+    host: "localhost:8085"
+    protocol: googlepubsub
+    description: "Cloud Pub/Sub Emulator (local dev)"
+
+channels:
+  collectionConvertedToStudyList:
+    address: "chora.creation.collection.converted_to_study_list.v1"
+    description: |
+      Pub/Sub topic for CollectionConvertedToStudyList events. Low-volume —
+      fires only on an explicit learner "convert to study list" action.
+
+      BINARY (Schema-Registry bound: chora-creation-collection-
+      converted_to_study_list-v1). This topic is deliberately NOT schemaless,
+      unlike its collection.{created,updated,atom_added,atom_removed,deleted}
+      siblings: it is the only collection topic with a real cross-domain
+      consumer, so the contract is validated at the broker.
+    messages:
+      collectionConvertedToStudyList:
+        $ref: "#/components/messages/CollectionConvertedToStudyList"
+
+operations:
+  publishCollectionConvertedToStudyList:
+    action: send
+    channel:
+      $ref: "#/channels/collectionConvertedToStudyList"
+    summary: "Publish a collection → study-list conversion"
+    description: |
+      Producer: chora-creation service
+      (POST /api/v1/collections/{collection_id}/convert-to-study-list,
+      via the chora-creation outbox).
+
+      Consumers:
+        - chora-consumption -> builds a LearningPath with
+                               source_type='collection', source_id=collection_id,
+                               traversal_mode='spaced' (ADR-233 D2/D3), then
+                               emits chora.consumption.learning_path.
+                               bootstrapped.v1 so the atoms reach the daily-dose
+                               curiosity slot. Idempotent on study_list_event_id.
+    messages:
+      - $ref: "#/channels/collectionConvertedToStudyList/messages/collectionConvertedToStudyList"
+
+components:
+  messages:
+    CollectionConvertedToStudyList:
+      name: "CollectionConvertedToStudyList"
+      title: "Collection Converted To Study List"
+      summary: "A learner converted a curated Collection into a spaced-repetition study list"
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf;version=3
+      payload:
+        schemaFormat: "application/vnd.google.protobuf;version=3"
+        schema:
+          protoFile: "proto/events/creation/collection.proto"
+          messageName: "chora.creation.v1.CollectionConvertedToStudyList"

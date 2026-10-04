@@ -1,0 +1,60 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Governance — PolicyRetired
+  version: 1.0.0
+  description: |
+    Published when a policy is retired (replaced or no longer applicable).
+    Soft-delete only — historical violations remain attributable.
+
+    - Domain: Governance (`chora_governance` DB)
+    - Topic: `chora.governance.policy.retired.v1`
+    - Source proto: `proto/events/governance/policy.proto`
+       message `chora.governance.v1.PolicyRetired`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  policyRetired:
+    address: chora.governance.policy.retired.v1
+    messages:
+      policyRetired:
+        $ref: '#/components/messages/PolicyRetired'
+
+operations:
+  publishPolicyRetired:
+    action: send
+    channel:
+      $ref: '#/channels/policyRetired'
+    messages:
+      - $ref: '#/channels/policyRetired/messages/policyRetired'
+
+  consumePolicyRetired:
+    action: receive
+    channel:
+      $ref: '#/channels/policyRetired'
+    description: |
+      Consumers: Guardrail Service refresh, Audit log, Observability.
+    messages:
+      - $ref: '#/channels/policyRetired/messages/policyRetired'
+
+components:
+  messages:
+    PolicyRetired:
+      name: PolicyRetired
+      title: Policy Retired
+      summary: A governance policy has been retired
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/governance/policy.proto#/chora.governance.v1.PolicyRetired'

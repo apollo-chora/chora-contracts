@@ -1,0 +1,1274 @@
+openapi: "3.2.0"
+info:
+  title: "Chora Multi-Companion (1:N) Roster API"
+  version: "1.2.0"
+  description: |
+    Multi-Companion (1:N) roster surface — list/create/get/soft-delete the
+    learner's specialised Companions. Per ADR-116 amendment 2026-05-12 +
+    ADR-147 §7 + `docs/architecture/multi-companion-per-user-2026-05-11.md`:
+    each learner owns N specialised Companion Instances (math / history /
+    coding / music / ...). Default roster cap is 3 (raisable via
+    tenant_entitlements add-on).
+
+    ## Companion contracts
+
+    - `consumption-companion-chat.yaml` — per-Companion conversational chat
+      (SSE multi-turn streaming) per ADR-154
+    - `tenancy-companion-eggs.yaml` — egg marketplace (catalog / odds /
+      Stripe Checkout) per ADR-149 — owned by chora-tenancy
+    - growth-axis subpaths (`/v1/me/companions/{id}/growth`, `/hatch`,
+      `/resonance`, `/source-revelation`, `/growth-events`) land
+      in §"CompanionGrowth" tag below per E2E-BE-FAM-GROWTH §1.
+      (`/kg-neighbors` RETIRED by R3-1, 2026-07-03 — resonant-concept
+      pick replaces the neighbor-reveal geometry; CHO-2013 P1.A.)
+
+    Owning domain : Content Consumption (`chora_consumption` database)
+    Owning team   : Team 1 (Content)
+    Surface       : A+ (learner self-service)
+
+    Authentication: Bearer JWT (ChoraSession-minted) — same as every
+    other A+ route.
+
+    ## debt #44 / A24 / B5 — list enrichment (2026-05-16)
+
+    The list endpoint `GET /v1/me/companions` returns the canonical
+    `RosterEntry` shape with inline `growth_state` + `cosmetic` projection
+    so FE consumers (chora-web `CompanionGrowthService.listMyCompanions`)
+    avoid the N+1 fetch pattern (previously: list + per-Companion growth
+    fetch). Backwards-compat is additive — pre-debt callers that only
+    consume `companion_id` / `name` / `specialization` continue to work
+    unchanged.
+
+    AP-01: This contract exists alongside the implementation. The schemas
+    here mirror `services/chora-consumption/internal/adapter/http/
+    companion_instance_handlers.go` (`instanceResp` + `growthStateResp` +
+    `cosmeticResp`).
+
+    Source-of-truth:
+      - `docs/architecture/adrs/adr-116-multi-companion-per-user.md`
+      - `docs/architecture/adrs/adr-149-companion-growth-stage-model.md`
+      - `docs/m13/handoff-fe-to-be-service-2026-05-14.md` §B5
+  contact:
+    name: "Chora Team 1 (Content)"
+  license:
+    name: "Proprietary"
+
+servers:
+  - url: "https://api.chora.site"
+    description: "Production via chora-gateway"
+  - url: "http://localhost:8080"
+    description: "Local development (direct chora-consumption)"
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: CompanionRoster
+    description: "Multi-Companion (1:N) roster — list/create/get/soft-delete"
+  - name: CompanionGrowth
+    description: |
+      ADR-149 7-stage growth axis subpaths on the per-Companion resource.
+
+      Wire envelope: FE consumers (chora-web `CompanionGrowthService`)
+      receive `{ data: T }` for these endpoints — the BFF envelope wrap
+      is applied at chora-gateway `companionbridge` per the
+      E2E-BE-FAM-GROWTH directive 2026-05-16. The raw chora-consumption
+      handler emits the unwrapped `T` shape directly (internal mesh
+      callers — gRPC, Pub/Sub republish — bypass the envelope).
+  - name: Health
+    description: "Health check"
+
+paths:
+  /v1/me/companions:
+    get:
+      operationId: listMyCompanions
+      summary: "List the caller's Companion roster (enriched)"
+      description: |
+        Returns all NON-DELETED Companions owned by the caller (resolved
+        from the ChoraSession JWT). Each row is the enriched
+        `CompanionInstanceResponse` shape with inline `growth_state` +
+        `cosmetic` projection per debt #44 (single fetch eliminates the
+        prior per-Companion growth N+1).
+
+        Order: `created_at` ascending (matches the in-DB row order — FE
+        renders Pythagoras → Kepler → Galileo → Eira in the demo seed).
+
+        Empty roster returns `200 { items: [] }` — empty is NOT an error.
+      tags: [CompanionRoster]
+      responses:
+        "200":
+          description: "Roster (possibly empty)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompanionRosterResponse"
+        "401":
+          description: "Missing / invalid Bearer JWT"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: "Internal error (e.g., database unavailable)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    post:
+      operationId: createCompanionInstance
+      summary: "Bond a new Companion"
+      description: |
+        Adds a new Companion Instance to the caller's roster. Returns 409
+        with code `COMPANION_CAP_REACHED` when the cap (default 3) is met.
+
+        The create-response shape is the BASE `CompanionInstanceResponse`
+        WITHOUT `growth_state` + `cosmetic` (newly-bonded Companions are
+        always at Stage 0 / Egg; FE renders the pre-hatch state from the
+        base shape). The next `GET /v1/me/companions` will surface the
+        enriched shape.
+      tags: [CompanionRoster]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCompanionRequest"
+      responses:
+        "201":
+          description: "Companion bonded"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompanionInstanceResponse"
+        "400":
+          description: "Bad request (missing name / specialization / malformed JSON)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: "Missing / invalid Bearer JWT"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: "Roster cap reached (`COMPANION_CAP_REACHED`)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/me/companions/{companion_id}:
+    parameters:
+      - in: path
+        name: companion_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+          example: "00000000-0000-7000-8000-00000000e1a0"
+        description: "UUIDv7 of the Companion"
+
+    get:
+      operationId: getCompanionInstance
+      summary: "Fetch one Companion — full profile projection (F5)"
+      description: |
+        Returns the complete Companion profile for the A+ FE profile pane in a
+        single call (F5). SUPERSET of `CompanionInstanceResponse` (every base
+        identity field is preserved additively for backwards-compat), plus:
+
+          - identity extras from the growth axis (`display_name`, `species`,
+            `species_rarity`, `shiny_variant`, `growth_stage`, `tone`);
+          - the full `growth_state` projection (growth_exp, stage,
+            effective_llm_tier, last_stage_up_at, resonant_atom);
+          - `cosmetic` (shiny + rarity);
+          - `roster_context` (roster_size + max_companions);
+          - an OPTIONAL `memory_summary` (omitted unless a Vertex AI Memory
+            Bank resolver is wired AND returns a non-empty summary — F4 is
+            designed separately; this service ships only the nil-safe port).
+
+        The growth axis degrades gracefully: when the growth service is not
+        wired OR the growth row is not yet provisioned, a pre-hatch (Stage 0)
+        projection is returned — the profile NEVER 503s/500s on a missing
+        growth row. Scoped to (tenant, owner); another owner's Companion 404s.
+      tags: [CompanionRoster]
+      responses:
+        "200":
+          description: "Companion profile"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompanionProfileResponse"
+        "404":
+          description: "Companion not found / soft-deleted / not owned by caller"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    delete:
+      operationId: deleteCompanionInstance
+      summary: "Soft-delete a Companion"
+      description: |
+        Marks the Companion `deleted_at = now()`. Idempotent — repeated
+        deletes return 204. The slot is freed for cap purposes (next
+        `POST /v1/me/companions` can succeed after a delete).
+      tags: [CompanionRoster]
+      responses:
+        "204":
+          description: "Deleted"
+
+  # ─── ADR-149 Growth-axis subpaths (CompanionGrowth tag) ────────────────
+  # Wire shape note (E2E-BE-FAM-GROWTH §3, 2026-05-16):
+  #   - Raw chora-consumption response shape is documented as the inner
+  #     `T` (e.g., `GrowthState`, `HatchEggResponse`, `GrowthEventsPage`).
+  #   - chora-gateway `companionbridge` wraps responses in
+  #     `{ data: T }` (BFF envelope) for FE consumers. Internal gRPC /
+  #     Pub/Sub callers consume the raw T directly.
+
+  /v1/me/companions/{companion_id}/growth:
+    parameters:
+      - in: path
+        name: companion_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getCompanionGrowth
+      summary: "Get full growth state (BFF-wrapped)"
+      description: |
+        Returns the canonical growth-state projection for one Companion.
+        Includes effective LLM tier per Mana × Growth matrix, visible KG
+        neighbors, Aha-moment window state, and stage thresholds.
+
+        BFF-wrapped shape consumed by chora-web:
+        `{ "data": CompanionGrowthState }`. Internal callers see the raw
+        `CompanionGrowthState`.
+      tags: [CompanionGrowth]
+      responses:
+        "200":
+          description: "Growth state"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompanionGrowthStateEnvelope"
+        "404":
+          description: "Companion not found"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/me/companions/{companion_id}/hatch:
+    parameters:
+      - in: path
+        name: companion_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: hatchEgg
+      summary: "Run gacha roll + identity commit (Stage 0 → 1)"
+      description: |
+        Rolls the breed (uniform for trial; weighted for paid SKUs per
+        `egg_skus.breed_distribution`), commits the display name + tone +
+        resonant atom, and advances the Companion from Stage 0 (Egg) to
+        Stage 1 (Hatchling). 409 `ALREADY_HATCHED` if the Companion has
+        already exited Stage 0.
+
+        IMDA D2 transparency: the rolled probability is included in the
+        response so the FE can show "you rolled X% odds" in the hatch
+        celebration. Mirrors the pre-checkout `/odds` disclosure.
+      tags: [CompanionGrowth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HatchEggRequest"
+      responses:
+        "200":
+          description: "Hatch committed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HatchEggResponseEnvelope"
+        "409":
+          description: "Already hatched / not in Egg stage"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/me/companions/{companion_id}/resonance:
+    parameters:
+      - in: path
+        name: companion_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: pickResonantConcept
+      summary: "Awakening resonant-concept pick (R3-1 ring centre)"
+      description: |
+        Sets the Companion's resonant concept — the ring-radius centre of
+        its reach (R3-1; replaces the retired KG-neighbor reveal). Gates:
+        hatched + Goal-bound + the concept must belong to the learner
+        (404 `CONCEPT_NOT_FOUND` otherwise). Re-pick overwrites.
+      tags: [CompanionGrowth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PickResonantConceptRequest"
+      responses:
+        "200":
+          description: "Resonant concept set"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PickResonantConceptResponseEnvelope"
+        "404":
+          description: "Concept not found / not learner-owned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: "Not hatched / not Goal-bound"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/me/companions/{companion_id}/source-revelation:
+    parameters:
+      - in: path
+        name: companion_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: triggerSourceRevelation
+      summary: "Open the Stage-3 24h Aha-moment window"
+      description: |
+        Stage-3 (Awakened) one-shot trigger. Opens a 24h window during
+        which the Companion's LLM tier is upgraded to the next tier per
+        the Mana × Growth matrix. 409 `AHA_MOMENT_CONSUMED` if already
+        triggered. 400 `INVALID_ARGUMENT` if stage < 3.
+      tags: [CompanionGrowth]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TriggerSourceRevelationRequest"
+      responses:
+        "200":
+          description: "Window opened"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TriggerSourceRevelationResponseEnvelope"
+        "409":
+          description: "Aha-moment already consumed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/me/companions/{companion_id}/growth-events:
+    parameters:
+      - in: path
+        name: companion_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - in: query
+        name: page_token
+        required: false
+        schema:
+          type: string
+        description: "Cursor token from the previous page's `nextPageToken`"
+      - in: query
+        name: page_size
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+    get:
+      operationId: listGrowthEvents
+      summary: "Paginated EXP ledger"
+      description: |
+        Returns the EXP grant ledger for one Companion, ordered by
+        `awarded_at DESC`. Each row records `source`, `exp_delta`,
+        `exp_cumulative_after`, `stage_before/after`, `daily_cap_hit`,
+        and `occurred_at`. The cursor is stable (`<unix_nano>:<event_id>`)
+        for opaque pagination.
+      tags: [CompanionGrowth]
+      responses:
+        "200":
+          description: "Page of events"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GrowthEventsPageEnvelope"
+
+  # ─── Skill-grant endpoints (CompanionSkills tag) — Task 2(a) ───────────
+  # The domain aggregate already enforced GrantSkill (slot-cap + dedupe) and
+  # the chora.consumption.companion.skill_granted.v1 topic existed, but no
+  # HTTP route exercised them. These mount the grant/list surface.
+  /v1/me/companions/{companion_id}/skills:
+    parameters:
+      - in: path
+        name: companion_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: listCompanionSkills
+      summary: "List a Companion's granted skills + slot caps"
+      tags: [CompanionSkills]
+      responses:
+        "200":
+          description: "Skill grants + slot capacity"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SkillGrantsResponse"
+        "404":
+          description: "Companion not found / not owned by caller"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    post:
+      operationId: grantCompanionSkill
+      summary: "Grant a skill_key to a Companion (slot-capped, deduped)"
+      description: |
+        Grants a `skill_key` (from `companion_skill_catalog`) to the Companion.
+        Enforced at the domain layer:
+
+          - `skill_slots_unlocked` cap → 409 `SKILL_SLOTS_FULL` when full;
+          - dedupe — re-granting an already-held skill is a 2xx no-op (does
+            NOT re-publish the event).
+
+        On a real grant the service persists the aggregate and publishes
+        `chora.consumption.companion.skill_granted.v1`.
+      tags: [CompanionSkills]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GrantSkillRequest"
+      responses:
+        "201":
+          description: "Skill granted (or dedupe no-op) — current grants returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SkillGrantsResponse"
+        "400":
+          description: "Missing / invalid skill_key"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: "Companion not found / not owned by caller"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: "Skill slots full — raise evolution_tier to unlock more"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /healthz:
+    get:
+      operationId: getHealth
+      summary: "Liveness probe"
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: "OK"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: "ChoraSession JWT minted by /api/v1/auth/session/mint"
+
+  schemas:
+    # -------------------------------------------------------------------
+    # Request shapes
+    # -------------------------------------------------------------------
+    CreateCompanionRequest:
+      type: object
+      required: [name, specialization]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+          example: "Eira"
+          description: "Display name (instructor/learner-set)"
+        specialization:
+          type: string
+          minLength: 1
+          maxLength: 64
+          example: "cspo"
+          description: |
+            Topic specialization — anchors RAG slice + skill pool. Common
+            values: `math`, `history`, `coding`, `music`, `cspo`, ...
+            (Free-form string; no enum lock-in.)
+        configured_rules:
+          type: object
+          additionalProperties:
+            type: string
+          example:
+            max_hint_count: "3"
+            max_session_minutes: "25"
+          description: |
+            Per-Companion behavioural rules (tone / hint_policy /
+            difficulty_cap / language / citation_strictness). Optional.
+
+    # -------------------------------------------------------------------
+    # Response shapes — debt #44 enrichment surfaces growth + cosmetic
+    # inline so FE drops the per-Companion /growth fetch.
+    # -------------------------------------------------------------------
+    CompanionRosterResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          description: "Roster entries (possibly empty)"
+          items:
+            $ref: "#/components/schemas/CompanionInstanceResponse"
+
+    CompanionInstanceResponse:
+      type: object
+      required:
+        - companion_id
+        - tenant_id
+        - owner_gcid
+        - name
+        - specialization
+        - evolution_tier
+        - skill_slots_unlocked
+        - memory_context_capacity
+        - skill_grants
+        - configured_rules
+        - memory_bank_app_name
+        - created_at
+        - updated_at
+      properties:
+        companion_id:
+          type: string
+          format: uuid
+          example: "00000000-0000-7000-8000-00000000e1a0"
+        tenant_id:
+          type: string
+          format: uuid
+        owner_gcid:
+          type: string
+          format: uuid
+        name:
+          type: string
+          example: "Eira"
+        specialization:
+          type: string
+          example: "cspo"
+        evolution_tier:
+          type: string
+          enum: [apprentice, adept, master, sage]
+          example: "apprentice"
+          description: |
+            XP-gated tier on the user's cumulative XP (NOT the per-Companion
+            level — distinct from ADR-149 growth_stage). Per `domain/
+            companion/instance.go` PromoteByUserXP.
+        skill_slots_unlocked:
+          type: integer
+          minimum: 0
+          example: 1
+        memory_context_capacity:
+          type: integer
+          minimum: 0
+          example: 1000
+        skill_grants:
+          type: array
+          items:
+            type: string
+          description: |
+            skill_keys from `companion_skill_catalog` granted to this
+            Instance. Currently always empty `[]` — full skill grants
+            list is loaded lazily via a separate endpoint.
+        configured_rules:
+          type: object
+          additionalProperties:
+            type: string
+          example:
+            max_hint_count: "3"
+            max_session_minutes: "25"
+        memory_bank_app_name:
+          type: string
+          pattern: "^companion:[0-9a-f-]{36}$"
+          example: "companion:00000000-0000-7000-8000-00000000e1a0"
+          description: |
+            Vertex AI Memory Bank `app_name`. Format `companion:{companion_id}`
+            per ADR-147 §7 + multi-companion-per-user-2026-05-11.md §2.4.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        # ─── debt #44 / A24 / B5 (2026-05-16) — inline enrichment ───
+        growth_state:
+          $ref: "#/components/schemas/GrowthState"
+          description: |
+            ADR-149 growth-axis projection. Populated on list responses
+            (`GET /v1/me/companions`). Omitted on create/get responses
+            where the FE round-trips the dedicated growth endpoint.
+        cosmetic:
+          $ref: "#/components/schemas/Cosmetic"
+          description: |
+            Cosmetic projection (rarity + shiny + equipped skin). Today
+            derived from the `species_rarity` + `shiny_variant` columns
+            on `companion_instances`. `equipped_skin_id` is reserved for
+            the future DigitalSkin grant table (always NULL today).
+
+    GrowthState:
+      type: object
+      description: |
+        Read-side projection of the ADR-149 7-stage Angelic Dragon growth
+        axis. Mirrors `growth.CompanionGrowthRow` but rendered for FE
+        consumption (snake_case wire / camelCase post-gateway pass).
+
+        At Stage 0 (Egg) the breed / atom / hatched timestamp / LLM tier
+        fields are empty/null — FE renders the pre-hatch state.
+      required:
+        - stage
+        - stage_name
+        - exp
+        - exp_to_next_stage
+        - current_breed
+        - effective_llm_tier
+        - resonant_atom_id
+        - aha_moment_consumed
+      properties:
+        stage:
+          type: integer
+          minimum: 0
+          maximum: 6
+          example: 2
+          description: |
+            7-stage axis per ADR-149: 0=Egg, 1=Baby, 2=Fledgling,
+            3=Awakened, 4=Structural, 5=Teen, 6=Matured.
+        stage_name:
+          type: string
+          enum: [egg, baby, fledgling, awakened, structural, teen, matured, unknown]
+          example: "fledgling"
+        exp:
+          type: integer
+          minimum: 0
+          example: 12
+          description: "EXP into the CURRENT stage (per-stage; 0 at stage entry)"
+        growth_exp:
+          type: integer
+          minimum: 0
+          example: 62
+          description: |
+            CUMULATIVE EXP across all stages (distinct from per-stage `exp`).
+            Populated on the per-instance profile (`GET /v1/me/companions/{id}`);
+            omitted (0) on the list endpoint's per-row projection.
+        exp_to_next_stage:
+          type: integer
+          minimum: 0
+          example: 200
+          description: |
+            EXP threshold to enter the NEXT stage. Returns 0 when already
+            at Stage 6 (Matured). Mirrors FE `STAGE_EXP_THRESHOLDS`.
+        current_breed:
+          type: string
+          example: "dragon"
+          description: |
+            Breed (CompanionSpecies). Empty pre-hatch (Stage 0). Canonical
+            values per ADR-149: owl / fox / cat / dragon / phoenix /
+            turtle / wolf / raven.
+        breed_revealed_at:
+          type: [string, "null"]
+          format: date-time
+          description: "hatched_at timestamp — NULL pre-hatch"
+        effective_llm_tier:
+          type: string
+          enum: [flash-lite, flash, flash-reasoning, pro, ""]
+          example: "flash-lite"
+          description: |
+            Cached LLM tier per Mana × Growth matrix. Empty pre-hatch.
+        last_stage_up_at:
+          type: [string, "null"]
+          format: date-time
+        resonant_atom_id:
+          type: string
+          example: "00000000-0000-7000-8000-00000000a0a2"
+          description: |
+            UUIDv7 of the Resonant Atom anchor. Empty pre-hatch. Cross-DB
+            ref to `chora_creation.atoms` validated at hatch time.
+        aha_moment_consumed:
+          type: boolean
+          description: "Stage-3 Source Revelation one-shot flag"
+        aha_moment_active_until:
+          type: [string, "null"]
+          format: date-time
+          description: "24h preview window end — NULL outside window"
+
+    Cosmetic:
+      type: object
+      description: |
+        Cosmetic projection. `equipped_skin_id` is reserved (NULL today)
+        for the future DigitalSkin grant table per ADR-149 follow-up.
+      required:
+        - shiny
+        - rarity
+      properties:
+        equipped_skin_id:
+          type: [string, "null"]
+          description: "DigitalSkin ID — NULL = render default skin"
+        shiny:
+          type: boolean
+          description: "Shiny variant (purely visual)"
+        rarity:
+          type: string
+          enum: ["", common, uncommon, rare, legendary]
+          example: "common"
+          description: |
+            Breed rarity assigned at hatch time. Empty pre-hatch.
+
+    # -------------------------------------------------------------------
+    # F5 — full per-instance profile projection (GET /v1/me/companions/{id}).
+    # Superset of CompanionInstanceResponse: identity extras + growth axis +
+    # cosmetic + roster_context + OPTIONAL memory_summary.
+    # -------------------------------------------------------------------
+    CompanionProfileResponse:
+      type: object
+      required:
+        - companion_id
+        - tenant_id
+        - owner_gcid
+        - name
+        - display_name
+        - specialization
+        - evolution_tier
+        - skill_slots_unlocked
+        - memory_context_capacity
+        - skill_grants
+        - configured_rules
+        - memory_bank_app_name
+        - created_at
+        - updated_at
+        - growth_stage
+        - growth_state
+        - cosmetic
+        - roster_context
+      properties:
+        companion_id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        owner_gcid:
+          type: string
+          format: uuid
+        name:
+          type: string
+          example: "Eira"
+        display_name:
+          type: string
+          example: "Eira"
+          description: "Alias of `name` for the FE profile-pane binding."
+        specialization:
+          type: string
+          example: "cspo"
+        tone:
+          type: string
+          example: "encouraging"
+          description: "Behavioural tone from configured_rules (may be empty)."
+        evolution_tier:
+          type: string
+          enum: [apprentice, adept, master, sage]
+        skill_slots_unlocked:
+          type: integer
+          minimum: 0
+        memory_context_capacity:
+          type: integer
+          minimum: 0
+        skill_grants:
+          type: array
+          items:
+            type: string
+          description: "skill_keys granted to this Companion (see /skills)."
+        configured_rules:
+          type: object
+          additionalProperties:
+            type: string
+        memory_bank_app_name:
+          type: string
+          pattern: "^companion:[0-9a-f-]{36}$"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        # Growth-axis identity extras (flattened for convenience).
+        growth_stage:
+          type: integer
+          minimum: 0
+          maximum: 6
+        species:
+          type: string
+          description: "Breed; empty pre-hatch. Mirrors growth_state.current_breed."
+        species_rarity:
+          type: string
+          enum: ["", common, uncommon, rare, legendary]
+        shiny_variant:
+          type: boolean
+        growth_state:
+          $ref: "#/components/schemas/GrowthState"
+        cosmetic:
+          $ref: "#/components/schemas/Cosmetic"
+        roster_context:
+          $ref: "#/components/schemas/RosterContext"
+        memory_summary:
+          type: string
+          description: |
+            OPTIONAL Vertex AI Memory Bank summary (F4 — designed separately).
+            OMITTED when Memory Bank is not wired, returns empty, or errors —
+            never load-bearing for the profile.
+
+    RosterContext:
+      type: object
+      required: [roster_size, max_companions]
+      properties:
+        roster_size:
+          type: integer
+          minimum: 0
+          example: 3
+          description: "Count of the caller's active (non-deleted) Companions."
+        max_companions:
+          type: integer
+          minimum: 0
+          example: 3
+          description: |
+            Roster cap (max_companions_per_user). Default 3 (free tier); paid
+            tiers higher per ADR-142.
+
+    # -------------------------------------------------------------------
+    # Task 2(a) — skill-grant request/response shapes.
+    # -------------------------------------------------------------------
+    GrantSkillRequest:
+      type: object
+      required: [skill_key]
+      properties:
+        skill_key:
+          type: string
+          minLength: 1
+          example: "math.solver"
+          description: "skill_key from companion_skill_catalog to grant."
+
+    SkillGrantsResponse:
+      type: object
+      description: |
+        The loadout view (CHO-2012 ADR-218 D3 shape; mirrors
+        `companion_skill_grant_handler.go` loadoutResp). skill_grants /
+        skill_slots_unlocked / evolution_tier keep the pre-P0 names for
+        compatibility; grants[] carries the detail incl. the CHO-2030
+        catalogue_active release flag (dormant named-tease rendering).
+      required: [companion_id, skill_grants, equipped_skills, grants, skill_slots_unlocked, slots_used, evolution_tier, growth_stage]
+      properties:
+        companion_id:
+          type: string
+          format: uuid
+        skill_grants:
+          type: array
+          items:
+            type: string
+          description: "Owned skill_keys (possibly empty), sorted."
+        equipped_skills:
+          type: array
+          items:
+            type: string
+          description: "Equipped ACTIVE-kind skill_keys."
+        grants:
+          type: array
+          items:
+            $ref: "#/components/schemas/LoadoutGrant"
+        skill_slots_unlocked:
+          type: integer
+          minimum: 0
+          description: "Slot capacity derived from the growth stage (SlotsForStage)."
+        slots_used:
+          type: integer
+          minimum: 0
+        evolution_tier:
+          type: string
+          enum: [apprentice, adept, master, sage]
+        growth_stage:
+          type: integer
+          minimum: 0
+          maximum: 6
+
+    LoadoutGrant:
+      type: object
+      required: [skill_key, skill_kind, slot_cost, equipped, unlocked_via, unlocked_at_stage, catalogue_active]
+      properties:
+        skill_key:
+          type: string
+        skill_kind:
+          type: string
+          enum: [active, passive, craft]
+        slot_cost:
+          type: integer
+        equipped:
+          type: boolean
+        unlocked_via:
+          type: string
+          enum: [species_path, admin_grant]
+        unlocked_at_stage:
+          type: integer
+        catalogue_active:
+          type: boolean
+          description: |
+            ADR-174 release state (CHO-2030). false = owned-but-dark
+            dormant — FE renders the R3-9 named-tease; equip returns 409
+            SKILL_NOT_ACTIVE and invoke is blocked server-side.
+
+    # -------------------------------------------------------------------
+    # ADR-149 CompanionGrowth subpath shapes (E2E-BE-FAM-GROWTH §1).
+    #
+    # The five `*Envelope` shapes carry the BFF `{data: T}` wrap applied
+    # at chora-gateway `companionbridge`. Internal callers see the inner
+    # `T` directly; FE chora-web consumes the envelope.
+    # -------------------------------------------------------------------
+
+    CompanionGrowthState:
+      type: object
+      description: |
+        Full growth state projection — the canonical shape FE
+        `CompanionGrowthService.getGrowth` consumes. Mirrors the
+        `growth.State` Go domain type. snake_case on the wire;
+        camelCase post-gateway.
+      required:
+        - companion_id
+        - growth_stage
+        - stage_name
+        - exp_current
+        - exp_next_threshold
+        - exp_cumulative
+        - effective_llm_tier
+        - effective_max_output_tokens
+        - unlocked_tools
+        - aha_moment_consumed
+      properties:
+        companion_id:
+          type: string
+          format: uuid
+        growth_stage:
+          type: integer
+          minimum: 0
+          maximum: 6
+        stage_name:
+          type: string
+          enum: [egg, baby, fledgling, awakened, structural, teen, matured]
+        species:
+          type: string
+          description: "Breed; empty pre-hatch"
+        shiny_variant:
+          type: boolean
+        rarity:
+          type: string
+          enum: ["", common, uncommon, rare, legendary]
+        exp_current:
+          type: integer
+        exp_next_threshold:
+          type: integer
+        exp_cumulative:
+          type: integer
+        effective_llm_tier:
+          type: string
+          enum: [flash-lite, flash, flash-reasoning, pro, ""]
+        effective_max_output_tokens:
+          type: integer
+        unlocked_tools:
+          type: array
+          items:
+            type: string
+        resonant_atom_id:
+          type: string
+        resonant_concept_id:
+          type: string
+          description: "R3-1 awakening pick — the ring-radius centre (empty until picked)"
+        next_unlocks:
+          type: array
+          description: |
+            CHO-2030 (R3-9 named-tease): the Path entries that unlock at
+            the NEXT stage, computed server-side from the species-Path
+            bands (single source of truth — no FE band fork). Present
+            only on the direct growth read; empty at the top stage;
+            omitted for legacy rows without an active species Path.
+          items:
+            $ref: "#/components/schemas/NextUnlockPreview"
+        aha_moment_consumed:
+          type: boolean
+        aha_moment_active_until:
+          type: [string, "null"]
+          format: date-time
+        hatched_at:
+          type: [string, "null"]
+          format: date-time
+        last_stage_up_at:
+          type: [string, "null"]
+          format: date-time
+
+    NextUnlockPreview:
+      type: object
+      description: |
+        One upcoming species-Path entry (CHO-2030). catalogue_active=false
+        rows render as named-tease dormants ("stirring, not yet awake" —
+        R3-9: named, never hidden, never fake-usable); equip/invoke stay
+        server-gated regardless of what the FE shows.
+      required: [skill_key, skill_kind, unlocks_at_stage, catalogue_active]
+      properties:
+        skill_key:
+          type: string
+        skill_kind:
+          type: string
+          enum: [active, passive, craft]
+        unlocks_at_stage:
+          type: integer
+          minimum: 2
+          maximum: 6
+        catalogue_active:
+          type: boolean
+
+    CompanionGrowthStateEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/CompanionGrowthState"
+
+    HatchEggRequest:
+      type: object
+      required: [display_name, resonant_atom_id, tone, learner_persona]
+      properties:
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 64
+          example: "Eira"
+        resonant_atom_id:
+          type: string
+          format: uuid
+        tone:
+          type: string
+          enum: [encouraging, rigorous, playful, curious]
+        learner_persona:
+          type: string
+          example: "curious-explorer"
+
+    HatchEggResponse:
+      type: object
+      required: [state, species, shiny_variant, rarity, rolled_probability]
+      properties:
+        state:
+          $ref: "#/components/schemas/CompanionGrowthState"
+        species:
+          type: string
+          enum: [owl, fox, cat, dragon, phoenix, turtle, wolf, raven]
+        shiny_variant:
+          type: boolean
+        rarity:
+          type: string
+          enum: [common, uncommon, rare, legendary]
+        rolled_probability:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: "Numeric probability (0..100) of the rolled breed — IMDA D2 transparency"
+
+    HatchEggResponseEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/HatchEggResponse"
+
+    PickResonantConceptRequest:
+      type: object
+      required: [concept_id]
+      properties:
+        concept_id:
+          type: string
+          format: uuid
+
+    PickResonantConceptResponse:
+      type: object
+      required: [state]
+      properties:
+        state:
+          $ref: "#/components/schemas/CompanionGrowthState"
+
+    PickResonantConceptResponseEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/PickResonantConceptResponse"
+
+    TriggerSourceRevelationRequest:
+      type: object
+      properties:
+        mana_tier:
+          type: string
+          enum: [basic, standard, premium]
+          description: "Optional override; default reads tenant entitlement"
+        window_duration_seconds_override:
+          type: integer
+          minimum: 0
+          description: "Test-only override (admin)"
+
+    TriggerSourceRevelationResponse:
+      type: object
+      required: [state, preview_llm_tier, window_expires_at, window_duration_seconds]
+      properties:
+        state:
+          $ref: "#/components/schemas/CompanionGrowthState"
+        preview_llm_tier:
+          type: string
+          enum: [flash-lite, flash, flash-reasoning, pro]
+        window_expires_at:
+          type: string
+          format: date-time
+        window_duration_seconds:
+          type: integer
+
+    TriggerSourceRevelationResponseEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/TriggerSourceRevelationResponse"
+
+    GrowthEventRecord:
+      type: object
+      required:
+        - event_id
+        - companion_id
+        - source
+        - source_event_id
+        - exp_delta
+        - exp_cumulative_after
+        - stage_before
+        - stage_after
+        - daily_cap_hit
+        - occurred_at
+      properties:
+        event_id:
+          type: string
+          format: uuid
+        companion_id:
+          type: string
+          format: uuid
+        source:
+          type: string
+          example: "atom_session"
+          description: "EXP source — `atom_session`, `kg_unlock`, etc."
+        source_event_id:
+          type: string
+        exp_delta:
+          type: integer
+        exp_cumulative_after:
+          type: integer
+        stage_before:
+          type: integer
+          minimum: 0
+          maximum: 6
+        stage_after:
+          type: integer
+          minimum: 0
+          maximum: 6
+        daily_cap_hit:
+          type: boolean
+        occurred_at:
+          type: string
+          format: date-time
+
+    GrowthEventsPage:
+      type: object
+      required: [events, next_page_token]
+      properties:
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/GrowthEventRecord"
+        next_page_token:
+          type: string
+          description: "Empty string when no further pages"
+
+    GrowthEventsPageEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/GrowthEventsPage"
+
+    # -------------------------------------------------------------------
+    # Error envelope (matches the shared `writeError` helper output)
+    # -------------------------------------------------------------------
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: "COMPANION_CAP_REACHED"
+        message:
+          type: string
+          example: "max companions per user reached"
+
+    HealthResponse:
+      type: object
+      required: [status, time]
+      properties:
+        status:
+          type: string
+          example: "ok"
+        time:
+          type: string
+          format: date-time

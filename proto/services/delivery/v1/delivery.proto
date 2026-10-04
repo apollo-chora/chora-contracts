@@ -1,0 +1,558 @@
+// =============================================================================
+// Chora Content Delivery Service (gRPC)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 1 D1
+//   + .claude/rules/ddd-enforcement.md
+//   + chora-contracts/openapi/delivery-admin.yaml
+//   + chora-contracts/proto/events/delivery/*.proto
+//
+// Inter-service gRPC contract for the Content Delivery core domain
+// (chora_delivery database, Team 2 / Delivery). Surface: R+ Rhythm+
+// (instructor / admin training-admin / scheduling / classroom / exam).
+//
+// Aggregates exposed:
+//   - Course / Class       — admin construct grouping atoms for delivery
+//   - Enrollment           — same-identity link (gcid + course_id) per
+//                            Comic Ch4 P8 ("One Identity to Rule Them All")
+//   - Class (scheduled)    — concrete time-bound delivery instance
+//   - AttendanceRecord     — per-class per-learner attendance row
+//   - Certificate          — issued credential
+//
+// Cross-DB queries FORBIDDEN — Course aggregate carries atom_ids only
+// (UUIDs without FK; atom content remains owned by Creation).
+//
+// Course catalogue listing (ListPublicCourses) supports the Phyllis MVP
+// "Udemy moment" (Comic Ch5 P10) — public discovery + same-identity
+// enrollment without creating a new user record.
+//
+// Deployed in chora-delivery (Team 2 pool). mTLS via Cloud Service Mesh;
+// SPIFFE identity in mesh; W3C trace context in gRPC metadata.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.services.delivery.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/delivery/v1;deliveryv1";
+
+import "google/protobuf/timestamp.proto";
+
+// -----------------------------------------------------------------------------
+// Service
+// -----------------------------------------------------------------------------
+
+service Delivery {
+  // Create a new Course aggregate. Idempotent on (tenant_id, title) within
+  // a 5-second window. Side-effect: emits chora.delivery.course.created.v1.
+  rpc CreateCourse(CreateCourseRequest) returns (CreateCourseResponse);
+
+  // List public-catalogue courses. Used by the Phyllis MVP
+  // /api/catalog?public=true endpoint (Comic Ch5 P10 "Udemy moment").
+  // Cross-tenant — public courses are discoverable across tenant boundaries
+  // for enrollment.
+  rpc ListPublicCourses(ListPublicCoursesRequest) returns (ListPublicCoursesResponse);
+
+  // Enroll a learner in a course. Same-identity per Comic Ch4 P8 — does
+  // NOT create a new user record; adds an Enrollment row linking
+  // (gcid, course_id). Idempotent on (gcid, course_id). Side-effect:
+  // emits chora.delivery.enrollment.created.v1.
+  rpc EnrollLearner(EnrollLearnerRequest) returns (EnrollLearnerResponse);
+
+  // Schedule a concrete Class delivery (a time-bound instance of a Course).
+  // Idempotent on (course_id, start_at, end_at, location_uri).
+  rpc ScheduleClass(ScheduleClassRequest) returns (ScheduleClassResponse);
+
+  // Record attendance for a learner on a class. Idempotent on
+  // (class_id, learner_gcid, status). Used by classroom operator
+  // Live-Quiz / digital-signage check-in flows.
+  rpc RecordAttendance(RecordAttendanceRequest) returns (RecordAttendanceResponse);
+
+  // Issue a Certification to a learner who has completed a course.
+  // Idempotent on (course_id, learner_gcid). Side-effect: emits
+  // chora.delivery.certification.issued.v1.
+  rpc IssueCertification(IssueCertificationRequest) returns (IssueCertificationResponse);
+
+  // List a learner's past graded submissions together with their ADR-172
+  // whole-assessment overall comments — the ceremony "learning edges" read
+  // seam (CHO-2040). Called lazily by chora-consumption's Companion ceremony
+  // edge-scout skill at ceremony time; cross-DB reads are forbidden, so the
+  // chora_delivery-owned rows are exposed through this gRPC read instead.
+  //
+  // Visibility MIRRORS the learner-facing result endpoint (chora-delivery
+  // internal/adapter/http/assessment_handler.go myResultHandler): ONLY
+  // submissions in state RELEASED are returned. RELEASED is reachable only
+  // through the ADR-172 §D6 HITL gate (review_status must not be
+  // PENDING_REVIEW), so everything this RPC returns is exactly what the
+  // learner already sees in the product — nothing pre-release leaks.
+  rpc ListLearnerGradedSubmissions(ListLearnerGradedSubmissionsRequest)
+      returns (ListLearnerGradedSubmissionsResponse);
+}
+
+// -----------------------------------------------------------------------------
+// Shared enums
+// -----------------------------------------------------------------------------
+
+// CourseStatus — lifecycle state of the Course aggregate.
+enum CourseStatus {
+  COURSE_STATUS_UNSPECIFIED = 0;
+  COURSE_STATUS_DRAFT = 1;
+  COURSE_STATUS_PUBLISHED = 2;
+  COURSE_STATUS_SCHEDULED = 3;
+  COURSE_STATUS_ARCHIVED = 4;
+}
+
+// ClassMode — how the Class is delivered.
+enum ClassMode {
+  CLASS_MODE_UNSPECIFIED = 0;
+  CLASS_MODE_IN_PERSON = 1;
+  CLASS_MODE_VIRTUAL = 2;     // Zoom-backed
+  CLASS_MODE_HYBRID = 3;
+  CLASS_MODE_ASYNC = 4;       // self-paced
+}
+
+// EnrollmentStatus — Enrollment row lifecycle.
+enum EnrollmentStatus {
+  ENROLLMENT_STATUS_UNSPECIFIED = 0;
+  ENROLLMENT_STATUS_PENDING = 1;
+  ENROLLMENT_STATUS_ACTIVE = 2;
+  ENROLLMENT_STATUS_COMPLETED = 3;
+  ENROLLMENT_STATUS_WITHDRAWN = 4;
+  ENROLLMENT_STATUS_FAILED = 5;
+}
+
+// AttendanceStatus — per-class per-learner attendance record.
+enum AttendanceStatus {
+  ATTENDANCE_STATUS_UNSPECIFIED = 0;
+  ATTENDANCE_STATUS_PRESENT = 1;
+  ATTENDANCE_STATUS_LATE = 2;
+  ATTENDANCE_STATUS_ABSENT = 3;
+  ATTENDANCE_STATUS_EXCUSED = 4;
+}
+
+// AttendanceMethod — how attendance was captured.
+enum AttendanceMethod {
+  ATTENDANCE_METHOD_UNSPECIFIED = 0;
+  ATTENDANCE_METHOD_QR_CODE = 1;       // tablet/phone QR scan (per ADR-087)
+  ATTENDANCE_METHOD_INSTRUCTOR_MARK = 2;
+  ATTENDANCE_METHOD_AUTOMATIC = 3;     // virtual class auto-join
+  ATTENDANCE_METHOD_KIOSK = 4;         // classroom kiosk check-in
+}
+
+// CertificateStatus — Certification lifecycle.
+enum CertificateStatus {
+  CERTIFICATE_STATUS_UNSPECIFIED = 0;
+  CERTIFICATE_STATUS_ISSUED = 1;
+  CERTIFICATE_STATUS_REVOKED = 2;
+  CERTIFICATE_STATUS_EXPIRED = 3;
+}
+
+// -----------------------------------------------------------------------------
+// Common message types
+// -----------------------------------------------------------------------------
+
+// Course — Course/Class aggregate root projection.
+message Course {
+  // UUIDv7.
+  string course_id = 1;
+
+  // Tenant scope.
+  string tenant_id = 2;
+
+  // Display title (1..256 chars).
+  string title = 3;
+
+  // Course description (free text, max 4096 chars).
+  string description = 4;
+
+  // GCID of the course author / owner.
+  string owner_gcid = 5;
+
+  // Status.
+  CourseStatus status = 6;
+
+  // True if the course is listed in the public catalogue.
+  bool is_public = 7;
+
+  // Atom IDs forming the course (cross-domain UUIDs from chora_creation).
+  // Order is course-defined.
+  repeated string atom_ids = 8;
+
+  // ISO 4217 currency for course price (empty for free courses).
+  string price_currency = 9;
+
+  // Course price in minor units (cents). Zero for free courses.
+  int64 price_amount_cents = 10;
+
+  // BCP-47 locale tag for the course primary language.
+  string locale = 11;
+
+  // When the course was created.
+  google.protobuf.Timestamp created_at = 12;
+
+  // When the course was published (zero when DRAFT).
+  google.protobuf.Timestamp published_at = 13;
+}
+
+// Class — concrete scheduled delivery instance of a Course.
+message Class {
+  // UUIDv7.
+  string class_id = 1;
+
+  // Course this class delivers.
+  string course_id = 2;
+
+  // Tenant scope.
+  string tenant_id = 3;
+
+  // Display title for the class instance (defaults to course title +
+  // start date when empty at write time).
+  string title = 4;
+
+  // Mode of delivery.
+  ClassMode mode = 5;
+
+  // GCID of the assigned instructor.
+  string instructor_gcid = 6;
+
+  // Class start time (server clock).
+  google.protobuf.Timestamp start_at = 7;
+
+  // Class end time.
+  google.protobuf.Timestamp end_at = 8;
+
+  // Location identifier — a room ID, Zoom meeting URI, or campus address.
+  string location_uri = 9;
+
+  // Maximum learner capacity. Zero = unlimited.
+  int32 capacity = 10;
+
+  // When the class was scheduled.
+  google.protobuf.Timestamp scheduled_at = 11;
+}
+
+// Enrollment — learner-to-course association (per Comic Ch4 P8 invariant).
+message Enrollment {
+  // UUIDv7.
+  string enrollment_id = 1;
+
+  // Course the learner is enrolled in.
+  string course_id = 2;
+
+  // GCID of the learner. SAME GCID across courses — single identity.
+  string learner_gcid = 3;
+
+  // Tenant scope.
+  string tenant_id = 4;
+
+  // Status.
+  EnrollmentStatus status = 5;
+
+  // When the enrollment was created.
+  google.protobuf.Timestamp enrolled_at = 6;
+
+  // When the learner completed the course (zero when not completed).
+  google.protobuf.Timestamp completed_at = 7;
+
+  // Aggregated final score in [0.0, 1.0]. Zero when not yet completed.
+  float final_score = 8;
+}
+
+// AttendanceRecord — per-class per-learner attendance row.
+message AttendanceRecord {
+  // UUIDv7.
+  string attendance_id = 1;
+
+  // Class the attendance is recorded against.
+  string class_id = 2;
+
+  // GCID of the learner.
+  string learner_gcid = 3;
+
+  // Tenant scope.
+  string tenant_id = 4;
+
+  // Status.
+  AttendanceStatus status = 5;
+
+  // Method of capture.
+  AttendanceMethod method = 6;
+
+  // When attendance was recorded.
+  google.protobuf.Timestamp recorded_at = 7;
+
+  // Optional GCID of the actor who marked attendance (instructor).
+  // Empty for automatic / kiosk capture.
+  string recorded_by_gcid = 8;
+}
+
+// Certificate — issued credential.
+message Certificate {
+  // UUIDv7.
+  string certificate_id = 1;
+
+  // Course the certificate certifies completion of.
+  string course_id = 2;
+
+  // GCID of the recipient.
+  string recipient_gcid = 3;
+
+  // Tenant that issued the certificate.
+  string tenant_id = 4;
+
+  // Status.
+  CertificateStatus status = 5;
+
+  // Final score in [0.0, 1.0] at issue time.
+  float final_score = 6;
+
+  // Optional GCS URI of the rendered PDF (issued asynchronously).
+  string pdf_uri = 7;
+
+  // When the certificate was issued.
+  google.protobuf.Timestamp issued_at = 8;
+
+  // When the certificate expires. Zero = no expiry.
+  google.protobuf.Timestamp expires_at = 9;
+}
+
+// -----------------------------------------------------------------------------
+// CreateCourse RPC
+// -----------------------------------------------------------------------------
+
+message CreateCourseRequest {
+  // Tenant scope. Required.
+  string tenant_id = 1;
+
+  // Display title. Required, 1..256 chars.
+  string title = 2;
+
+  // Description. Required, max 4096 chars.
+  string description = 3;
+
+  // Owner GCID. Required.
+  string owner_gcid = 4;
+
+  // Whether the course is public on the catalogue.
+  bool is_public = 5;
+
+  // Atom IDs forming the course (in delivery order).
+  repeated string atom_ids = 6;
+
+  // ISO 4217 currency. Empty for free courses.
+  string price_currency = 7;
+
+  // Price in minor units (cents). Zero for free.
+  int64 price_amount_cents = 8;
+
+  // BCP-47 locale tag.
+  string locale = 9;
+}
+
+message CreateCourseResponse {
+  // The newly-created course (status = DRAFT).
+  Course course = 1;
+}
+
+// -----------------------------------------------------------------------------
+// ListPublicCourses RPC
+// -----------------------------------------------------------------------------
+
+message ListPublicCoursesRequest {
+  // Optional tenant filter. Empty = cross-tenant public catalogue.
+  string tenant_id_filter = 1;
+
+  // Optional locale filter (BCP-47).
+  string locale_filter = 2;
+
+  // Pagination cursor (opaque). Empty for first page.
+  string cursor = 3;
+
+  // Page size (1..100, default 20).
+  int32 limit = 4;
+}
+
+message ListPublicCoursesResponse {
+  // Public courses in this page.
+  repeated Course courses = 1;
+
+  // Cursor for the next page; empty when no more pages.
+  string next_cursor = 2;
+}
+
+// -----------------------------------------------------------------------------
+// EnrollLearner RPC
+// -----------------------------------------------------------------------------
+
+message EnrollLearnerRequest {
+  // Course UUIDv7. Required.
+  string course_id = 1;
+
+  // Learner GCID. Required (same identity as user record per Ch4 P8).
+  string learner_gcid = 2;
+
+  // Tenant scope of the enrollment record. Required.
+  string tenant_id = 3;
+}
+
+message EnrollLearnerResponse {
+  // The Enrollment row (status = ACTIVE on success).
+  Enrollment enrollment = 1;
+}
+
+// -----------------------------------------------------------------------------
+// ScheduleClass RPC
+// -----------------------------------------------------------------------------
+
+message ScheduleClassRequest {
+  // Course to schedule a class for. Required.
+  string course_id = 1;
+
+  // Tenant scope. Required.
+  string tenant_id = 2;
+
+  // Optional override title. When empty, defaults to course title + start date.
+  string title = 3;
+
+  // Mode of delivery. Required.
+  ClassMode mode = 4;
+
+  // GCID of the instructor. Required.
+  string instructor_gcid = 5;
+
+  // Class start time. Required.
+  google.protobuf.Timestamp start_at = 6;
+
+  // Class end time. Required.
+  google.protobuf.Timestamp end_at = 7;
+
+  // Location URI (room ID / Zoom URL / address). Required.
+  string location_uri = 8;
+
+  // Capacity (0 = unlimited).
+  int32 capacity = 9;
+}
+
+message ScheduleClassResponse {
+  // The newly-scheduled class.
+  Class scheduled_class = 1;
+}
+
+// -----------------------------------------------------------------------------
+// RecordAttendance RPC
+// -----------------------------------------------------------------------------
+
+message RecordAttendanceRequest {
+  // Class UUIDv7. Required.
+  string class_id = 1;
+
+  // Learner GCID. Required.
+  string learner_gcid = 2;
+
+  // Tenant scope. Required.
+  string tenant_id = 3;
+
+  // Attendance status. Required.
+  AttendanceStatus status = 4;
+
+  // Method of capture. Required.
+  AttendanceMethod method = 5;
+
+  // Optional GCID of the actor (instructor). Empty for kiosk / automatic.
+  string recorded_by_gcid = 6;
+
+  // When attendance was captured (client clock; server may override on skew).
+  google.protobuf.Timestamp recorded_at = 7;
+}
+
+message RecordAttendanceResponse {
+  // The persisted attendance record.
+  AttendanceRecord record = 1;
+}
+
+// -----------------------------------------------------------------------------
+// IssueCertification RPC
+// -----------------------------------------------------------------------------
+
+message IssueCertificationRequest {
+  // Course UUIDv7. Required.
+  string course_id = 1;
+
+  // Recipient GCID. Required.
+  string recipient_gcid = 2;
+
+  // Tenant scope (issuing tenant). Required.
+  string tenant_id = 3;
+
+  // Final score in [0.0, 1.0] at issue time.
+  float final_score = 4;
+
+  // Optional expiry timestamp. Zero = no expiry.
+  google.protobuf.Timestamp expires_at = 5;
+
+  // GCID of the actor issuing the certificate (admin / instructor).
+  // Empty for automatic system issuance.
+  string issued_by_gcid = 6;
+}
+
+message IssueCertificationResponse {
+  // The newly-issued certificate (status = ISSUED). pdf_uri may be empty
+  // until async PDF rendering completes.
+  Certificate certificate = 1;
+}
+
+// -----------------------------------------------------------------------------
+// ListLearnerGradedSubmissions RPC (CHO-2040 ceremony learning-edges seam)
+// -----------------------------------------------------------------------------
+
+message ListLearnerGradedSubmissionsRequest {
+  // Tenant scope. Required.
+  string tenant_id = 1;
+
+  // GCID of the learner whose released graded submissions to list. Required.
+  string learner_gcid = 2;
+
+  // Page size (1..50, default 20).
+  int32 limit = 3;
+
+  // Pagination cursor (opaque). Empty for first page. Field named `cursor`
+  // (not page_token) per this file's pagination idiom — see
+  // ListPublicCoursesRequest.
+  string cursor = 4;
+}
+
+// GradedSubmissionSummary — one released graded submission projected for the
+// ceremony edge-scout. Carries ONLY learner-visible grading artifacts.
+message GradedSubmissionSummary {
+  // Submission UUIDv7.
+  string submission_id = 1;
+
+  // Parent assessment UUIDv7.
+  string assessment_id = 2;
+
+  // ADR-172 whole-assessment overall comment (current value — HUMAN edit
+  // wins over the AI draft). Empty when the grader set none; the learner
+  // result payload omits the field in that case, so nothing extra leaks.
+  string overall_comment = 3;
+
+  // Grading outcome: "PASSED" | "FAILED". Derived from submissions.passed
+  // exactly as the learner result payload does (myResultHandler renders
+  // `passed: sub.Passed != nil && *sub.Passed`, i.e. NULL coerces to
+  // not-passed).
+  string outcome = 4;
+
+  // When grading completed — submissions.graded_at, stamped by
+  // Submission.MarkGradedPendingRelease before release. Unset only for a
+  // (schema-anomalous) released row missing graded_at.
+  google.protobuf.Timestamp completed_at = 5;
+}
+
+message ListLearnerGradedSubmissionsResponse {
+  // Released graded submissions, newest first by completed_at (graded_at).
+  repeated GradedSubmissionSummary items = 1;
+
+  // Cursor for the next page; empty when no more pages. Field named
+  // `next_cursor` (not next_page_token) per this file's pagination idiom —
+  // see ListPublicCoursesResponse.
+  string next_cursor = 2;
+}

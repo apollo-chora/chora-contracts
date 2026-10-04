@@ -1,0 +1,97 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Content Consumption — PreferencesUpdated
+  version: 1.0.0
+  description: |
+    Published when a learner changes one or more preferences (WS1 preferences leg,
+    ADR-200 / CHO-2049).
+
+    Producer of record: chora-consumption `dose_pref` store (ADR-224 / CHO-2045),
+    emitted from `PUT /v1/me/dose-preferences` after the include/exclude upsert.
+    The event is source-agnostic — a later identity-sourced preference
+    (locale / notifications / accessibility) can reuse the same shape and the same
+    LearnerProfile consumer with no code change.
+
+    Consumer: chora-consumption LearnerProfile projection → one verified
+    `FactPreference` per `PreferenceEntry` (ADR-200 read-model). Verified-only
+    (ADR-203 / L16): every projected fact cites the envelope `event_id`; there is
+    no self-declaration path. A preference is context, not achievement — it earns
+    NO companion EXP and gates no goal.
+
+    - Domain: Content Consumption (`chora_consumption` DB)
+    - Aggregate: LearnerProfile projection (consumer) / dose_pref (producer)
+    - Topic: `chora.consumption.preferences.updated.v1`
+    - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
+      (INTEGRATION NOTE: the binary encoder in protomarshal + the generated
+       decoder in protodecode + the Pub/Sub topic/schema Terraform are the
+       codegen+deploy step; the code presently emits + decodes the transitional
+       JSON shape via the outbox JSON fallback / protodecode JSON fallback).
+    - Source proto: `proto/events/consumption/preferences.proto`
+       message `chora.consumption.v1.PreferencesUpdated`
+
+    Embeds the mandatory `chora.common.v1.EventEnvelope` as field 1.
+
+    Owner rulings (2026-07-07): Q2 stable `dose.map.<map_id>` key · Q3 a cleared
+    preference projects an `included` value (never a delete) · Q4 preference
+    changes are suppressed from the Companion's conversational RecentActivity.
+  contact:
+    name: Chora Content Team (Team 1)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+    description: Google Cloud Pub/Sub (chora-489812 platform host)
+
+channels:
+  preferencesUpdated:
+    address: chora.consumption.preferences.updated.v1
+    description: Single-event topic for PreferencesUpdated.
+    messages:
+      preferencesUpdated:
+        name: PreferencesUpdated
+        title: Learner preferences updated
+        contentType: application/vnd.google.protobuf
+        payload:
+          type: object
+          required: [envelope, learner_gcid, preferences, occurred_at]
+          properties:
+            envelope:
+              description: Mandatory chora.common.v1.EventEnvelope (field 1).
+              type: object
+            learner_gcid:
+              type: string
+              description: Learner GCID (UUIDv7, opaque).
+            preferences:
+              type: array
+              description: One or more changed preferences (ordered).
+              items:
+                type: object
+                required: [key, value]
+                properties:
+                  key:
+                    type: string
+                    description: Stable key, e.g. "dose.map.<map_id>" (Q2).
+                  value:
+                    type: string
+                    description: e.g. "included" | "excluded" (Q3 re-include = "included").
+            occurred_at:
+              type: string
+              format: date-time
+              description: Producer clock — when the preference(s) changed.
+
+operations:
+  publishPreferencesUpdated:
+    action: send
+    channel:
+      $ref: '#/channels/preferencesUpdated'
+    summary: chora-consumption dose_pref emits when a learner changes dose preferences.
+  receivePreferencesUpdated:
+    action: receive
+    channel:
+      $ref: '#/channels/preferencesUpdated'
+    summary: chora-consumption LearnerProfile projection mints FactPreference per entry.

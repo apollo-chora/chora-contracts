@@ -1,0 +1,68 @@
+// =============================================================================
+// chora.tenancy.v1 — TenantBootstrapped event
+// =============================================================================
+//
+// Source-of-truth: CHO-1630 Phase 2 (H+ Setup-Tenant — mirror sync).
+//
+// Owning domain  : Tenancy (chora_tenancy database).
+// Owning team    : Team 3 (Platform).
+// Topic          : chora.tenancy.tenant.bootstrapped.v1
+// Surface        : H+ Hub+ (Surface-5)
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.tenancy.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/tenancy/v1;tenancyv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// TenantBootstrapped — chora.tenancy.tenant.bootstrapped.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a caller successfully self-onboards via
+// `POST /api/v1/tenants/bootstrap`. Distinct from TenantCreated (admin-led
+// provisioning that lands in PROVISIONING status) and TenantGoLive (admin
+// flip from PROVISIONING to ACTIVE). Bootstrap directly creates an ACTIVE
+// tenant + owner member + `core` entitlement in one transaction.
+//
+// Phase 2 sole consumer: chora-identity, which writes a mirror row to
+// `chora_identity.tenant_memberships` (role=admin per ADR-165 — OWNER is
+// JWT-stamped only; not a tenant_memberships ENUM value).
+//
+// At-least-once delivery via the chora-tenancy outbox; consumers MUST
+// handle duplicate delivery (ON CONFLICT DO NOTHING on the
+// (gcid, tenant_id) unique constraint, or wrap the handler in
+// idempotent.Store.Process).
+message TenantBootstrapped {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — Tenant aggregate root identifier.
+  string tenant_id = 2;
+
+  // GCID of the caller who became the tenant's `owner`. Cross-DB
+  // reference to chora_identity.users.gcid.
+  string owner_gcid = 3;
+
+  // Display name as provided in the bootstrap request body (trimmed,
+  // 3..256 chars).
+  string display_name = 4;
+
+  // UUIDv7 — the chora_tenancy.members row created in the same tx for
+  // the caller. Surfaced for trace correlation; downstream consumers
+  // typically only need owner_gcid + tenant_id.
+  string owner_member_id = 5;
+
+  // UUIDv7 — the chora_tenancy.add_on_subscriptions row created in the
+  // same tx for the `core` add-on. Surfaced for trace correlation.
+  string entitlement_id = 6;
+
+  // RFC-3339 — transaction commit timestamp. Mirrors
+  // chora_tenancy.tenants.created_at.
+  google.protobuf.Timestamp bootstrapped_at = 7;
+}

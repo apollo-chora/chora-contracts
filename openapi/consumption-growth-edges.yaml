@@ -1,0 +1,368 @@
+openapi: 3.2.0
+info:
+  title: "Chora Content Consumption — Growth Edges (Learner Weakness) API"
+  version: "1.0.0"
+  description: |
+    Learner-facing REST API for the **Growth Edge** layer — the per-GCID model
+    of where a learner is shaky, used to target question generation, paint the
+    Knowledge Graph, feed the Companion, and rank the Daily Dose weakness slot.
+
+    Terminology (3-audience explainability): the LEARNER-facing term is
+    "Growth Edge" (curiosity-first); the internal / instructor / auditor term is
+    "weakness". The data is neutral; the framing is per-surface.
+
+    A Growth Edge is keyed by a normalised free-form `concept_key` (+ an optional
+    `topic_id` link to a TopicNode), carries a vector embedding (for dedup +
+    nearest-topic resolution + semantic atom retrieval), `category` + `tags[]`
+    facets (for rollup — NO parent/child hierarchy), a `strength` (how shaky),
+    `sources[]` (explicit | derived | classroom), and a rich `descriptor`
+    (distilled metadata + cached drill atoms — never the original upload).
+
+    Sources:
+      - explicit : the learner uploads a "weakness document" (a marked-up past
+        test PDF/image with right/wrong marks, or free-form notes / a scribble).
+        Analysis is async + multimodal (an ai-kernel weakness-analyser crew):
+        POST .../uploads returns 202 + upload_id; poll .../uploads/{id}.
+        Flow: upload -> chora.consumption.weakness_doc.uploaded.v1 -> analyser
+        crew -> chora.consumption.weakness.analyzed.v1 -> upsert Growth Edges.
+      - derived  : performance signals (topic_accuracy + Ebbinghaus
+        topic_retention + classroom score_awarded.v1) projected by
+        chora-consumption subscribers. Not authored here.
+
+    Lifecycle: derived weakness auto-recovers via the existing Ebbinghaus
+    machinery; explicit weakness is sticky until re-tested / re-uploaded;
+    mastered (strength -> ~0) is soft-archived as `grown` (kept for KG history).
+
+    Owning domain  : Content Consumption (chora_consumption database)
+    Owning team    : Team 1 (Content)
+    Surface        : A+ (Growth Edges view / Daily Dose / Companion / KG paint)
+    Topic prefix   : chora.consumption.weakness_doc.* + chora.consumption.weakness.*
+
+    All endpoints are bearer-authenticated; the GCID is the validated session
+    subject (learner-scoped — a learner only ever reads/writes their own edges).
+    The async upload analysis costs mana; 402 uses the canonical
+    InsufficientManaUpsell envelope (learner-economy.yaml).
+  contact:
+    name: "Chora Platform Team — Content Track"
+  license:
+    name: "Proprietary"
+
+servers:
+  - url: "https://api.chora.site/consumption/v1"
+    description: "Production"
+  - url: "http://localhost:8082/consumption/v1"
+    description: "Local dev"
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: growth-edges
+    description: "Read + manage the learner's Growth Edges (weaknesses)."
+  - name: growth-edge-uploads
+    description: "Async multimodal analysis of an uploaded weakness document."
+
+paths:
+  /me/growth-edges:
+    get:
+      tags: [growth-edges]
+      operationId: listMyGrowthEdges
+      summary: "List the learner's Growth Edges (filter + sort + paginate)."
+      description: |
+        Returns the merged (explicit + derived) Growth Edges for the calling
+        learner. Powers the A+ Growth-Edges view AND the batch-qgen target
+        picker (the FE passes selected `concept_key`s as `target_growth_edges[]`
+        into the batch job — keeping weakness in consumption, not a cross-DB read
+        from creation). Default excludes `grown` (mastered) edges.
+      parameters:
+        - { name: category, in: query, required: false, schema: { type: string }, description: "Filter to one category bucket." }
+        - { name: tag, in: query, required: false, schema: { type: array, items: { type: string } }, style: form, explode: true, description: "Filter by tag (repeatable; OR within)." }
+        - { name: topic_id, in: query, required: false, schema: { type: string, format: uuid }, description: "Filter to edges resolved to this TopicNode." }
+        - { name: min_strength, in: query, required: false, schema: { type: number, format: float, minimum: 0, maximum: 1, default: 0 }, description: "Only edges at or above this shakiness." }
+        - { name: include_grown, in: query, required: false, schema: { type: boolean, default: false }, description: "Include mastered/soft-archived edges." }
+        - { name: sort, in: query, required: false, schema: { type: string, enum: [strength_desc, last_evidenced_desc, first_seen_desc], default: strength_desc } }
+        - { name: page_size, in: query, required: false, schema: { type: integer, enum: [10, 20, 50, 100], default: 20 } }
+        - { name: page_token, in: query, required: false, schema: { type: string }, description: "Opaque cursor from a prior page." }
+      responses:
+        "200":
+          description: "A page of Growth Edges."
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/GrowthEdge" } }
+                  next_page_token: { type: string, description: "Absent on the last page." }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /me/growth-edges/{growth_edge_id}:
+    get:
+      tags: [growth-edges]
+      operationId: getMyGrowthEdge
+      summary: "Read one Growth Edge (incl. descriptor + cached drill atoms)."
+      parameters:
+        - { name: growth_edge_id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: "The Growth Edge."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GrowthEdge" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: "No such Growth Edge for this learner." }
+    delete:
+      tags: [growth-edges]
+      operationId: deleteMyGrowthEdge
+      summary: "Soft-delete (dismiss) a Growth Edge the learner no longer wants tracked."
+      parameters:
+        - { name: growth_edge_id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "204": { description: "Soft-deleted (idempotent)." }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /me/growth-edges/uploads:
+    post:
+      tags: [growth-edge-uploads]
+      operationId: uploadGrowthEdgeDoc
+      summary: "Upload a weakness document for async multimodal analysis."
+      description: |
+        Accepts a marked-up past test (PDF/image with right/wrong marks),
+        free-form notes, or a scribble. Stores the blob, debits mana for the
+        analyser LLM call, publishes chora.consumption.weakness_doc.uploaded.v1,
+        and returns 202 + upload_id. The raw blob is transient (cold-archived /
+        discarded post-analysis). Poll GET .../uploads/{upload_id}.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, upload_kind]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: "PDF / PNG / JPEG / TXT / MD, <= 32 MiB."
+                upload_kind:
+                  type: string
+                  enum: [marked_test, notes, scribble, source_material]
+                  description: |
+                    Steers the analyser prompt. 'source_material' (ADR-205 D8, WS-5)
+                    is a grounding textbook/reference — TRANSIENT, distilled to a
+                    scope-profile, never persisted verbatim; gated by a one-tap
+                    upload_rights_consent.
+                context_hint:
+                  type: string
+                  maxLength: 2048
+                  deprecated: true
+                  description: |
+                    DEPRECATED (ADR-205 D2) — superseded by structured_clues. Free
+                    text folded into the prompt is an injection surface; the graduated
+                    crew ignores it when structured_clues is present. Retained for the
+                    pre-graduation single-shot crew.
+                structured_clues:
+                  type: string
+                  description: |
+                    Bounded, screened learner steering (ADR-205 D2 / CHO-1973) — the
+                    injection-safe replacement for context_hint. A JSON object (sent as
+                    a string part) matching WeaknessDocUploaded.structured_clues (proto
+                    field 10): { subject, weak_topic_keys[], self_confidence (1..5),
+                    context_kind, note (<=512, Model-Armor-screened) }. Forwarded
+                    verbatim onto weakness_doc.uploaded.v1. Malformed JSON ⇒ 400.
+                requested_outputs:
+                  type: string
+                  description: |
+                    The learner's output PRE-SELECTION (ADR-205 D5 / CHO-1973),
+                    refined at the bounded HITL review. A JSON object (sent as a string
+                    part) matching WeaknessDocUploaded.requested_outputs / OutputSelection
+                    (proto field 11): { focused_dose, familiar_coaching, practice_test,
+                    study_aids } booleans. Forwarded verbatim. Malformed JSON ⇒ 400.
+                upload_rights_consent:
+                  type: string
+                  description: |
+                    One-tap upload-rights attestation (true/on/1/yes), REQUIRED when
+                    upload_kind=source_material (ADR-205 D8 / WS-5). Ignored for the
+                    other kinds.
+                goal_id:
+                  type: string
+                  format: uuid
+                  description: |
+                    ADR-238 D1 - the goal (map) this upload was scoped to. A goal IS a
+                    map (ADR-214), and a marked test spans a SUBJECT, so the goal - not
+                    the entry node - is the unit of analysis. BOUNDS resolution: at
+                    ingest each detected weakness is nearest-matched against this goal's
+                    concept sub-tree and, above the cosine floor, stamped onto the
+                    matched node. Omitted ⇒ a non-goal upload; edges stay goal-level.
+                    Malformed (non-UUID) ⇒ 400 INVALID_GOAL_REF.
+                concept_id:
+                  type: string
+                  format: uuid
+                  description: |
+                    ADR-238 D2 - the concept whose drawer Diagnose was opened from.
+                    A SOFT EMPHASIS HINT, never a filter: candidates inside this
+                    concept's sub-tree win only a near-tie against the best match, and
+                    the bias is applied AFTER the cosine floor, so it can change WHICH
+                    concept a weakness lands on but never WHETHER it is kept. An
+                    unknown / deleted / off-goal value is inert, not an error.
+                    DELIBERATELY OMITTED on the goal-level "Diagnose my map" entry so a
+                    whole-map diagnosis is never biased toward an arbitrary node.
+                    Malformed (non-UUID) ⇒ 400 INVALID_CONCEPT_REF.
+      responses:
+        "202":
+          description: "Accepted; analysis is async."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GrowthEdgeUploadJob" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402":
+          description: "Insufficient mana for the analyser call."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InsufficientManaUpsell" }
+        "413": { description: "File exceeds 32 MiB." }
+        "415": { description: "Unsupported media type." }
+
+  /me/growth-edges/uploads/{upload_id}:
+    get:
+      tags: [growth-edge-uploads]
+      operationId: getGrowthEdgeUploadJob
+      summary: "Poll the status of an async weakness-doc analysis."
+      parameters:
+        - { name: upload_id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: "Current job status; on COMPLETED, the upserted edge ids."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GrowthEdgeUploadJob" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: "No such upload for this learner." }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  responses:
+    Unauthorized:
+      description: "Missing or invalid bearer token."
+
+  schemas:
+    GrowthEdge:
+      type: object
+      description: "One persisted weakness concept (learner-facing: a Growth Edge)."
+      required: [id, concept_key, concept_label, strength, sources, status]
+      properties:
+        id: { type: string, format: uuid }
+        concept_key: { type: string, description: "Normalised slug, e.g. 'riverine-flood-causes'." }
+        concept_label: { type: string, description: "Companion-facing natural phrase." }
+        category: { type: string, nullable: true, description: "Coarse bucket (reuse atom subject taxonomy)." }
+        tags: { type: array, items: { type: string } }
+        topic_id: { type: string, format: uuid, nullable: true, description: "Resolved TopicNode (nearest-by-cosine), when one matched." }
+        strength: { type: number, format: float, minimum: 0, maximum: 1, description: "How shaky: 1 = very weak, 0 = mastered." }
+        sources:
+          type: array
+          items: { type: string, enum: [explicit, derived, classroom] }
+          description: "Which signals contributed (source-tagged, merged)."
+        descriptor:
+          type: object
+          description: "Distilled metadata — never the original document."
+          properties:
+            summary: { type: string }
+            misconceptions: { type: array, items: { type: string } }
+            suggested_angles: { type: array, items: { type: string }, description: "qgen drill angles." }
+            sample_wrong:
+              type: array
+              items:
+                type: object
+                properties:
+                  prompt: { type: string }
+                  why_wrong: { type: string }
+        cached_drill_atom_ids:
+          type: array
+          items: { type: string, format: uuid }
+          description: "Semantically-retrieved atoms (via SearchEmbeddings) cached for instant Daily Dose."
+        status: { type: string, enum: [active, grown], description: "'grown' = mastered + soft-archived (kept for KG history)." }
+        first_seen_at: { type: string, format: date-time }
+        last_evidenced_at: { type: string, format: date-time }
+
+    GrowthEdgeUploadJob:
+      type: object
+      required: [upload_id, status]
+      properties:
+        upload_id: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [QUEUED, ANALYZING, AWAITING_REVIEW, COMPLETED, FAILED]
+          description: |
+            AWAITING_REVIEW (ADR-205 D4 / CHO-1973) parks the job at the bounded HITL
+            interrupt — the analyser has diagnosed candidate edges but paused BEFORE
+            persisting; `review` carries the panel for the learner's accept/reject/merge
+            decision (resumes the same orchestrator thread). Reachable only on the
+            graduated (graph) crew path.
+        upserted_growth_edge_ids:
+          type: array
+          items: { type: string, format: uuid }
+          description: "Present on COMPLETED (may be empty if nothing weak was detected)."
+        failure_reason: { type: string, description: "Present on FAILED (non-leaky)." }
+        review:
+          allOf: [ { $ref: "#/components/schemas/GrowthEdgeReviewPanel" } ]
+          description: "Present ONLY while status == AWAITING_REVIEW (the bounded HITL panel)."
+
+    GrowthEdgeReviewPanel:
+      type: object
+      description: |
+        The bounded HITL review panel (ADR-205 D4 / CHO-1973). The orchestrator owns
+        proposed_edge_id; consumption stores + echoes it OPAQUELY. The shape is
+        identical to the WeaknessReviewPending event body.
+      required: [proposed_edges, candidate_struggles, available_outputs]
+      properties:
+        companion:
+          type: object
+          description: "The Companion fronting the review (omitted if unresolved)."
+          properties:
+            companion_id: { type: string }
+            name: { type: string }
+            species: { type: string, description: "Drives the avatar/persona (e.g. 'dragon')." }
+        proposed_edges:
+          type: array
+          description: "The analyser's proposed edges for accept/reject/merge (may be empty)."
+          items:
+            type: object
+            properties:
+              proposed_edge_id: { type: string, description: "Orchestrator-owned OPAQUE handle; echoed in the resume decision." }
+              concept_label: { type: string }
+              summary: { type: string }
+              suggested_angles: { type: array, items: { type: string } }
+              strength: { type: number, format: float, minimum: 0, maximum: 1 }
+              suggested_difficulty: { type: string, enum: [easier, standard, harder] }
+        candidate_struggles:
+          type: array
+          description: "Bounded 'add a struggle the analyser missed' picker source (may be empty)."
+          items:
+            type: object
+            properties:
+              concept_key: { type: string }
+              concept_label: { type: string }
+        available_outputs:
+          type: array
+          description: "Selectable Companion-fronted outputs + their mana prices (ADR-205 D5)."
+          items:
+            type: object
+            properties:
+              kind: { type: string, enum: [focused_dose, familiar_coaching, practice_test, study_aids] }
+              mana_price: { type: integer, format: int64, description: "0 for free outputs." }
+              default_selected: { type: boolean }
+
+    InsufficientManaUpsell:
+      type: object
+      description: "Canonical 402 envelope (mirrors learner-economy.yaml)."
+      properties:
+        error: { type: string, example: "insufficient_mana" }
+        required_mana: { type: integer }
+        current_mana: { type: integer }
+        upsell_message: { type: string }
+        stripe_checkout_url: { type: string, nullable: true }

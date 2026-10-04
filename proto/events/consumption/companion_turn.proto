@@ -1,0 +1,183 @@
+// =============================================================================
+// Chora Content Consumption: Learning Companion typed-chat turn on the bus
+// =============================================================================
+//
+// ADR-254 D1/D4/D8 (R20): every agent invocation is event-orchestrated. A
+// typed chat turn is no longer an HTTP call from chora-consumption to the chat
+// agent: consumption keeps the SSE to the browser, writes the turn row + this
+// request event into its outbox in one transaction, sends the SSE `accepted`
+// frame the moment the request is durable, and the kennel's generic
+// single-agent workflow parks on the companion_chat dispatch lane and answers
+// with ONE whole-reply completion that consumption forwards as `turn_complete`
+// (or `error`). A retried turn_id is answered by consumption from the result it
+// stored; the kennel dedupes the request on its idempotency key for seven days.
+//
+// Wire (ADR-254 D4): JSON on the bus, schema-less (topics.yaml `schema: null`);
+// the body is the protojson of these messages; envelope fields ride in the
+// Pub/Sub attributes AND in field 1 (routing on the `event_topic` attribute).
+// envelope.idempotency_key = turn_id (the caller's business key).
+//
+//   Request : chora.consumption.companion_turn.requested.v1
+//             (kennel pulls chora-ai-kernel-orchestrator.consumption-companion-turn-requested)
+//   Result  : chora.consumption.companion_turn.completed.v1
+//             (consumption pulls chora-consumption.companion-turn-completed)
+//
+// Owning domain : Content Consumption (chora_consumption DB).
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.consumption.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/consumption/v1;consumptionv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// Topic: chora.consumption.companion_turn.requested.v1
+// CompanionTurnRequested asks the kennel for one Learning Companion turn.
+//
+// BINDING SHAPE (coordinator 2026-08-22 17:31Z, ADR-254 D6 payload addendum):
+// the kennel's generic workflow passes this body through to the chat binary
+// VERBATIM as the dispatch input_payload, adding only turn_kind (+ message /
+// diagnosis_json / reflection_json for the kinds it derives), so the JSON keys
+// below are exactly what agents/companion_chat_adk_go/internal/boot/dispatch.go
+// and chora-adk-common/{growthstageplugin,ahamomentplugin,instancedispatch}
+// decode. The PRE-RENAME wire names (familiar_id, familiar_config,
+// familiar_memory) inside this kennel-to-agent lane are deliberate: a later
+// rename is a coordinated cut, not a drift. Publishers MUST marshal with
+// protojson UseProtoNames=true (snake_case keys); camelCase breaks the decode.
+message CompanionTurnRequested {
+  // envelope.tenant_id + envelope.gcid = the learner; envelope.idempotency_key
+  // = turn_id; traceparent/tracestate mandatory (one turn = one trace). The
+  // agent's dispatch binds tenant_id / user_gcid from the ENVELOPE (a body
+  // gcid is dropped there), so fields 4/5 are informational copies.
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 minted by the SPA; the end-to-end idempotency key (SPA ->
+  // consumption -> this event -> dispatch key -> gateway debit claim).
+  string turn_id = 2;
+
+  // The conversation (consumption's chat session id, stable per learner +
+  // Companion across turns); the chat agent's Postgres-backed ADK session is
+  // keyed on it. REQUIRED for persistence.
+  string conversation_id = 3;
+
+  string tenant_id = 4;
+  string gcid = 5;
+
+  // The learner's Companion instance (UUIDv7). REQUIRED. Pre-rename wire name.
+  string familiar_id = 6;
+
+  // protojson of the resolved consumption FamiliarInstanceConfig (the same
+  // document ResolveFamiliarInstanceConfig serves over gRPC: growth_stage,
+  // species, allowed_tools, guidance_note, aha_moment_active_until, ...).
+  // REQUIRED for typed / voice turns. Pre-rename wire name.
+  string familiar_config = 7;
+
+  // "typed" for this lane (the kennel stamps it; consumption sends it too so
+  // the body is self-describing).
+  string turn_kind = 8;
+
+  // The learner's typed text (Armor-screened by consumption where the turn
+  // surface screens; the kennel screens again per ADR-152/250). REQUIRED.
+  string message = 9;
+
+  // BCP-47 locale for the reply; empty when the client omitted it.
+  string locale = 10;
+
+  // The learner's mana tier for this turn: "basic" | "standard" | "premium".
+  string mana_tier = 11;
+
+  // The gateway action code for the turn, exactly as consumption stamps it:
+  // companion_chat_turn_<tier> from W3 (familiar_chat_turn_<tier> before).
+  string mana_action_code = 12;
+
+  // Growth stage 0-6 as a JSON NUMBER (int32 marshals as a number; a string
+  // is refused permanently by the binary: invalid_growth_stage).
+  int32 growth_stage = 13;
+
+  // Species string (owl | fox | cat | dragon | phoenix | turtle | wolf | raven
+  // | penguin | rabbit); empty before hatch.
+  string species = 14;
+
+  // ADR-197 registry prompt overrides (JSON) + the resolved version; both
+  // omitted when the resolver had nothing (fail-open).
+  string prompt_overrides_json = 15;
+  string resolved_prompt_version = 16;
+
+  // Recalled per-Companion memory context (JSON, F4 / ADR-173); omitted on a
+  // recall miss. Pre-rename wire name.
+  string familiar_memory = 17;
+
+  // The learner's top Growth Edges (JSON {"growth_edges":[...]}); omitted
+  // when unavailable (soft-fail).
+  string learner_weakness = 18;
+
+  // Visible KG neighbour atom ids. RETIRED R3-1: consumption OMITS this key
+  // (absent = none; the growth-stage plugin tolerates absence). Declared so
+  // the wire shape documents the binary's contract.
+  repeated string visible_kg_neighbors = 19;
+
+  // End of the 24h Aha-moment window (RFC3339 on the wire); omitted when no
+  // window is active.
+  google.protobuf.Timestamp aha_moment_active_until = 20;
+
+  // When consumption accepted the turn (server time).
+  google.protobuf.Timestamp requested_at = 21;
+}
+
+// One grounding reference the agent cited (ADR-249 cite_atom).
+message CompanionTurnGrounding {
+  string atom_id = 1;
+  string revision_id = 2;
+  string title = 3;
+  string snippet = 4;
+}
+
+// One tool call the agent made this turn (name + a one-line summary; the
+// arguments never ride the caller-facing wire).
+message CompanionTurnToolCall {
+  string name = 1;
+  string summary = 2;
+}
+
+// Topic: chora.consumption.companion_turn.completed.v1
+// CompanionTurnCompleted carries the WHOLE reply (no token deltas on this path).
+message CompanionTurnCompleted {
+  // envelope.idempotency_key = turn_id (echoed verbatim from the request).
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // Echoed from the request.
+  string turn_id = 2;
+  string conversation_id = 3;
+  string companion_id = 4;
+
+  // "OK" | "FAILED" | "REJECTED" (ADR-254 D4). REJECTED = the kennel's
+  // per-tenant in-flight cap or a policy refusal (error_code names it).
+  string status = 5;
+
+  // Machine token when status != OK, e.g. "tenant_in_flight_cap",
+  // "companion_suspended", "surface_unstamped", "agent_timeout",
+  // "request_dead_lettered". Empty on OK.
+  string error_code = 6;
+
+  // The kennel workflow that served the turn (for the O+ trail).
+  string workflow_id = 7;
+
+  // The model that answered (mandatory on OK; empty on FAILED/REJECTED).
+  string generated_by_model_id = 8;
+
+  // The whole reply text (empty unless status == OK).
+  string reply_text = 9;
+
+  repeated CompanionTurnGrounding grounding = 10;
+  repeated CompanionTurnToolCall tool_calls = 11;
+
+  // Set when the agent declined honestly (status OK, reply_text carries the
+  // refusal copy): e.g. "off_topic", "persona_fence", "groundedness".
+  string refusal_reason = 12;
+
+  // When the completion was produced (server time).
+  google.protobuf.Timestamp completed_at = 13;
+}

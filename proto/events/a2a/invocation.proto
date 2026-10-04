@@ -1,0 +1,164 @@
+// =============================================================================
+// Chora Agent-to-Agent — Invocation (call instance) events
+// =============================================================================
+//
+// Aggregate root: A2AInvocation (a single call against an A2AContract).
+// Owning domain : Agent-to-Agent (chora_a2a DB).
+// Owning team   : Team 3 (Platform)
+// Topic prefix  : chora.a2a.invocation.*
+//
+// Lifecycle: STARTED -> {COMPLETED | FAILED | GUARDRAIL_BLOCKED}.
+// Each invocation carries cryptographic hashes of request + response
+// payloads — the actual payload bodies live in audit cold storage,
+// retrievable by hash for replay / dispute resolution.
+//
+// All inbound A2A traffic is taint_level = untrusted at the A2A Gateway;
+// every invocation passes through the Guardrail Service before the owning
+// agent is reached (per ADR-132 §8).
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.a2a.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/a2a/v1;a2av1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// GuardrailViolationType — taxonomy for InvocationGuardrailBlocked.
+// -----------------------------------------------------------------------------
+//
+// PII_LEAK            — DLP detected PII in inbound or outbound payload.
+// MODEL_ARMOR_BLOCK   — Cloud Model Armor classified the request as
+//                       prompt-injection / jailbreak / unsafe.
+// SCOPE_EXCEEDED      — invocation requested capabilities outside the
+//                       contract's declared scopes[].
+// RATE_LIMIT          — counterparty exceeded per-AGID / per-tenant rate
+//                       limit at the A2A Gateway.
+// AUTH_FAIL           — JWS signature verification failed OR unrecognised
+//                       counterparty AGID.
+enum GuardrailViolationType {
+  GUARDRAIL_VIOLATION_TYPE_UNSPECIFIED = 0;
+  GUARDRAIL_VIOLATION_TYPE_PII_LEAK = 1;
+  GUARDRAIL_VIOLATION_TYPE_MODEL_ARMOR_BLOCK = 2;
+  GUARDRAIL_VIOLATION_TYPE_SCOPE_EXCEEDED = 3;
+  GUARDRAIL_VIOLATION_TYPE_RATE_LIMIT = 4;
+  GUARDRAIL_VIOLATION_TYPE_AUTH_FAIL = 5;
+}
+
+// -----------------------------------------------------------------------------
+// InvocationStarted — chora.a2a.invocation.started.v1
+// -----------------------------------------------------------------------------
+//
+// Published immediately after the A2A Gateway accepts a well-formed
+// invocation request, BEFORE handing it to the owning agent. Trace context
+// in envelope.traceparent ties the full invocation lifecycle.
+message InvocationStarted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 identifier of the A2AInvocation aggregate.
+  string invocation_id = 2;
+
+  // Contract being invoked.
+  string contract_id = 3;
+
+  // Calling agent (external — taint_level untrusted).
+  string caller_agid = 4;
+
+  // Invoked agent (Chora-side).
+  string called_agid = 5;
+
+  // SHA-256 hex digest of the canonicalised request payload. Body lives in
+  // audit cold storage (Cloud Storage bucket with retention lock).
+  string request_payload_hash = 6;
+
+  google.protobuf.Timestamp started_at = 7;
+}
+
+// -----------------------------------------------------------------------------
+// InvocationCompleted — chora.a2a.invocation.completed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when the owning agent successfully produces a response that
+// passes outbound guardrails. Consumers: A2A billing meter, Observability
+// (token + latency rollup), audit.
+message InvocationCompleted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string invocation_id = 2;
+  string contract_id = 3;
+  string caller_agid = 4;
+  string called_agid = 5;
+
+  string request_payload_hash = 6;
+
+  // SHA-256 hex digest of the canonicalised response payload.
+  string response_payload_hash = 7;
+
+  google.protobuf.Timestamp started_at = 8;
+  google.protobuf.Timestamp completed_at = 9;
+
+  // Total wall-clock latency in milliseconds (started_at -> completed_at).
+  int64 latency_ms = 10;
+}
+
+// -----------------------------------------------------------------------------
+// InvocationFailed — chora.a2a.invocation.failed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when the owning agent OR an upstream dependency raises a
+// non-guardrail error. Distinct from GuardrailBlocked — use this for model
+// timeouts, downstream service unavailable, validation errors, etc.
+message InvocationFailed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string invocation_id = 2;
+  string contract_id = 3;
+  string caller_agid = 4;
+  string called_agid = 5;
+
+  string request_payload_hash = 6;
+
+  // UPPER_SNAKE_CASE error taxonomy. Examples: "MODEL_TIMEOUT",
+  // "DOWNSTREAM_UNAVAILABLE", "VALIDATION_ERROR", "INTERNAL_ERROR".
+  string error_code = 7;
+
+  // Optional human-readable detail (max 1024 chars; sanitised — no PII).
+  string error_detail = 8;
+
+  google.protobuf.Timestamp started_at = 9;
+  google.protobuf.Timestamp failed_at = 10;
+}
+
+// -----------------------------------------------------------------------------
+// InvocationGuardrailBlocked — chora.a2a.invocation.guardrail_blocked.v1
+// -----------------------------------------------------------------------------
+//
+// Published when the Guardrail Service blocks an inbound or outbound
+// payload. Subscribers fan-out to: O+ Observability+ governance feed,
+// ContentPolicyViolationLog (immutable), partner-trust scoring service.
+message InvocationGuardrailBlocked {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string invocation_id = 2;
+  string contract_id = 3;
+  string caller_agid = 4;
+  string called_agid = 5;
+
+  // Hash of the payload that triggered the block. May be the request hash
+  // (inbound block) OR the response hash (outbound block).
+  string payload_hash = 6;
+
+  // Which violation tripped — drives downstream policy / scoring.
+  GuardrailViolationType guardrail_violation_type = 7;
+
+  // Whether the block was on inbound (true) or outbound (false).
+  bool inbound = 8;
+
+  // Optional sanitised detail for governance reviewers (no PII; max 1024).
+  string detail = 9;
+
+  google.protobuf.Timestamp blocked_at = 10;
+}

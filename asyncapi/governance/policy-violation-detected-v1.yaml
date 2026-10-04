@@ -1,0 +1,63 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Governance — PolicyViolationDetected
+  version: 1.0.0
+  description: |
+    Published when a violation is detected (Governance Gatekeeper agent,
+    Guardrail Service, or human moderator). Drives the moderation queue
+    in O+.
+
+    - Domain: Governance (`chora_governance` DB)
+    - Topic: `chora.governance.policy.violation_detected.v1`
+    - Source proto: `proto/events/governance/policy.proto`
+       message `chora.governance.v1.PolicyViolationDetected`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  policyViolationDetected:
+    address: chora.governance.policy.violation_detected.v1
+    messages:
+      policyViolationDetected:
+        $ref: '#/components/messages/PolicyViolationDetected'
+
+operations:
+  publishPolicyViolationDetected:
+    action: send
+    channel:
+      $ref: '#/channels/policyViolationDetected'
+    messages:
+      - $ref: '#/channels/policyViolationDetected/messages/policyViolationDetected'
+
+  consumePolicyViolationDetected:
+    action: receive
+    channel:
+      $ref: '#/channels/policyViolationDetected'
+    description: |
+      Consumers: O+ moderation queue, Notifications (high-severity alert),
+      Identity (potential AccountSuspended trigger for CRITICAL),
+      Audit log.
+    messages:
+      - $ref: '#/channels/policyViolationDetected/messages/policyViolationDetected'
+
+components:
+  messages:
+    PolicyViolationDetected:
+      name: PolicyViolationDetected
+      title: Policy Violation Detected
+      summary: A policy violation has been detected
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/governance/policy.proto#/chora.governance.v1.PolicyViolationDetected'

@@ -1,0 +1,83 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Content Consumption — CampaignNodeWon
+  version: 1.0.0
+  description: |
+    Published exactly once per (learner, node) when rung 6 clears: the node
+    is won FOREVER (ADR-227 D9 permanent ratchet — no sieges, no rung loss,
+    no later negative event). The win is the trigger for the free fog-of-war
+    reveal of the node's children (D2) and the medium XP bonus (D10).
+
+    - Domain: Content Consumption (`chora_consumption` DB)
+    - Aggregate root: `campaign_node_progress` (ADR-227 D16)
+    - Topic: `chora.consumption.campaign.node_won.v1`
+    - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
+    - Source proto: `proto/events/consumption/campaign.proto`
+       message `chora.consumption.v1.CampaignNodeWon`
+
+    Carries `goal_id` (BINDING, addendum #6) for ResolveForGoal XP routing.
+    Idempotent via envelope idempotency_key = goal_id:concept_id:won_at;
+    the won-ratchet makes re-emission structurally impossible. The WS-C4
+    reveal consumer is idempotent on THIS event's envelope.event_id (one
+    free reveal per win). Embeds the mandatory
+    `chora.common.v1.EventEnvelope` as field 1.
+  contact:
+    name: Team 1 (Content) + Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+    description: Google Cloud Pub/Sub (chora-489812 platform host)
+
+channels:
+  campaignNodeWon:
+    address: chora.consumption.campaign.node_won.v1
+    description: Single-event topic for CampaignNodeWon.
+    messages:
+      campaignNodeWon:
+        $ref: '#/components/messages/CampaignNodeWon'
+
+operations:
+  publishCampaignNodeWon:
+    action: send
+    channel:
+      $ref: '#/channels/campaignNodeWon'
+    summary: Publish a CampaignNodeWon event
+    description: |
+      Emitted by chora-consumption (WS-C1 ladder service) via the
+      transactional outbox in the same tx that stamps
+      campaign_node_progress.won_at at 6/6.
+    messages:
+      - $ref: '#/channels/campaignNodeWon/messages/campaignNodeWon'
+
+  consumeCampaignNodeWon:
+    action: receive
+    channel:
+      $ref: '#/channels/campaignNodeWon'
+    summary: Subscribe to CampaignNodeWon events
+    description: |
+      Primary consumers (loosely-coupled, attach later):
+      - Consumption — free-on-win reveal trigger (WS-C4; idempotent on
+        envelope.event_id; drives concept_suggestion.requested.v1)
+      - Identity — win bonus XP, daily-capped (WS-C5)
+      - Observability — IMDA D1 evidence
+    messages:
+      - $ref: '#/channels/campaignNodeWon/messages/campaignNodeWon'
+
+components:
+  messages:
+    CampaignNodeWon:
+      name: CampaignNodeWon
+      title: Campaign node won (permanent ratchet)
+      summary: A learner won a concept node — all 6 rungs cleared
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/consumption/campaign.proto#/chora.consumption.v1.CampaignNodeWon'

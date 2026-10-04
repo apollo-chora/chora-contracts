@@ -1,0 +1,533 @@
+// =============================================================================
+// chora.governance.v1 — Append-only audit log events
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 5
+// + .claude/skills/immutable-audit-log/SKILL.md
+//
+// Owning domain : Governance (chora_governance database)
+// Owning team   : Team 3 (Platform)
+// Topic prefix  : chora.governance.audit.*
+//
+// Append-only audit trail. NEVER UPDATE / DELETE — entries are immutable.
+// Distinct from O+ Observability OTLP traces (which are ephemeral and
+// debugging-oriented). Audit entries are billing-grade, compliance-grade,
+// and feed IMDA evidence chains.
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.governance.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/governance/v1;governancev1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// AuditResult — outcome categorisation for an audited action.
+// -----------------------------------------------------------------------------
+enum AuditResult {
+  AUDIT_RESULT_UNSPECIFIED = 0;
+  AUDIT_RESULT_ALLOWED = 1;   // Action permitted and executed
+  AUDIT_RESULT_DENIED = 2;     // Action blocked by policy / RBAC
+  AUDIT_RESULT_ANOMALY = 3;    // Allowed but flagged as anomalous (e.g., off-hour, geo-mismatch)
+}
+
+// -----------------------------------------------------------------------------
+// AuditEntryRecorded — chora.governance.audit.recorded.v1
+// -----------------------------------------------------------------------------
+//
+// Published whenever any auditable action occurs. High-volume topic —
+// expect batched ingestion to BigQuery for compliance reporting.
+//
+// Distinguish actor types via lookup in chora_identity:
+//   - Human actor: actor_gcid resolves to a GCID record
+//   - Agent actor: actor_gcid resolves to an AGID record
+//                  (per envelope semantics — AGID lives in the actor slot)
+message AuditEntryRecorded {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — append-only audit log entry identifier.
+  string audit_id = 2;
+
+  // GCID or AGID of the actor who performed the action.
+  string actor_gcid = 3;
+
+  // URI of the target resource
+  // (e.g., "chora.creation/atom:01HXYZ...", "chora.tenancy/tenant:01HABC...",
+  // "chora.identity/account:01HDEF...").
+  string target_resource_uri = 4;
+
+  // Action verb — UPPER_SNAKE_CASE (e.g., "CREATE", "UPDATE", "DELETE",
+  // "PUBLISH", "ROLE_GRANT", "POLICY_OVERRIDE", "AGENT_INVOKE").
+  string action = 5;
+
+  AuditResult result = 6;
+
+  // Optional free-text annotation (max 1024 chars).
+  string annotation = 7;
+
+  // IP address of the request origin (IPv4 / IPv6 string).
+  // Empty for system-emitted entries.
+  string source_ip = 8;
+
+  // User agent string (max 512 chars). Empty for system / agent entries.
+  string user_agent = 9;
+
+  google.protobuf.Timestamp occurred_at = 10;
+}
+
+// =============================================================================
+// H+ Tenant-Admin Transaction History audit events (Phase-1 contracts)
+// =============================================================================
+//
+// Three new audit events emitted by the chora-payments admin endpoints
+// (openapi/payments-admin.yaml) for IMDA D1 accountability. Distinct from
+// the generic AuditEntryRecorded message above — these carry payment-domain
+// structured context (filter applied, tenant_ids touched, refund details)
+// that consumers (chora-governance ingest + O+ dashboard) project directly
+// without re-parsing.
+//
+// EventEnvelope is NOT embedded here — these messages are payloads carried
+// IN an EventEnvelope by the publisher (matching the field-1 shape declared
+// by the user spec for V1; harmonisation with the AuditEntryRecorded
+// envelope pattern is a follow-up tracked under M11.9b proto cleanup).
+//
+// Topics (to be registered later in the Schema Registry — NOT in this commit):
+//   chora.governance.audit.tenant_admin_viewed_payments.v1
+//   chora.governance.audit.cross_tenant_payments_viewed.v1
+//   chora.governance.audit.refund_issued.v1
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// PurchaseFilterContext — shared filter context echoed back on the audit
+// events so a reviewer can reconstruct exactly what query the actor ran.
+// -----------------------------------------------------------------------------
+message PurchaseFilterContext {
+  // Optional. One of the AggregateType string values
+  // (course_purchase | application_payment | companion_egg_purchase |
+  // tenant_mana_topup | user_subscription | user_mana_topup |
+  // identity_kyc_fee). Empty when the caller did not filter.
+  string aggregate_type = 1;
+
+  // Optional. One of the normalised state strings
+  // (captured | refunded | failed | expired | all). Empty when the caller
+  // did not filter.
+  string state = 2;
+
+  // Optional. Inclusive lower bound on Purchase.created_at.
+  google.protobuf.Timestamp from = 3;
+
+  // Optional. Exclusive upper bound on Purchase.created_at.
+  google.protobuf.Timestamp to = 4;
+}
+
+// -----------------------------------------------------------------------------
+// TenantAdminViewedPayments
+//   chora.governance.audit.tenant_admin_viewed_payments.v1
+//
+// Emitted once per successful GET /api/v1/admin/payments/purchases call by a
+// TENANT_ADMIN / OWNER / AUDITOR. Provides the IMDA D1 accountability trail
+// for tenant-scoped reads of payment history.
+// -----------------------------------------------------------------------------
+message TenantAdminViewedPayments {
+  // UUIDv7 — audit-event identifier.
+  string event_id = 1;
+
+  // Tenant the actor was scoped to.
+  string tenant_id = 2;
+
+  // Acting GCID.
+  string actor_gcid = 3;
+
+  // Role the actor exercised. One of: TENANT_ADMIN | OWNER | AUDITOR.
+  string actor_role = 4;
+
+  // When the call landed (server time).
+  google.protobuf.Timestamp occurred_at = 5;
+
+  // Filter the actor applied (echoed verbatim from query params).
+  PurchaseFilterContext filter_context = 6;
+}
+
+// -----------------------------------------------------------------------------
+// CrossTenantPaymentsViewed
+//   chora.governance.audit.cross_tenant_payments_viewed.v1
+//
+// Emitted in addition to TenantAdminViewedPayments when the actor holds the
+// new PLATFORM_OPERATOR role and the response touched rows from more than
+// one tenant (or omitted the tenant_id filter entirely). Carries the deduped
+// set of tenant_ids the actor actually saw rows for, which is the
+// load-bearing IMDA D1 evidence for cross-tenant access.
+// -----------------------------------------------------------------------------
+message CrossTenantPaymentsViewed {
+  // UUIDv7 — audit-event identifier.
+  string event_id = 1;
+
+  // Acting GCID.
+  string actor_gcid = 2;
+
+  // Role the actor exercised. Always PLATFORM_OPERATOR.
+  string actor_role = 3;
+
+  // When the call landed (server time).
+  google.protobuf.Timestamp occurred_at = 4;
+
+  // Filter the actor applied (echoed verbatim from query params).
+  PurchaseFilterContext filter_context = 5;
+
+  // Deduped set of tenant_ids the response touched. May be empty if the
+  // filter matched zero rows.
+  repeated string tenant_ids_in_view = 6;
+}
+
+// -----------------------------------------------------------------------------
+// RefundIssued
+//   chora.governance.audit.refund_issued.v1
+//
+// Emitted once per successful POST
+// /api/v1/admin/payments/{purchase_id}/refund call. Captures the full
+// audit fingerprint of the refund: actor, refund amount, currency, reason,
+// and the Stripe Refund id for cross-system reconciliation.
+// -----------------------------------------------------------------------------
+message RefundIssued {
+  // UUIDv7 — audit-event identifier.
+  string event_id = 1;
+
+  // Tenant the refund was scoped to.
+  string tenant_id = 2;
+
+  // Acting GCID.
+  string actor_gcid = 3;
+
+  // Role the actor exercised. One of: TENANT_ADMIN | OWNER |
+  // PLATFORM_OPERATOR. (AUDITOR is rejected at the API layer with 403.)
+  string actor_role = 4;
+
+  // When the refund was issued (server time).
+  google.protobuf.Timestamp occurred_at = 5;
+
+  // UUIDv7 of the Purchase aggregate being refunded.
+  string purchase_id = 6;
+
+  // One of the AggregateType string values (course_purchase |
+  // application_payment | companion_egg_purchase | tenant_mana_topup |
+  // user_subscription | user_mana_topup | identity_kyc_fee).
+  string aggregate_type = 7;
+
+  // Refunded amount in minor units. V1 is full-refund only so this equals
+  // the original amount_cents_paid on the Purchase.
+  int64 amount_cents = 8;
+
+  // ISO-4217 3-letter currency code (lowercase).
+  string currency = 9;
+
+  // Optional admin-supplied free-text justification (max 1000 chars).
+  string reason = 10;
+
+  // Stripe Refund id (re_…), for cross-system reconciliation against
+  // chora-payments + Stripe dashboard.
+  string stripe_refund_id = 11;
+}
+
+// =============================================================================
+// Tenant CSV mass-import audit event (ADR-221 D8)
+// =============================================================================
+//
+// IMDA-D1 accountability record for the tenant CSV mass-import. Emitted by
+// chora-identity (the ImportJob owner) BEFORE any import write fires — the
+// ADR-194 audit-before-write precedent — so the confirming actor, mode pair
+// and full target-tenant set are on the trail even if the job fails mid-run.
+// Synthetic-batch teardown enqueues (ADR-222 D3) reuse the same message with
+// action = "TEARDOWN", audited before the closure sagas fan out.
+//
+// Unlike the payments block above, this message embeds the EventEnvelope as
+// field 1 (the canonical AuditEntryRecorded pattern; envelope-complete per
+// ADR-221 D8). Mode fields are STRING tokens mirroring the
+// chora.identity.v1 import enums — each domain owns its events, so
+// governance never imports identity protos.
+//
+// Topic: chora.governance.audit.tenant_import_executed.v1
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// TenantImportExecuted
+//   chora.governance.audit.tenant_import_executed.v1
+// -----------------------------------------------------------------------------
+message TenantImportExecuted {
+  // envelope.tenant_id = the job's home scope (target tenant for
+  // tenant-admin runs; chora-master for operator runs); envelope.gcid = the
+  // confirming actor.
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — audit-event identifier.
+  string audit_id = 2;
+
+  // Acting GCID (operator or tenant admin who confirmed).
+  string actor_gcid = 3;
+
+  // Role the actor exercised. One of: PLATFORM_OPERATOR | ADMIN.
+  string actor_role = 4;
+
+  // What was authorised: "EXECUTE" (confirmed import run) or "TEARDOWN"
+  // (synthetic-batch closure-saga fan-out, ADR-222 D3).
+  string action = 5;
+
+  // UUIDv7 of the ImportJob (chora_identity.import_jobs).
+  string import_job_id = 6;
+
+  // UUIDv7 batch handle (import_batch_members scope of a later teardown).
+  string import_batch_id = 7;
+
+  // Run mode token: operator_create_new | operator_existing_only |
+  // tenant_admin | sync.
+  string run_mode = 8;
+
+  // Materialization token: cold_invite | synthetic | synthetic_login.
+  string materialization_mode = 9;
+
+  // Deduped tenant UUIDs the run targets (resolved existing tenants).
+  repeated string target_tenant_ids = 10;
+
+  // Tenant slugs of create-new blocks (no UUID exists before creation —
+  // the slug is the accountable identity of a to-be-created tenant).
+  repeated string target_tenant_slugs = 11;
+
+  // Data rows accepted for execution (teardown: minted members enqueued).
+  int32 total_rows = 12;
+
+  // When the actor's confirmation landed (server time).
+  google.protobuf.Timestamp occurred_at = 13;
+}
+
+// =============================================================================
+// External-egress audit event (ADR-231 D6)
+// =============================================================================
+//
+// First-class governance trail for the ONE controlled web-egress surface —
+// chora-model-gateway's GroundedSearch RPC (Far Sight, ADR-220/ADR-231).
+// Emitted by chora-model-gateway via the outbox on EVERY grounded call
+// (allowed OR denied), giving O+ + IMDA D2 a dedicated egress record with
+// parity to the payments cross-tenant audit (a governed capability deserves
+// its own audit event, not just an OTLP span + token-usage row).
+//
+// PRIVACY: the learner directive is NOT persisted — only its SHA-256 hash
+// (directive_hash) rides the trail (the audit surface must not become a copy
+// of learner content). The web_search_queries the model issued ARE recorded
+// (O+ transparency; they are model-emitted, not learner PII).
+//
+// Like TenantImportExecuted this message embeds the EventEnvelope as field 1
+// (canonical envelope-complete pattern). The Cloud Model Armor verdicts are
+// STRING tokens mirroring the chora.services.model_gateway.v1.ModelArmorVerdict
+// enum — governance owns its events and never imports a service proto.
+//
+// Topic: chora.governance.audit.external_egress.v1
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// ExternalEgressAudited
+//   chora.governance.audit.external_egress.v1
+// -----------------------------------------------------------------------------
+message ExternalEgressAudited {
+  // envelope.tenant_id = the tenant whose learner triggered the egress;
+  // envelope.gcid = the acting learner GCID.
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — append-only audit-event identifier.
+  string audit_id = 2;
+
+  // Acting learner GCID that triggered the grounded call (echoed from the
+  // envelope for direct projection by consumers).
+  string actor_gcid = 3;
+
+  // Calling skill identifier (e.g. "companion_seeker"). The mesh authz layer
+  // restricts which agent_id may reach GroundedSearch (Seeker-only egress).
+  string agent_id = 4;
+
+  // The high-price mana action_code the gateway metered for this egress
+  // (chora_identity.mana_action_pricing; ADR-177 sole meter). Present even on
+  // a denied call so the price surface is auditable.
+  string action_code = 5;
+
+  // SHA-256 hex digest of the screened learner directive. The raw directive is
+  // deliberately NOT persisted (privacy) — the hash lets a reviewer correlate
+  // repeat egress on the same directive without storing learner content.
+  string directive_hash = 6;
+
+  // The web search queries the grounded model issued (Vertex
+  // webSearchQueries). Empty when the call was denied before dispatch.
+  repeated string web_search_queries = 7;
+
+  // Count of renderable citations returned (uri+title both set). 0 ⇒ the
+  // caller had to hedge (ADR-220 D3) or the call was denied.
+  int32 citation_count = 8;
+
+  // Outcome of the egress: ALLOWED (dispatched + cited), DENIED (blocked by
+  // the external_egress gate / Armor / mana before or after dispatch), or
+  // ANOMALY (allowed but flagged — e.g. zero citations on a factual directive).
+  AuditResult result = 9;
+
+  // Machine token explaining a DENIED / ANOMALY result — one of
+  // "external_egress_disabled" | "model_armor_pre_block" |
+  // "model_armor_post_block" | "insufficient_mana" | "budget_exhausted" |
+  // "vendor_unavailable" | "zero_citations". Empty when result == ALLOWED.
+  string denial_reason = 10;
+
+  // Cloud Model Armor PRE verdict on the directive — STRING token mirroring
+  // ModelArmorVerdict (ALLOW | BLOCK | SANITISE | ERROR | BYPASSED).
+  string model_armor_verdict_pre = 11;
+
+  // Cloud Model Armor POST verdict on the web-sourced grounded answer — STRING
+  // token mirroring ModelArmorVerdict. Empty when the call was denied pre-egress.
+  string model_armor_verdict_post = 12;
+
+  // Resolved grounding vendor (e.g. "vertex_ai_gemini"). Empty on pre-egress denial.
+  string vendor = 13;
+
+  // Resolved grounding-capable model version. Empty on pre-egress denial.
+  string model_version = 14;
+
+  // When the grounded call landed at the gateway (server time).
+  google.protobuf.Timestamp occurred_at = 15;
+}
+
+// =============================================================================
+// Learning Companion containment audit event (ADR-252 D4, ADR-254 D4/D11)
+// =============================================================================
+//
+// Topic: chora.governance.audit.companion_suspension_changed.v1 (JSON-wire,
+// schema-less on the bus per ADR-254 D4: the body is the protojson of this
+// message; envelope fields ride in the Pub/Sub attributes AND in field 1).
+//
+// Published by chora-observability through its outbox in the SAME transaction
+// as the suspension row, once per engage and once per release (ADR-252 D4:
+// the operator WRITE is audited; denied turns are counted, not logged).
+// Consumers: chora-governance (hash-chained audit_log row, sibling of the
+// external-egress audit) and chora-consumption (advisory projection rendering
+// the learner-facing `paused` status, ADR-254 D11; the gateway stays the control).
+message CompanionSuspensionChanged {
+  // envelope.tenant_id = the contained tenant (empty-UUID for platform scope);
+  // envelope.gcid = the acting operator / admin; idempotency_key =
+  // "<suspension_id>:<version>".
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 of the suspension row (platform_companion_suspension or
+  // companion_suspension_policy).
+  string suspension_id = 2;
+
+  // "platform" (every tenant) or "tenant".
+  string scope = 3;
+
+  // The contained tenant for scope == "tenant"; empty for platform scope.
+  string tenant_id = 4;
+
+  // The skill the containment names (the mana action code, e.g.
+  // "companion_chat_turn_basic"); EMPTY = every companion turn in the scope.
+  // One row names one skill or all of them (ADR-254 D4's action_codes[] is
+  // this single value).
+  string skill_key = 5;
+
+  // true = engaged (contained), false = released (lifted).
+  bool engaged = 6;
+
+  // Per-row monotonic version (engage = 1, release = 2). The consumption
+  // projection applies an event only when strictly newer for that row.
+  int64 version = 7;
+
+  // Mandatory human reason for THIS change (engage reason or release reason).
+  string reason = 8;
+
+  // GCID of the operator / tenant admin who made the change.
+  string actor_gcid = 9;
+
+  // When the change was written (server time).
+  google.protobuf.Timestamp changed_at = 10;
+}
+
+// =============================================================================
+// Cross-tenant exam rollup audit event (ADR-192 D3)
+// =============================================================================
+//
+// IMDA-D1 accountability record for the SANCTIONED third RLS-bypass surface:
+// the scoped cross-tenant exam rollup (ADR-192, ACCEPTED 2026-06-25). Every
+// rollup read MUST publish this event BEFORE the SQL fires (audit-before-SQL,
+// the ADR-165 posture; a publish failure aborts the read). Unlike the
+// chora-payments deployed code (which emits after the query), the exam rollup
+// emits a PRE-READ INTENT: owner_tenant_id + the resolved satellite set are
+// both known before the SQL, honouring the true "BEFORE the SQL" invariant.
+//
+// This message embeds the EventEnvelope as FIELD 1 (the canonical
+// AuditEntryRecorded pattern). That is a DELIBERATE non-repetition of
+// CrossTenantPaymentsViewed's envelope omission (the deferred-cleanup wart
+// above): a fresh v1 topic must not inherit debt. event_id / occurred_at /
+// tenant_id ("platform" sentinel) ride the envelope, not payload fields.
+//
+// Emitted by chora-delivery via an outbox helper
+// (EmitCrossTenantExamRollupViewed, W5) mirroring chora-payments'
+// EmitCrossTenantPaymentsViewed (outbox row tenant_id = "platform",
+// idempotency_key = "audit:" + event_id), consumed by the chora-governance
+// audit subscriber into chora_governance.governance_audit_events for the O+
+// IMDA D1 accountability dashboard.
+//
+// The ADR-192 Alternative-D read-model note (contract context for W5): a
+// Pub/Sub projection of chora.delivery.exam_result.released.v1 into an
+// owner-keyed rollup read-model (keyed owner_tenant_id, aggregating
+// satellite_tenant_id outcome counts) is the pre-sanctioned bypass-free hub
+// read. Reads THROUGH that projection need no bypass and therefore do NOT
+// emit this event; only the D1 scoped LIVE read (RLS widening via the
+// chora.exam_rollup_owner GUC) does.
+//
+// Topic: chora.governance.audit.cross_tenant_exam_rollup_viewed.v1
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// ExamRollupFilterContext — filter echoed back on the audit event so a
+// reviewer can reconstruct exactly what rollup query the actor ran.
+// -----------------------------------------------------------------------------
+message ExamRollupFilterContext {
+  // Optional. Exam UUID the rollup was filtered to. Empty when the actor
+  // viewed the whole federation rollup.
+  string exam_id = 1;
+
+  // Optional. Inclusive lower bound on ExamResult.scored_at.
+  google.protobuf.Timestamp from = 2;
+
+  // Optional. Exclusive upper bound on ExamResult.scored_at.
+  google.protobuf.Timestamp to = 3;
+}
+
+// -----------------------------------------------------------------------------
+// CrossTenantExamRollupViewed
+//   chora.governance.audit.cross_tenant_exam_rollup_viewed.v1
+// -----------------------------------------------------------------------------
+message CrossTenantExamRollupViewed {
+  // envelope.tenant_id = "platform" sentinel (cross-tenant platform-level
+  // event); envelope.gcid = the acting exam-owner admin. event_id and
+  // occurred_at come from the envelope (no duplicate payload fields).
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // Acting GCID (echoed from the envelope for direct consumer projection).
+  string actor_gcid = 2;
+
+  // Role the actor exercised. A normal TENANT-SCOPED principal widened by
+  // data (ADR-192 D2): one of OWNER | TENANT_ADMIN, or PLATFORM_OPERATOR for
+  // the platform owner. Never a new tenant-less role.
+  string actor_role = 3;
+
+  // The owner/franchisor tenant whose rollup scope was exercised (the value
+  // the chora.exam_rollup_owner GUC was set to, always the caller's own
+  // tenant, validated).
+  string owner_tenant_id = 4;
+
+  // The bounded, resolved satellite set in view at read time: the LIVE
+  // franchise_satellite rows for owner_tenant_id. This is the load-bearing
+  // IMDA D1 evidence (exactly whose data could be seen). May be empty when
+  // the owner has no live mappings (the widening then contributes nothing).
+  repeated string satellite_tenant_ids_in_view = 5;
+
+  // Filter the actor applied (echoed verbatim from query params).
+  ExamRollupFilterContext filter_context = 6;
+}

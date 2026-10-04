@@ -1,0 +1,168 @@
+// =============================================================================
+// Chora Content Sharing — Relationship (social connection) events
+// =============================================================================
+//
+// Aggregate root: Relationship (person↔person connection state, ADR-230 D1).
+// Owning domain : Content Sharing (chora_sharing DB).
+// Owning team   : Team 1 (Content)
+// Topic prefix  : chora.sharing.relationship.*
+// Surface       : C+ Connect+
+//
+// The complete lifecycle spine (ADR-230 D4, upgrade seam 2): every committed
+// relationship transition publishes exactly one of these events through the
+// sharing outbox, written in the SAME transaction as the state change. The
+// spine is verbatim the feed a future graph projector replays (Neo4j
+// adoption = deploy projector + rebuild-walk; CHO-2112).
+//
+// Design notes:
+//   - Every message shares ONE wire shape (envelope=1, actor=2, subject=3,
+//     timestamp=4) so a single Schema Registry schema
+//     (chora-sharing-relationship-v1) validates all seven topics; only the
+//     field NAMES differ per event, for documentation.
+//   - Pending friend requests are NOT events: decline/cancel of a
+//     never-materialised intent emits nothing.
+//   - RelationshipBlocked carries SEVERANCE semantics by contract: consumers
+//     mirroring relationship state must also remove both follow edges, the
+//     friendship, and any pending requests for the pair. No synthetic
+//     unfollowed/friend_removed events accompany a block.
+//   - Supersedes the never-published chora.sharing.follow.{created,removed,
+//     blocked}.v1 family (retired by ADR-230 D4).
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.sharing.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/sharing/v1;sharingv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// RelationshipFollowed — chora.sharing.relationship.followed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a learner follows another learner (actual edge creation
+// only — a duplicate follow emits nothing). Consumers: Notifications (notify
+// followee), Observability (graph-growth metrics), future graph projector.
+message RelationshipFollowed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // GCID of the follower (also envelope.gcid as actor).
+  string follower_gcid = 2;
+
+  // GCID being followed.
+  string followee_gcid = 3;
+
+  google.protobuf.Timestamp followed_at = 4;
+}
+
+// -----------------------------------------------------------------------------
+// RelationshipUnfollowed — chora.sharing.relationship.unfollowed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a learner unfollows (actual edge removal only).
+message RelationshipUnfollowed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string follower_gcid = 2;
+  string followee_gcid = 3;
+
+  google.protobuf.Timestamp unfollowed_at = 4;
+}
+
+// -----------------------------------------------------------------------------
+// RelationshipFriendRequested — chora.sharing.relationship.friend_requested.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a learner sends a friend request. Consumers: Notifications
+// (notify addressee). NOTE: decline/cancel of a pending request emits
+// NOTHING — only accepted intents materialise further events.
+message RelationshipFriendRequested {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // GCID sending the request (also envelope.gcid as actor).
+  string requester_gcid = 2;
+
+  // GCID receiving the request.
+  string addressee_gcid = 3;
+
+  google.protobuf.Timestamp requested_at = 4;
+}
+
+// -----------------------------------------------------------------------------
+// RelationshipFriendAccepted — chora.sharing.relationship.friend_accepted.v1
+// -----------------------------------------------------------------------------
+//
+// Published when the addressee accepts — the friendship edge now exists
+// (undirected, canonical pair in the SoR). Consumers: Notifications (notify
+// requester), future graph projector (FRIENDS_WITH edge).
+message RelationshipFriendAccepted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // GCID accepting the request (also envelope.gcid as actor).
+  string accepter_gcid = 2;
+
+  // GCID whose request was accepted.
+  string requester_gcid = 3;
+
+  google.protobuf.Timestamp accepted_at = 4;
+}
+
+// -----------------------------------------------------------------------------
+// RelationshipFriendRemoved — chora.sharing.relationship.friend_removed.v1
+// -----------------------------------------------------------------------------
+//
+// Published on unfriend. Follow edges are an independent plane and are NOT
+// touched by an unfriend.
+message RelationshipFriendRemoved {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // GCID removing the friendship (also envelope.gcid as actor).
+  string remover_gcid = 2;
+
+  // The other member of the removed friendship.
+  string removed_gcid = 3;
+
+  google.protobuf.Timestamp removed_at = 4;
+}
+
+// -----------------------------------------------------------------------------
+// RelationshipBlocked — chora.sharing.relationship.blocked.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a learner blocks another. SEVERANCE CONTRACT: in the same
+// SoR transaction both follow edges, any friendship, and any pending friend
+// requests between the pair were deleted — consumers mirroring relationship
+// state MUST apply the same removals on this single event. Re-follow and
+// re-request are refused while the block stands. Block existence is never
+// disclosed to the blocked party (refusals are generic).
+message RelationshipBlocked {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // GCID issuing the block (also envelope.gcid as actor).
+  string blocker_gcid = 2;
+
+  // GCID being blocked.
+  string blocked_gcid = 3;
+
+  google.protobuf.Timestamp blocked_at = 4;
+}
+
+// -----------------------------------------------------------------------------
+// RelationshipUnblocked — chora.sharing.relationship.unblocked.v1
+// -----------------------------------------------------------------------------
+//
+// Published when the blocker lifts the block. RESTORES NOTHING — follows and
+// friendship must be re-earned from scratch (ADR-230 D1).
+message RelationshipUnblocked {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // GCID lifting the block (also envelope.gcid as actor).
+  string unblocker_gcid = 2;
+
+  // GCID no longer blocked.
+  string unblocked_gcid = 3;
+
+  google.protobuf.Timestamp unblocked_at = 4;
+}

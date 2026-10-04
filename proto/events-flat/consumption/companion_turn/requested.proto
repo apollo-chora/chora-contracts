@@ -1,0 +1,63 @@
+// =============================================================================
+// GENERATED — DO NOT EDIT.
+// Source : events/consumption/companion_turn.proto message CompanionTurnRequested
+// Tool   : chora-contracts/internal/protoflatten
+// Why    : GCP Pub/Sub Schema Registry rejects (a) schemas with `import`
+//          statements and (b) schemas with more than one top-level message.
+//          This flat copy contains exactly ONE top-level message;
+//          EventEnvelope + Timestamp + transitive deps are nested inside.
+// Path C : see chora-contracts/CHANGELOG.md and m10-data-plane main.tf.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.consumption.v1;
+
+message CompanionTurnRequested {
+  // Inlined chora.common.v1.EventEnvelope (nested for self-contained schema).
+  message Envelope {
+    string event_id = 1;
+    string idempotency_key = 2;
+    string tenant_id = 3;
+    string gcid = 4;
+    Timestamp occurred_at = 5;
+    Timestamp published_at = 6;
+    string traceparent = 7;
+    string tracestate = 8;
+    string source_project = 9;
+    string source_service = 10;
+    int32 schema_version = 11;
+    string correlation_id = 12;
+    string causation_id = 13;
+    string chora_imda_dimension = 14;
+    string imda_lifecycle_stage = 15;
+  }
+
+  // Inlined google.protobuf.Timestamp (nested; wire-compatible).
+  message Timestamp {
+    int64 seconds = 1;
+    int32 nanos = 2;
+  }
+
+  Envelope envelope = 1;
+  string turn_id = 2;
+  string conversation_id = 3;
+  string tenant_id = 4;
+  string gcid = 5;
+  string familiar_id = 6;
+  string familiar_config = 7;
+  string turn_kind = 8;
+  string message = 9;
+  string locale = 10;
+  string mana_tier = 11;
+  string mana_action_code = 12;
+  int32 growth_stage = 13;
+  string species = 14;
+  string prompt_overrides_json = 15;
+  string resolved_prompt_version = 16;
+  string familiar_memory = 17;
+  string learner_weakness = 18;
+  repeated string visible_kg_neighbors = 19;
+  Timestamp aha_moment_active_until = 20;
+  Timestamp requested_at = 21;
+}

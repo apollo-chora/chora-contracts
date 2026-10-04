@@ -1,0 +1,134 @@
+// =============================================================================
+// chora.ai_kernel.v1 — Model invocation events
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 2 D5
+//   (hybrid Python orchestrator + Go executor) + Tier 5 D20 (crews)
+// + .claude/skills/model-broker-3-services/SKILL.md
+//
+// Owning domain : AI Kernel (chora_ai_kernel database)
+// Owning team   : Team 3 (Platform)
+// Topic prefix  : chora.ai_kernel.invocation.*
+//
+// Model invocation lifecycle: Invoked -> Completed (or Failed).
+// Emitted by the Model Gateway service — distinct from raw OTLP traces
+// (these are billing-grade canonical records that feed cost ledger
+// + agent decision log).
+//
+// invocation_id is the join key for downstream events:
+// chora.observability.token_usage.recorded.v1 (cost),
+// chora.observability.agent_decision.logged.v1 (decision summary),
+// chora.ai_kernel.guardrail.evaluated.v1 (per-tier guardrail results).
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.ai_kernel.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/ai_kernel/v1;aikernelv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// ModelKind — taxonomy of supported model classes.
+// -----------------------------------------------------------------------------
+enum ModelKind {
+  MODEL_KIND_UNSPECIFIED = 0;
+  MODEL_KIND_GEMINI_FLASH = 1;        // Vertex AI Gemini Flash family
+  MODEL_KIND_GEMINI_PRO = 2;            // Vertex AI Gemini Pro family
+  MODEL_KIND_GEMMA_TENANT_LORA = 3;     // Self-hosted Gemma 4 + per-tenant LoRA
+  MODEL_KIND_EMBEDDING = 4;              // Vertex AI Embedding API
+  MODEL_KIND_CLASSIFIER = 5;             // Small classifier (Model Broker Classifier)
+}
+
+// -----------------------------------------------------------------------------
+// ModelInvoked — chora.ai_kernel.invocation.invoked.v1
+// -----------------------------------------------------------------------------
+//
+// Published at invocation start (before model call). Carries pre-invocation
+// metadata for downstream correlation. NOT emitted for in-flight retries
+// within a single logical invocation — only for distinct top-level calls.
+message ModelInvoked {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — invocation identifier (join key across observability +
+  // guardrail events).
+  string invocation_id = 2;
+
+  // Concrete model identifier (e.g., "gemini-2.5-flash-001",
+  // "gemma-tenant-lora:01HABC...").
+  string model_id = 3;
+
+  ModelKind model_kind = 4;
+
+  // AGID of the calling agent.
+  string agid = 5;
+
+  // SHA-256 hash of the rendered prompt (PII-safe — full prompt lives in
+  // OTLP traces with redaction policy).
+  string prompt_hash = 6;
+
+  google.protobuf.Timestamp invoked_at = 7;
+}
+
+// -----------------------------------------------------------------------------
+// ModelInvocationCompleted — chora.ai_kernel.invocation.completed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a model invocation completes successfully. Carries token
+// counts + latency for the canonical cost ledger.
+message ModelInvocationCompleted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string invocation_id = 2;
+  string model_id = 3;
+  ModelKind model_kind = 4;
+  string agid = 5;
+
+  string prompt_hash = 6;
+
+  // SHA-256 hash of the response. Full response text lives in OTLP traces.
+  string response_hash = 7;
+
+  // Wall-clock latency in milliseconds.
+  int64 latency_ms = 8;
+
+  // Token counts (also emitted to chora.observability.token_usage.recorded).
+  int64 tokens_in = 9;
+  int64 tokens_out = 10;
+
+  google.protobuf.Timestamp completed_at = 11;
+}
+
+// -----------------------------------------------------------------------------
+// ModelInvocationFailed — chora.ai_kernel.invocation.failed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a model invocation fails (post-retry exhaustion). Drives
+// agent fallback selection + alerting.
+message ModelInvocationFailed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string invocation_id = 2;
+  string model_id = 3;
+  ModelKind model_kind = 4;
+  string agid = 5;
+
+  string prompt_hash = 6;
+
+  // Error code — UPPER_SNAKE_CASE (e.g., "QUOTA_EXCEEDED",
+  // "MODEL_OVERLOADED", "INVALID_RESPONSE", "GUARDRAIL_BLOCKED",
+  // "TIMEOUT", "NETWORK_ERROR").
+  string error_code = 7;
+
+  // Free-text error detail (max 1024 chars).
+  string error_detail = 8;
+
+  // Wall-clock latency from invoke to failure (ms).
+  int64 latency_ms = 9;
+
+  google.protobuf.Timestamp failed_at = 10;
+}

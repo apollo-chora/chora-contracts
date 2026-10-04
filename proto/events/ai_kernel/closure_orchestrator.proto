@@ -1,0 +1,157 @@
+// =============================================================================
+// chora.ai_kernel.v1 — Closure Orchestrator events  [DEPRECATED v2.0]
+// =============================================================================
+//
+// **DEPRECATION NOTICE (v2.0 reconciliation 2026-05-09)**:
+//
+// Per `docs/m13/contracts-reconciliation-2026-05-09.md`, the Closure Saga
+// lifecycle topic family has been consolidated under the canonical
+// `chora.closure.*` namespace defined in `proto/events/closure/saga.proto`.
+//
+// All NEW publishers MUST emit on `chora.closure.{requested,grace_started,
+// pseudonymise_per_domain_complete,crypto_shred_complete,closed,cancelled}.v1`
+// (see proto/events/closure/saga.proto). Consumers SHOULD double-subscribe
+// during one release for migration safety.
+//
+// This file is preserved AS-IS for backwards-compatibility during M13.
+// It will be removed in v3.0 (M14 BLANKET 24-agent migration completion).
+// DO NOT add new messages here.
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 3
+//   (Federated saga: Platform owns saga + crypto-shred; domains own
+//    per-domain PII_Closure_Map.yaml)
+// + .claude/rules/ddd-enforcement.md (Account Closure)
+// + .claude/skills/account-closure-saga/SKILL.md
+//
+// Owning domain : AI Kernel (chora_ai_kernel database) — orchestrator service
+//                 lives in Platform team's pool; saga state mirrored in
+//                 chora_identity per ddd-enforcement.
+// Owning team   : Team 3 (Platform)
+// Topic prefix  : chora.ai_kernel.closure_orchestrator.* [DEPRECATED — see chora.closure.*]
+//
+// The Closure Orchestrator is the platform-level saga coordinator. It:
+//   1. Receives ACTIVE -> CLOSING transition (chora.identity.account.lifecycle_changed)
+//   2. Fans out per-domain pseudonymisation requests
+//   3. Aggregates per-domain ClosureSagaStepCompleted (chora.governance.closure)
+//   4. Advances saga state machine on per-domain completion
+//   5. Orchestrates final crypto-shred via Cloud KMS DEK delete
+//
+// Saga events here are operational signals — distinct from per-domain step
+// events (chora.governance.closure.*) which report individual domain progress.
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.ai_kernel.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/ai_kernel/v1;aikernelv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// ClosureTargetState — terminal target state of a closure saga.
+// -----------------------------------------------------------------------------
+//
+// Mirrors chora.identity.v1.AccountState for the irreversible terminal
+// states. Saga can target any of these:
+enum ClosureTargetState {
+  CLOSURE_TARGET_STATE_UNSPECIFIED = 0;
+  CLOSURE_TARGET_STATE_PSEUDONYMIZED = 1;     // Stop at pseudonymisation
+  CLOSURE_TARGET_STATE_COLD_ARCHIVED = 2;     // Move PII-tokenized data to cold storage
+  CLOSURE_TARGET_STATE_CRYPTO_SHREDDED = 3;   // Terminal — DEK delete (irrecoverable)
+}
+
+// -----------------------------------------------------------------------------
+// ClosureSagaStarted — chora.ai_kernel.closure_orchestrator.saga_started.v1
+// -----------------------------------------------------------------------------
+//
+// Published when the Closure Orchestrator initiates a new saga (typically
+// in response to chora.identity.account.lifecycle_changed ACTIVE -> CLOSING).
+message ClosureSagaStarted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — saga correlation identifier (matches saga_id in
+  // chora.governance.closure.* events).
+  string saga_id = 2;
+
+  // GCID being closed.
+  string gcid = 3;
+
+  // Optional tenant scope (empty for cross-tenant closures).
+  string tenant_id = 4;
+
+  // Target terminal state.
+  ClosureTargetState target_state = 5;
+
+  // List of domain names that will receive per-domain step requests.
+  // Snake_case (e.g., ["creation", "consumption", "delivery", "sharing",
+  // "a2a", "tenancy", "governance", "observability", "notifications",
+  // "ai_kernel"]).
+  repeated string participating_domains = 6;
+
+  // Optional initiating GCID (the user / admin who triggered closure).
+  string initiated_by_gcid = 7;
+
+  google.protobuf.Timestamp started_at = 8;
+}
+
+// -----------------------------------------------------------------------------
+// ClosureSagaPseudonymizationOrchestrated —
+//   chora.ai_kernel.closure_orchestrator.pseudonymization_orchestrated.v1
+// -----------------------------------------------------------------------------
+//
+// Published when ALL participating domains have completed their
+// pseudonymisation steps. Marks the SUSPENDED -> PSEUDONYMIZED transition
+// for the AccountLifecycleChanged event in chora_identity.
+message ClosureSagaPseudonymizationOrchestrated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string saga_id = 2;
+  string gcid = 3;
+  string tenant_id = 4;
+
+  ClosureTargetState target_state = 5;
+
+  // Per-domain record counts (free-form for observability).
+  // Key: domain name (snake_case); value: number of records pseudonymised.
+  map<string, int64> domain_record_counts = 6;
+
+  google.protobuf.Timestamp orchestrated_at = 7;
+}
+
+// -----------------------------------------------------------------------------
+// ClosureSagaCryptoShredOrchestrated —
+//   chora.ai_kernel.closure_orchestrator.crypto_shred_orchestrated.v1
+// -----------------------------------------------------------------------------
+//
+// Published when the Closure Orchestrator has executed the terminal
+// crypto-shred (DEK deletion via Cloud KMS). The associated user data is
+// permanently unrecoverable. Marks the COLD_ARCHIVED -> CRYPTO_SHREDDED
+// transition.
+//
+// HIGHLY audited — feeds IMDA D4 + Governance audit chain.
+message ClosureSagaCryptoShredOrchestrated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string saga_id = 2;
+  string gcid = 3;
+  string tenant_id = 4;
+
+  // Always CLOSURE_TARGET_STATE_CRYPTO_SHREDDED.
+  ClosureTargetState target_state = 5;
+
+  // The DEK identifier that was deleted (Cloud KMS resource name).
+  string dek_id = 6;
+
+  // Cloud KMS operation correlation ID for audit.
+  string kms_operation_id = 7;
+
+  // GCID of the platform operator who executed the shred (or system
+  // automation identifier).
+  string executed_by_gcid = 8;
+
+  google.protobuf.Timestamp orchestrated_at = 9;
+}

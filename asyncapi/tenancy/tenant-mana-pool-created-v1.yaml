@@ -1,0 +1,64 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Tenancy — TenantManaPoolCreated
+  version: 1.0.0
+  description: |
+    Published when a tenant admin provisions a TenantManaPool (corporate
+    L&D / cohort sponsorship use case per ADR-142 Q2 = v1). Pool may be
+    created with zero balance; first usable funding is a
+    TenantManaPoolToppedUp.
+
+    - Domain: Tenancy + Billing (`chora_tenancy` DB)
+    - Topic: `chora.tenancy.tenant_mana_pool.created.v1`
+    - Source proto: `proto/events/tenancy/tenant_mana_pool.proto`
+       message `chora.tenancy.v1.TenantManaPoolCreated`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  tenantManaPoolCreated:
+    address: chora.tenancy.tenant_mana_pool.created.v1
+    messages:
+      tenantManaPoolCreated:
+        $ref: '#/components/messages/TenantManaPoolCreated'
+
+operations:
+  publishTenantManaPoolCreated:
+    action: send
+    channel:
+      $ref: '#/channels/tenantManaPoolCreated'
+    messages:
+      - $ref: '#/channels/tenantManaPoolCreated/messages/tenantManaPoolCreated'
+
+  consumeTenantManaPoolCreated:
+    action: receive
+    channel:
+      $ref: '#/channels/tenantManaPoolCreated'
+    description: |
+      Consumers: Notifications (admin confirmation), Observability
+      (subsidy adoption KPI), Identity (warm cache for upcoming
+      tenant_subsidy credits).
+    messages:
+      - $ref: '#/channels/tenantManaPoolCreated/messages/tenantManaPoolCreated'
+
+components:
+  messages:
+    TenantManaPoolCreated:
+      name: TenantManaPoolCreated
+      title: Tenant Mana Pool Created
+      summary: A tenant has provisioned a mana subsidy pool
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/tenancy/tenant_mana_pool.proto#/chora.tenancy.v1.TenantManaPoolCreated'

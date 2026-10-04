@@ -1,0 +1,62 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Delivery — ApplicationEnrolled
+  version: 1.0.0
+  description: |
+    Application reached terminal Enrolled state (Paid -> Enrolled).
+    Concurrent with chora.delivery.enrollment.created.v1 — they share
+    course_id + applicant_gcid but lifecycle membership differs.
+
+    - Domain: Content Delivery (`chora_delivery` DB)
+    - Topic: `chora.delivery.application.enrolled.v1`
+    - Source proto: `proto/events/delivery/application.proto`
+       message `chora.delivery.v1.ApplicationEnrolled`
+  contact:
+    name: Chora Delivery Team (Team 2)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  applicationEnrolled:
+    address: chora.delivery.application.enrolled.v1
+    messages:
+      applicationEnrolled:
+        $ref: '#/components/messages/ApplicationEnrolled'
+
+operations:
+  publishApplicationEnrolled:
+    action: send
+    channel:
+      $ref: '#/channels/applicationEnrolled'
+    messages:
+      - $ref: '#/channels/applicationEnrolled/messages/applicationEnrolled'
+
+  consumeApplicationEnrolled:
+    action: receive
+    channel:
+      $ref: '#/channels/applicationEnrolled'
+    description: |
+      Consumers:
+        - chora-bff-gateway (close applicant flow; redirect to A+ player)
+        - chora-observability (conversion-funnel terminal node)
+    messages:
+      - $ref: '#/channels/applicationEnrolled/messages/applicationEnrolled'
+
+components:
+  messages:
+    ApplicationEnrolled:
+      name: ApplicationEnrolled
+      title: Course Application reached terminal Enrolled
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/delivery/application.proto#/chora.delivery.v1.ApplicationEnrolled'

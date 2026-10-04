@@ -1,0 +1,70 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Content Consumption — MapClusterMerged
+  version: 1.0.0
+  description: |
+    Published when a learner accepts a junction-prompt and two clusters
+    merge into one combined graph (per ADR-143).
+
+    - Domain: Content Consumption (`chora_consumption` DB)
+    - Aggregate root: `MapCluster` (kg_user_map_clusters table)
+    - Topic: `chora.consumption.kg_map_cluster.merged.v1`
+    - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
+    - Source proto: `proto/events/consumption/knowledge_graph.proto`
+       message `chora.consumption.v1.MapClusterMerged`
+
+    The smaller cluster (by node_count) is marked MERGED_INTO; the larger
+    absorbs it. Trail histories from both pre-merge clusters preserved.
+
+    Embeds the mandatory `chora.common.v1.EventEnvelope` as field 1.
+  contact:
+    name: Chora Content Team (Team 1) + Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+    description: Google Cloud Pub/Sub (chora-489812 platform host)
+
+channels:
+  mapClusterMerged:
+    address: chora.consumption.kg_map_cluster.merged.v1
+    description: Single-event topic for MapClusterMerged.
+    messages:
+      mapClusterMerged:
+        $ref: '#/components/messages/MapClusterMerged'
+
+operations:
+  publishMapClusterMerged:
+    action: send
+    channel:
+      $ref: '#/channels/mapClusterMerged'
+    summary: Publish a MapClusterMerged event
+
+  consumeMapClusterMerged:
+    action: receive
+    channel:
+      $ref: '#/channels/mapClusterMerged'
+    summary: Subscribe to MapClusterMerged events
+    description: |
+      Primary consumers:
+      - Sharing — cross-topic curiosity bonus signal
+      - Observability — engagement analytics
+      - Notifications — achievement nudge ("Two interests connected!")
+
+components:
+  messages:
+    MapClusterMerged:
+      name: MapClusterMerged
+      title: Map Cluster Merged
+      summary: A learner accepted a junction prompt; two clusters merged
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/consumption/knowledge_graph.proto#/chora.consumption.v1.MapClusterMerged'

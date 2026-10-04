@@ -1,0 +1,121 @@
+// =============================================================================
+// chora.delivery.v1 — Rostering domain events (instructor + learner assignment)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 2 D7+D8
+// + .claude/rules/ddd-enforcement.md
+// + .claude/skills/domain-content-delivery/SKILL.md.
+//
+// Owning domain  : Content Delivery (chora_delivery database)
+// Owning team    : Team 2 (Delivery)
+// Topic prefix   : chora.delivery.rostering.*
+//
+// Roster represents the canonical instructor + learner assignment matrix
+// for a Course. Roster entries can be added/removed individually before
+// finalization; once finalized, the snapshot is immutable.
+//
+// Cross-domain references (no FK):
+//   - learner_gcid(s) : Identity (UUID, no FK)
+//
+// Per ADR-129/130/131 collapse mandate, this proto absorbs what was previously
+// `chora.training.roster.*` events.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.delivery.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/delivery/v1;deliveryv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// AssignmentType — how a learner ended up on a roster.
+// Drives downstream notification + audit semantics.
+enum AssignmentType {
+  ASSIGNMENT_TYPE_UNSPECIFIED = 0;
+  ASSIGNMENT_TYPE_MANUAL = 1;
+  ASSIGNMENT_TYPE_BULK_IMPORT = 2;
+  ASSIGNMENT_TYPE_AUTO_ALLOCATED = 3;
+}
+
+// -----------------------------------------------------------------------------
+// LearnerRostered — chora.delivery.rostering.learner_rostered.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a single learner is added to a roster. Drives notification
+// (welcome email / calendar invite) + path entitlement provisioning in
+// Consumption. Idempotent on (roster_id, learner_gcid).
+message LearnerRostered {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 identifier of the Roster aggregate.
+  string roster_id = 2;
+
+  // UUID of the Course the roster is bound to (same DB).
+  string course_id = 3;
+
+  // GCID of the learner being added. Cross-domain — no FK.
+  string learner_gcid = 4;
+
+  AssignmentType assignment_type = 5;
+
+  // GCID of the actor performing the assignment (admin / instructor).
+  string rostered_by_gcid = 6;
+
+  google.protobuf.Timestamp rostered_at = 7;
+}
+
+// -----------------------------------------------------------------------------
+// LearnerUnrostered — chora.delivery.rostering.learner_unrostered.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a learner is removed from a roster. Triggers notification
+// + path entitlement revocation. Soft-state — original assignment row
+// preserved with deleted_at.
+message LearnerUnrostered {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string roster_id = 2;
+
+  string course_id = 3;
+
+  string learner_gcid = 4;
+
+  AssignmentType assignment_type = 5;
+
+  // GCID of the actor performing the removal.
+  string unrostered_by_gcid = 6;
+
+  // Optional human-readable reason (free text; max 512 chars).
+  string reason = 7;
+
+  google.protobuf.Timestamp unrostered_at = 8;
+}
+
+// -----------------------------------------------------------------------------
+// RosterFinalized — chora.delivery.rostering.finalized.v1
+// -----------------------------------------------------------------------------
+//
+// Published when an admin locks a roster (no further changes without
+// override). Carries the full learner snapshot for downstream consumers
+// that need a canonical attendance baseline (notifications, attendance
+// jobs, classroom signage).
+message RosterFinalized {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string roster_id = 2;
+
+  string course_id = 3;
+
+  // GCIDs of all learners on the finalized roster (UUIDs, no FK).
+  // Bounded by Course.capacity at the producer.
+  repeated string learner_gcids = 4;
+
+  AssignmentType assignment_type = 5;
+
+  // GCID of the admin who finalized.
+  string finalized_by_gcid = 6;
+
+  google.protobuf.Timestamp finalized_at = 7;
+}

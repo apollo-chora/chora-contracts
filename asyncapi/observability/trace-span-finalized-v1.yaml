@@ -1,0 +1,63 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Observability — OtlpSpanFinalized
+  version: 1.0.0
+  description: |
+    Emergent trace-derived event. Most tracing flows OTLP-direct from
+    services to Cloud Trace; this topic carries only POST-INGEST
+    finalizations (error spike, SLO breach, anomaly, long-tail) — NOT
+    per-span fanout.
+
+    - Domain: Observability (`chora_observability` DB)
+    - Topic: `chora.observability.trace.span_finalized.v1`
+    - Source proto: `proto/events/observability/trace.proto`
+       message `chora.observability.v1.OtlpSpanFinalized`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  traceSpanFinalized:
+    address: chora.observability.trace.span_finalized.v1
+    messages:
+      traceSpanFinalized:
+        $ref: '#/components/messages/OtlpSpanFinalized'
+
+operations:
+  publishTraceSpanFinalized:
+    action: send
+    channel:
+      $ref: '#/channels/traceSpanFinalized'
+    messages:
+      - $ref: '#/channels/traceSpanFinalized/messages/traceSpanFinalized'
+
+  consumeTraceSpanFinalized:
+    action: receive
+    channel:
+      $ref: '#/channels/traceSpanFinalized'
+    description: |
+      Consumers: Cloud Monitoring alerting, AI Kernel
+      (self-healing hints), pager rotation, O+ incident view.
+    messages:
+      - $ref: '#/channels/traceSpanFinalized/messages/traceSpanFinalized'
+
+components:
+  messages:
+    OtlpSpanFinalized:
+      name: OtlpSpanFinalized
+      title: OTLP Span Finalized
+      summary: A trace-derived emergent event
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/observability/trace.proto#/chora.observability.v1.OtlpSpanFinalized'

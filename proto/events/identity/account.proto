@@ -1,0 +1,193 @@
+// =============================================================================
+// chora.identity.v1 — Account lifecycle events (federated closure saga)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 1/2/3
+// + .claude/rules/ddd-enforcement.md (Account Closure — federated saga)
+// + memory project_chora_concerns.md
+//
+// Owning domain  : Identity (chora_identity database)
+// Owning team    : Team 3 (Platform)
+// Topic prefix   : chora.identity.account.*
+//
+// 5-state lifecycle (NOT hard-delete):
+//   ACTIVE -> CLOSING -> SUSPENDED -> PSEUDONYMIZED -> COLD_ARCHIVED -> CRYPTO_SHREDDED
+//
+// CMEK per-tenant master key + per-user DEK. Deleting the DEK = crypto-shred
+// (data unrecoverable). Each domain owns its PII_Closure_Map.yaml; closure
+// saga state machine lives in chora_identity and orchestrates per-domain
+// pseudonymisation via Pub/Sub (see chora.governance.closure.* + AI Kernel
+// closure_orchestrator.proto).
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.identity.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/identity/v1;identityv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// AccountState — federated closure saga state machine.
+// -----------------------------------------------------------------------------
+//
+// Transitions are unidirectional except ACTIVE <-> SUSPENDED (admin reactivation
+// allowed pre-pseudonymisation). PSEUDONYMIZED -> COLD_ARCHIVED -> CRYPTO_SHREDDED
+// are irreversible — DEK deletion is the terminal point.
+enum AccountState {
+  ACCOUNT_STATE_UNSPECIFIED = 0;
+  ACCOUNT_STATE_ACTIVE = 1;             // Normal operating state
+  ACCOUNT_STATE_CLOSING = 2;             // In grace period; learner has requested closure
+  ACCOUNT_STATE_SUSPENDED = 3;           // Admin / policy suspension; reversible
+  ACCOUNT_STATE_PSEUDONYMIZED = 4;       // PII fields tokenized per PII_Closure_Map
+  ACCOUNT_STATE_COLD_ARCHIVED = 5;       // Moved to cold storage; metadata only
+  ACCOUNT_STATE_CRYPTO_SHREDDED = 6;     // DEK deleted; data permanently unrecoverable
+}
+
+// -----------------------------------------------------------------------------
+// AccountCreated — chora.identity.account.created.v1
+// -----------------------------------------------------------------------------
+//
+// Published when an Account record is provisioned (typically immediately
+// after GcidIssued). Account holds PII fields (name, email, locale prefs);
+// GCID is the opaque cross-tenant identifier.
+message AccountCreated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — Account aggregate root identifier (distinct from GCID; one-to-one).
+  string account_id = 2;
+
+  // GCID owning this account (UUIDv7, cross-tenant portable).
+  string gcid = 3;
+
+  // Initial state — always ACCOUNT_STATE_ACTIVE for *.created.
+  AccountState new_state = 4;
+
+  // CMEK DEK identifier (per-user data encryption key handle in Cloud KMS).
+  // Deleting this DEK = crypto-shred = data unrecoverable.
+  string dek_id = 5;
+
+  google.protobuf.Timestamp created_at = 6;
+}
+
+// -----------------------------------------------------------------------------
+// AccountActivated — chora.identity.account.activated.v1
+// -----------------------------------------------------------------------------
+//
+// Published on first successful login (email verification / passkey enrolment
+// complete). Distinct from AccountCreated which fires on registration.
+message AccountActivated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string account_id = 2;
+  string gcid = 3;
+
+  // Always ACCOUNT_STATE_ACTIVE.
+  AccountState new_state = 4;
+
+  google.protobuf.Timestamp activated_at = 5;
+}
+
+// -----------------------------------------------------------------------------
+// AccountSuspended — chora.identity.account.suspended.v1
+// -----------------------------------------------------------------------------
+//
+// Published on admin-initiated suspension OR policy-driven (governance)
+// suspension. Reversible until CLOSING / PSEUDONYMIZED transitions.
+message AccountSuspended {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string account_id = 2;
+  string gcid = 3;
+
+  // Prior state (typically ACTIVE).
+  AccountState prior_state = 4;
+
+  // Always ACCOUNT_STATE_SUSPENDED for this event.
+  AccountState new_state = 5;
+
+  // Free-text reason (max 512 chars). Audit-visible.
+  string reason = 6;
+
+  // GCID of the actor performing the suspension (admin / governance).
+  string suspended_by_gcid = 7;
+
+  google.protobuf.Timestamp suspended_at = 8;
+}
+
+// -----------------------------------------------------------------------------
+// AccountReactivated — chora.identity.account.reactivated.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a SUSPENDED account is restored to ACTIVE. Only valid
+// pre-PSEUDONYMIZED — once pseudonymisation begins, reactivation requires
+// fresh registration (new GCID).
+message AccountReactivated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string account_id = 2;
+  string gcid = 3;
+
+  // Prior state (typically SUSPENDED).
+  AccountState prior_state = 4;
+
+  // Always ACCOUNT_STATE_ACTIVE.
+  AccountState new_state = 5;
+
+  string reason = 6;
+  string reactivated_by_gcid = 7;
+
+  google.protobuf.Timestamp reactivated_at = 8;
+}
+
+// -----------------------------------------------------------------------------
+// AccountLifecycleChanged — chora.identity.account.lifecycle_changed.v1
+// -----------------------------------------------------------------------------
+//
+// Generic lifecycle transition event for the closure saga. Carries the full
+// state transition (prior_state -> new_state) and is the canonical signal
+// downstream domains subscribe to for federated pseudonymisation /
+// crypto-shred orchestration.
+//
+// Specific transitions covered:
+//   ACTIVE -> CLOSING            (learner-initiated closure with grace)
+//   CLOSING -> SUSPENDED         (post-grace transition)
+//   SUSPENDED -> PSEUDONYMIZED   (per-domain PII tokenisation triggered)
+//   PSEUDONYMIZED -> COLD_ARCHIVED (move to cold storage, metadata only)
+//   COLD_ARCHIVED -> CRYPTO_SHREDDED (DEK deleted; terminal)
+//
+// Domains MUST subscribe to this topic and consult their local
+// PII_Closure_Map.yaml to determine fields-to-tokenize / retention behaviour.
+//
+// Consumers: every domain (Creation, Consumption, Delivery, Sharing, A2A,
+// Tenancy, Governance, Observability, Notifications, AI Kernel).
+message AccountLifecycleChanged {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string account_id = 2;
+  string gcid = 3;
+
+  // The state machine pair carried in this transition.
+  AccountState prior_state = 4;
+  AccountState new_state = 5;
+
+  // Free-text reason (e.g., "learner_self_request", "admin_policy_breach",
+  // "saga_step_pseudonymize_complete", "crypto_shred_executed").
+  string reason = 6;
+
+  // CMEK DEK identifier — included primarily for the CRYPTO_SHREDDED
+  // transition. When new_state = CRYPTO_SHREDDED, this DEK has been
+  // deleted from Cloud KMS and the underlying data is permanently
+  // unrecoverable. Empty for transitions that do not touch the DEK.
+  string dek_id = 7;
+
+  // Optional saga correlation ID (matches AI Kernel closure_orchestrator
+  // saga_id). Used for cross-domain saga step tracking.
+  string saga_id = 8;
+
+  google.protobuf.Timestamp transitioned_at = 9;
+}

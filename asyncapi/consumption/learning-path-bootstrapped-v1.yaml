@@ -1,0 +1,97 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Content Consumption — LearningPathBootstrapped
+  version: 1.0.0
+  description: |
+    Published by chora-consumption's `EnrollmentCreatedSubscriber` when a
+    fresh course-bound `LearningPath` is materialised in response to a
+    `chora.delivery.enrollment.created.v1` event from chora-delivery.
+
+    The bootstrap consults the LOCAL atom_index projection (NEVER
+    cross-DB to chora_creation per ddd-enforcement HARD RULE). When the
+    course has no atoms yet, bootstrap is silently deferred and this
+    event is NOT emitted.
+
+    - Domain: Content Consumption (`chora_consumption` DB)
+    - Aggregate root: `LearningPath`
+    - Topic: `chora.consumption.learning_path.bootstrapped.v1`
+    - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
+
+    Embeds the mandatory `chora.common.v1.EventEnvelope` as field 1.
+  contact:
+    name: Chora Platform Team (Team 3) + Team 1 (Content)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+    description: Google Cloud Pub/Sub (chora-489812 platform host)
+
+channels:
+  learningPathBootstrapped:
+    address: chora.consumption.learning_path.bootstrapped.v1
+    description: |
+      Carries LearningPathBootstrapped Protobuf payload.
+
+      Downstream consumers:
+        - chora-observability  : audit + IMDA D2 oversight evidence
+        - chora-notifications  : "your learning path is ready" in-app
+    messages:
+      learningPathBootstrapped:
+        $ref: '#/components/messages/LearningPathBootstrapped'
+
+operations:
+  publishLearningPathBootstrapped:
+    action: send
+    channel: { $ref: '#/channels/learningPathBootstrapped' }
+    summary: Publish LearningPathBootstrapped
+    messages: [ { $ref: '#/channels/learningPathBootstrapped/messages/learningPathBootstrapped' } ]
+  consumeLearningPathBootstrapped:
+    action: receive
+    channel: { $ref: '#/channels/learningPathBootstrapped' }
+    summary: Consume LearningPathBootstrapped
+    messages: [ { $ref: '#/channels/learningPathBootstrapped/messages/learningPathBootstrapped' } ]
+
+components:
+  messages:
+    LearningPathBootstrapped:
+      name: LearningPathBootstrapped
+      title: Learning Path Bootstrapped
+      summary: A LearningPath was materialised for one (course_id, learner_gcid).
+      contentType: application/vnd.google.protobuf
+      payload:
+        type: object
+        description: Mirrors chora.consumption.v1.LearningPathBootstrapped
+        properties:
+          envelope: { $ref: '#/components/schemas/EventEnvelope' }
+          path_id: { type: string, format: uuid }
+          course_id: { type: string, format: uuid }
+          learner_gcid: { type: string }
+          enrollment_id: { type: string, format: uuid }
+          atom_count: { type: integer }
+          upstream_event_id: { type: string, format: uuid }
+          source_event:
+            type: string
+            enum: ["chora.delivery.enrollment.created.v1"]
+  schemas:
+    EventEnvelope:
+      type: object
+      required: [event_id, idempotency_key, tenant_id, occurred_at, published_at, traceparent, source_project, source_service, schema_version]
+      properties:
+        event_id: { type: string, format: uuid }
+        idempotency_key: { type: string }
+        tenant_id: { type: string }
+        gcid: { type: string }
+        occurred_at: { type: string, format: date-time }
+        published_at: { type: string, format: date-time }
+        traceparent: { type: string }
+        tracestate: { type: string }
+        source_project: { type: string }
+        source_service: { type: string }
+        schema_version: { type: integer }
+        correlation_id: { type: string }
+        causation_id: { type: string }

@@ -1,0 +1,145 @@
+// =============================================================================
+// Chora Content Creation — Question-batch acceptance events (Lane 1c)
+// =============================================================================
+//
+// Emitted by chora-creation when an author ACCEPTS a batch question-
+// generation job WITH the "Create test set" toggle ON (CHO-1703 / ADR-180).
+// Carries the author-curated test-set structure (title / description /
+// per-item points + display order) so chora-delivery can assemble ONE
+// DRAFT test set without any cross-DB read (cross-DB queries FORBIDDEN —
+// events are the only inter-domain mechanism).
+//
+// DISTINCT FROM the adjacent event families in this domain:
+//
+//   - chora.creation.ai_assist.*   — orchestration lifecycle of the LLM call
+//                                    (started / completed / refused) — see
+//                                    ai_assist.proto.
+//   - chora.creation.question.*    — per-question authoring lifecycle
+//                                    (authored / generated / evaluated).
+//   - chora.creation.question_batch.* — this file — the BATCH-ACCEPT business
+//                                    fact: N atoms persisted + the author's
+//                                    curated test-set intent.
+//
+// Why the topic lives in the `creation` domain: the emitting aggregate is
+// the question_generation_jobs row in chora_creation. The test set the
+// subscriber creates is a chora_delivery aggregate, discovered by the FE via
+// `GET /api/v1/test-sets?source_job_id={job_id}` (idempotent on
+// test_sets.source_job_id — duplicate event delivery creates NO second set).
+//
+// Exactly-once intent: chora-creation publishes AT MOST ONE accepted.v1 per
+// job_id (job-status guard, transactional outbox, BINARY encoding on the
+// publish bridge — see the in_app.created dead-letter lesson). Subscribers
+// MUST still treat job_id as the idempotency key (Pub/Sub is at-least-once).
+//
+// Per ADR-141: envelope.chora_imda_dimension SHOULD = "accountability" (D1).
+//
+// Aggregate root : question_generation_jobs (chora_creation database)
+// Owning domain  : Content Creation (chora_creation)
+// Owning team    : Team 1 (Content)
+// Topic          : chora.creation.question_batch.accepted.v1 (+ .dlq)
+// Surface (admin): A+ Creator mode (batch authoring review step)
+//
+// Subscribers:
+//   - chora-delivery      — assembles ONE DRAFT test set (title/desc/items/
+//                           points/order; source_job_id recorded UNIQUE) and
+//                           emits the existing chora.delivery.test_set.created.v1
+//   - chora-observability — D1 accountability evidence
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.creation.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/creation/v1;creationv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// QuestionBatchAccepted — chora.creation.question_batch.accepted.v1
+// -----------------------------------------------------------------------------
+//
+// Emitted AFTER the per-candidate atom persistence transaction commits in
+// chora-creation's acceptQuestionJob path (atoms first, THEN the outbox row —
+// same transaction). Absent test-set toggle ⇒ this event is NOT published and
+// the accept path is bit-identical to the pre-1c behaviour.
+message QuestionBatchAccepted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 of the batch question_generation_jobs row — the idempotency key
+  // for delivery-side assembly (test_sets.source_job_id UNIQUE).
+  string job_id = 2;
+
+  // UUIDv7 of the batch job's host atom (the atom the job was minted under;
+  // each ACCEPTED candidate became its OWN new LearningAtom — see items).
+  string host_atom_id = 3;
+
+  // Tenant context (also in envelope.tenant_id; duplicated for
+  // filter-friendly tenant-sharded subscribers).
+  string tenant_id = 4;
+
+  // The author who accepted the batch. Same as envelope.gcid. The delivery
+  // subscriber stamps this as the assembled test set's author.
+  string author_gcid = 5;
+
+  // Author-curated (review-step) test-set header. Title/description start as
+  // the LLM composer's proposal and may be amended in the review UI before
+  // accept — what rides here is the FINAL curated value.
+  TestSetSpec test_set = 6;
+
+  // Accepted items in FINAL curated display order (display_order ascending,
+  // 1-based, contiguous). Points are test-set-scoped (D5) — they live on
+  // delivery's test_set_questions rows ONLY, never on the atoms.
+  repeated Item items = 7;
+
+  // The grounding files the batch was generated from (role-tagged). Carried
+  // for provenance/audit on the delivery side; delivery does NOT download
+  // them.
+  repeated SourceFile source_files = 8;
+
+  google.protobuf.Timestamp accepted_at = 9;
+
+  // Author-curated test-set header (nested — keeps this event proto
+  // self-contained for the Pub/Sub Schema Registry flat tree).
+  message TestSetSpec {
+    // Test-set title (≤256 chars; non-empty — creation validates pre-publish).
+    string title = 1;
+
+    // Optional test-set description (≤2048 chars).
+    string description = 2;
+  }
+
+  // One accepted candidate = one new LearningAtom + its embedded Question.
+  message Item {
+    // UUIDv7 of the NEW LearningAtom minted for this accepted candidate.
+    string question_atom_id = 1;
+
+    // UUIDv7 of the embedded Question row (distinct from the atom id —
+    // delivery's test_set_questions carries BOTH, per LEG3-D R3 Option B).
+    string question_id = 2;
+
+    // "mcq" | "oe" (matches chora_delivery.test_set_questions.question_type).
+    string question_type = 3;
+
+    // Test-set-scoped points (1..100; marks-extracted by the composer with
+    // uniform default 10 fallback; author-amendable in review + editor).
+    int32 points = 4;
+
+    // Final curated 1-based position in the test set.
+    int32 display_order = 5;
+  }
+
+  // Role-tagged grounding-file provenance (shape-mirrors
+  // chora.creation.v1.SourceFileRef from ai_assist.proto; duplicated as a
+  // nested message so this event stays self-contained for the flat tree).
+  message SourceFile {
+    // gs:// URI of the uploaded file.
+    string blob_uri = 1;
+
+    // MIME type of the file.
+    string mime_type = 2;
+
+    // "source" | "rubric".
+    string role = 3;
+  }
+}

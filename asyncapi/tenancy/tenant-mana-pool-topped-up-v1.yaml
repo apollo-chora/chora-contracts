@@ -1,0 +1,62 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Tenancy — TenantManaPoolToppedUp
+  version: 1.0.0
+  description: |
+    Published when a TenantManaPool is funded — manual one-time top-up
+    or monthly auto-renew. Carries the Stripe PaymentIntent for
+    reconciliation.
+
+    - Domain: Tenancy + Billing (`chora_tenancy` DB)
+    - Topic: `chora.tenancy.tenant_mana_pool.topped_up.v1`
+    - Source proto: `proto/events/tenancy/tenant_mana_pool.proto`
+       message `chora.tenancy.v1.TenantManaPoolToppedUp`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  tenantManaPoolToppedUp:
+    address: chora.tenancy.tenant_mana_pool.topped_up.v1
+    messages:
+      tenantManaPoolToppedUp:
+        $ref: '#/components/messages/TenantManaPoolToppedUp'
+
+operations:
+  publishTenantManaPoolToppedUp:
+    action: send
+    channel:
+      $ref: '#/channels/tenantManaPoolToppedUp'
+    messages:
+      - $ref: '#/channels/tenantManaPoolToppedUp/messages/tenantManaPoolToppedUp'
+
+  consumeTenantManaPoolToppedUp:
+    action: receive
+    channel:
+      $ref: '#/channels/tenantManaPoolToppedUp'
+    description: |
+      Consumers: Notifications (admin receipt), Observability (subsidy
+      MRR / spend dashboards), Billing (BigQuery streaming).
+    messages:
+      - $ref: '#/channels/tenantManaPoolToppedUp/messages/tenantManaPoolToppedUp'
+
+components:
+  messages:
+    TenantManaPoolToppedUp:
+      name: TenantManaPoolToppedUp
+      title: Tenant Mana Pool Topped Up
+      summary: A tenant mana pool has been funded
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/tenancy/tenant_mana_pool.proto#/chora.tenancy.v1.TenantManaPoolToppedUp'

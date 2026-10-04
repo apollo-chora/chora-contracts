@@ -1,0 +1,172 @@
+// =============================================================================
+// chora.governance.v1 — Policy lifecycle events
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 5
+//   (IMDA Model AI Governance Framework as NorthStar)
+// + .claude/skills/imda-governance-4-dimensions/SKILL.md
+// + .claude/skills/regulatory-compliance/SKILL.md
+//
+// Owning domain  : Governance (chora_governance database)
+// Owning team    : Team 3 (Platform)
+// Topic prefix   : chora.governance.policy.*
+// Surface (admin): O+ Observability+ (Surface-2)
+//
+// Policies are tenant-scoped or platform-scoped declarative rules covering
+// content moderation, AI usage, data retention, access control, and
+// regulatory compliance frameworks (IMDA, GDPR, PDPA, CCPA).
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.governance.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/governance/v1;governancev1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// PolicyKind — taxonomy of policy domains.
+// -----------------------------------------------------------------------------
+enum PolicyKind {
+  POLICY_KIND_UNSPECIFIED = 0;
+  POLICY_KIND_CONTENT_MODERATION = 1;   // Posts, comments, atom content
+  POLICY_KIND_AI_USAGE = 2;              // Per-agent guardrail tier config
+  POLICY_KIND_DATA_RETENTION = 3;        // PII_Closure_Map retention rules
+  POLICY_KIND_ACCESS_CONTROL = 4;        // RBAC role -> capability matrix
+  POLICY_KIND_COMPLIANCE_IMDA = 5;       // SG IMDA Model AI Governance
+  POLICY_KIND_COMPLIANCE_GDPR = 6;       // EU GDPR
+  POLICY_KIND_COMPLIANCE_PDPA = 7;       // SG PDPA
+  POLICY_KIND_COMPLIANCE_CCPA = 8;       // California CCPA
+}
+
+// -----------------------------------------------------------------------------
+// ViolationSeverity — categorisation of policy violations for triage.
+// -----------------------------------------------------------------------------
+enum ViolationSeverity {
+  VIOLATION_SEVERITY_UNSPECIFIED = 0;
+  VIOLATION_SEVERITY_INFO = 1;     // Notable but no action required
+  VIOLATION_SEVERITY_LOW = 2;       // Logged; eventual review
+  VIOLATION_SEVERITY_MEDIUM = 3;    // Triage queue
+  VIOLATION_SEVERITY_HIGH = 4;      // Immediate human review
+  VIOLATION_SEVERITY_CRITICAL = 5;  // Auto-suspend / block; pager alert
+}
+
+// -----------------------------------------------------------------------------
+// PolicyPublished — chora.governance.policy.published.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a new policy is published (DRAFT -> PUBLISHED). Consumers:
+// Guardrail Service (refresh per-agent YAML), Content Sharing moderation,
+// Tenancy entitlement engine, Audit log.
+message PolicyPublished {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — Policy aggregate root identifier.
+  string policy_id = 2;
+
+  PolicyKind policy_kind = 3;
+
+  // Display title (1..256 chars).
+  string title = 4;
+
+  // Semver-ish version (e.g., "1.0.0").
+  string version = 5;
+
+  // GCS URI for the full policy document (markdown / YAML / JSON).
+  string policy_uri = 6;
+
+  // Tenant scope — empty string for platform-wide policies.
+  string scope_tenant_id = 7;
+
+  string published_by_gcid = 8;
+
+  google.protobuf.Timestamp published_at = 9;
+}
+
+// -----------------------------------------------------------------------------
+// PolicyUpdated — chora.governance.policy.updated.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a policy revision is published. Carries the previous +
+// new version strings so consumers can diff.
+message PolicyUpdated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string policy_id = 2;
+  PolicyKind policy_kind = 3;
+  string title = 4;
+
+  string prior_version = 5;
+  string version = 6;
+
+  string policy_uri = 7;
+  string scope_tenant_id = 8;
+  string updated_by_gcid = 9;
+
+  // Changed sections — free-form for downstream filtering.
+  repeated string changed_sections = 10;
+
+  google.protobuf.Timestamp updated_at = 11;
+}
+
+// -----------------------------------------------------------------------------
+// PolicyRetired — chora.governance.policy.retired.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a policy is retired (replaced by a new policy or no longer
+// applicable). Soft-delete only — historical violations remain attributable.
+message PolicyRetired {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string policy_id = 2;
+  PolicyKind policy_kind = 3;
+  string title = 4;
+  string version = 5;
+  string scope_tenant_id = 6;
+
+  // Optional pointer to the successor policy.
+  string successor_policy_id = 7;
+
+  string retired_by_gcid = 8;
+  string reason = 9;
+
+  google.protobuf.Timestamp retired_at = 10;
+}
+
+// -----------------------------------------------------------------------------
+// PolicyViolationDetected — chora.governance.policy.violation_detected.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a violation is detected (by the Governance Gatekeeper agent,
+// Guardrail Service, or human moderator). Drives the moderation queue in O+.
+message PolicyViolationDetected {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — ContentPolicyViolationLog entry identifier.
+  string violation_id = 2;
+
+  string policy_id = 3;
+  PolicyKind policy_kind = 4;
+
+  ViolationSeverity violation_severity = 5;
+
+  // Subject GCID (or AGID for agent-attributed violations).
+  string subject_gcid = 6;
+
+  // URI of the resource that violated the policy
+  // (e.g., "chora.sharing/post:01HXYZ...", "chora.creation/atom:01HABC...").
+  string resource_uri = 7;
+
+  // Free-text description of the violation (max 1024 chars).
+  string description = 8;
+
+  // Detector — UPPER_SNAKE_CASE (e.g., "GUARDRAIL_REGEX",
+  // "MODEL_ARMOR", "HUMAN_REPORTER", "GATEKEEPER_AGENT").
+  string detector = 9;
+
+  google.protobuf.Timestamp detected_at = 10;
+}

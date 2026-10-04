@@ -1,0 +1,101 @@
+// =============================================================================
+// chora.delivery.v1 — ProjectGroup domain events (cohort group work)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 2 D7+D8
+// + .claude/rules/ddd-enforcement.md
+// + .claude/skills/domain-content-delivery/SKILL.md.
+//
+// Owning domain  : Content Delivery (chora_delivery database)
+// Owning team    : Team 2 (Delivery)
+// Topic prefix   : chora.delivery.project_group.*
+//
+// ProjectGroup represents cohort-based group work attached to a Course.
+// Members work jointly, submit a deliverable, receive a single grade.
+//
+// Cross-domain references (no FK):
+//   - member_gcids : Identity (UUIDs, no FK)
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.delivery.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/delivery/v1;deliveryv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// ProjectGroupFormed — chora.delivery.project_group.formed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a project group is formed (members assigned). Drives
+// Notifications (introductions / kick-off) + workspace provisioning.
+message ProjectGroupFormed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 identifier of the ProjectGroup.
+  string group_id = 2;
+
+  // UUID of the Course the group is bound to (same DB).
+  string course_id = 3;
+
+  // GCIDs of all members in the group (no FK; cross-domain).
+  repeated string member_gcids = 4;
+
+  // GCID of the actor who formed the group (admin / instructor / auto).
+  string formed_by_gcid = 5;
+
+  google.protobuf.Timestamp formed_at = 6;
+}
+
+// -----------------------------------------------------------------------------
+// ProjectGroupSubmitted — chora.delivery.project_group.submitted.v1
+// -----------------------------------------------------------------------------
+//
+// Published when the group submits its deliverable. Drives instructor
+// notification (grading task) + immutable submission record.
+message ProjectGroupSubmitted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string group_id = 2;
+
+  string course_id = 3;
+
+  repeated string member_gcids = 4;
+
+  // URL of the submitted deliverable (signed URL or attachment ID).
+  // For multi-artefact submissions, points to a manifest.
+  string submission_url = 5;
+
+  // GCID of the member who submitted on behalf of the group.
+  string submitted_by_gcid = 6;
+
+  google.protobuf.Timestamp submitted_at = 7;
+}
+
+// -----------------------------------------------------------------------------
+// ProjectGroupGraded — chora.delivery.project_group.graded.v1
+// -----------------------------------------------------------------------------
+//
+// Published when an instructor finalises the group grade. Triggers
+// Consumption (path progress) + Notifications (grade release).
+message ProjectGroupGraded {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string group_id = 2;
+
+  string course_id = 3;
+
+  repeated string member_gcids = 4;
+
+  // Numeric grade (0..100). Renderable as percentage; tenants may apply
+  // their own scale via projection.
+  int32 grade = 5;
+
+  // GCID of the grading instructor.
+  string graded_by_gcid = 6;
+
+  google.protobuf.Timestamp graded_at = 7;
+}

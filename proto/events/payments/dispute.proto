@@ -1,0 +1,176 @@
+// =============================================================================
+// Chora Payments — Dispute events (Stripe chargeback lifecycle, ADR-164 §229.5)
+// =============================================================================
+//
+// Aggregate root: Dispute (own lifecycle FSM, joins Purchase by
+//                 (aggregate_type, purchase_id) — chosen 2026-05-24 over
+//                 Purchase-extending columns to keep dispute lifecycle
+//                 cleanly separated from Purchase payment lifecycle.
+//                 Per `ddd-aggregate` rules — disputes have their own FSM
+//                 distinct from the parent Purchase's payment FSM).
+// Owning domain : Payments (chora_payments DB, per ADR-164).
+// Topic prefix  : chora.payments.dispute.*
+//
+// SINGLE CROSS-AGGREGATE FAMILY (chosen 2026-05-24): unlike the per-aggregate
+// topic families above, dispute events use ONE family across all 7 Purchase
+// aggregates. Each payload includes `aggregate_type` + `purchase_id` so
+// subscribers fan-out at app layer rather than topic layer (+4 topics total
+// vs +28 for per-aggregate alternative). Acceptable taxonomy-pattern break
+// for dispute lifecycle: subscribers (chora-tenancy refund-vault) treat
+// disputes uniformly across aggregates.
+//
+// Lifecycle: raised → evidence_submitted → won | lost | warning_closed
+//
+// Funds-movement events (funds_withdrawn / funds_reinstated) fire
+// asynchronously alongside the lifecycle transitions — they correspond
+// to Stripe debiting/crediting our balance pending or post resolution.
+//
+// Originating-service notification path: chora-tenancy (refund-vault
+// accounting) is the PRIMARY subscriber; chora-delivery / chora-identity
+// subscribe per their aggregate slice (filter by aggregate_type in payload).
+//
+// Schema Registry note: Infra to register dispute.{raised,closed,
+// funds_withdrawn,funds_reinstated}.v1 schemas alongside existing
+// chora.payments.* schemas. Flat-proto extraction follows the relocate
+// pattern under proto/events-flat/payments/dispute/.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.payments.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/payments/v1;paymentsv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// Dispute lifecycle events (raised → closed)
+// -----------------------------------------------------------------------------
+
+// DisputeRaised — emitted on Stripe's `charge.dispute.created` webhook.
+// Chargeback opened against a captured payment. chora-tenancy (refund-vault
+// PRIMARY consumer) reserves vault funds pending outcome; team is alerted
+// via chora-notifications to submit evidence by evidence_due_by.
+//
+// Topic: chora.payments.dispute.raised.v1
+// Consumers: chora-tenancy (refund-vault reservation), chora-notifications
+//            (team-alert email), chora-observability (dispute-rate metric),
+//            chora-governance (audit).
+message DisputeRaised {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // chora-payments-issued UUIDv7 for this dispute record (the
+  // chora_payments.disputes aggregate PK).
+  string dispute_id = 2;
+
+  // Cross-aggregate routing — subscriber filters on these.
+  // aggregate_type ∈ {course_purchase, application_payment,
+  //                   companion_egg_purchase, tenant_mana_topup,
+  //                   user_subscription, user_mana_topup,
+  //                   identity_kyc_fee}
+  string aggregate_type = 3;
+  string purchase_id = 4;
+
+  // Stripe identifiers — the disputed charge + Stripe's dispute object.
+  string stripe_dispute_id = 5;
+  string stripe_charge_id = 6;
+
+  // Dispute amount (charge total being contested — usually equals the
+  // captured amount, but Stripe permits partial disputes for split
+  // shipments etc.).
+  int64  amount_cents = 7;
+  string currency = 8;
+
+  // Stripe-reported dispute reason — e.g. "fraudulent", "duplicate",
+  // "subscription_canceled", "product_not_received", "credit_not_processed",
+  // "general", "unrecognized". chora-tenancy may branch refund-vault
+  // policy on this.
+  string reason = 9;
+
+  // Evidence-submission deadline (Stripe's `evidence_details.due_by`).
+  // Beyond this point Stripe auto-loses the dispute on our behalf.
+  google.protobuf.Timestamp evidence_due_by = 10;
+
+  google.protobuf.Timestamp raised_at = 11;
+}
+
+// DisputeClosed — emitted on Stripe's `charge.dispute.closed` webhook.
+// Dispute resolved with one of: won, lost, warning_closed.
+// chora-tenancy updates refund-vault state per outcome.
+//
+// Topic: chora.payments.dispute.closed.v1
+// Consumers: chora-tenancy (refund-vault settlement), chora-notifications
+//            (team-notification email), chora-observability (win/loss-rate
+//            metric), chora-governance (audit).
+message DisputeClosed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string dispute_id = 2;
+  string aggregate_type = 3;
+  string purchase_id = 4;
+  string stripe_dispute_id = 5;
+  string stripe_charge_id = 6;
+
+  // Stripe outcome: "won" (we win — funds reinstated), "lost" (we lose —
+  // funds permanently withdrawn), "warning_closed" (early-warning resolved
+  // by issuer — no charge moved). Subscribers route accordingly.
+  string outcome = 7;
+
+  int64  amount_cents = 8;
+  string currency = 9;
+
+  google.protobuf.Timestamp closed_at = 10;
+}
+
+// -----------------------------------------------------------------------------
+// Funds-movement events (independent of lifecycle — Stripe debits/credits
+// our balance during or after a dispute)
+// -----------------------------------------------------------------------------
+
+// DisputeFundsWithdrawn — emitted on Stripe's `charge.dispute.funds_withdrawn`.
+// Stripe has debited our balance pending dispute outcome. chora-tenancy
+// refund-vault MUST reserve a matching pending-debit line so tenant balance
+// reflects reality.
+//
+// Topic: chora.payments.dispute.funds_withdrawn.v1
+// Consumers: chora-tenancy (refund-vault pending-debit reserve),
+//            chora-observability (funds-at-risk metric),
+//            chora-governance (audit).
+message DisputeFundsWithdrawn {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string dispute_id = 2;
+  string aggregate_type = 3;
+  string purchase_id = 4;
+  string stripe_dispute_id = 5;
+  string stripe_charge_id = 6;
+
+  int64  amount_cents = 7;
+  string currency = 8;
+
+  google.protobuf.Timestamp withdrawn_at = 9;
+}
+
+// DisputeFundsReinstated — emitted on Stripe's `charge.dispute.funds_reinstated`.
+// Funds returned (won dispute or warning resolution). chora-tenancy
+// refund-vault MUST reverse the pending-debit line.
+//
+// Topic: chora.payments.dispute.funds_reinstated.v1
+// Consumers: chora-tenancy (refund-vault pending-debit reversal),
+//            chora-observability (funds-recovered metric),
+//            chora-governance (audit).
+message DisputeFundsReinstated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string dispute_id = 2;
+  string aggregate_type = 3;
+  string purchase_id = 4;
+  string stripe_dispute_id = 5;
+  string stripe_charge_id = 6;
+
+  int64  amount_cents = 7;
+  string currency = 8;
+
+  google.protobuf.Timestamp reinstated_at = 9;
+}

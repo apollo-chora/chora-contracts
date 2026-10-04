@@ -1,0 +1,73 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Content Consumption — NodeTraversed
+  version: 1.0.0
+  description: |
+    Published when a learner navigates to a node in the KnowledgeGraph
+    (Discovery / curiosity-driven mode).
+
+    - Domain: Content Consumption (`chora_consumption` DB)
+    - Aggregate root: `KnowledgeGraphNode`
+    - Topic: `chora.consumption.knowledge_graph.node_traversed.v1`
+    - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
+    - Source proto: `proto/events/consumption/knowledge_graph.proto`
+       message `chora.consumption.v1.NodeTraversed`
+
+    Per Tier 2 D7, KG traversal uses PostgreSQL Recursive CTEs in
+    `chora_consumption` — NOT a separate graph DB.
+
+    Embeds the mandatory `chora.common.v1.EventEnvelope` as field 1.
+  contact:
+    name: Chora Platform Team (Team 3) + Team 1 (Content)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+    description: Google Cloud Pub/Sub (chora-489812 platform host)
+
+channels:
+  nodeTraversed:
+    address: chora.consumption.knowledge_graph.node_traversed.v1
+    description: Single-event topic for NodeTraversed.
+    messages:
+      nodeTraversed:
+        $ref: '#/components/messages/NodeTraversed'
+
+operations:
+  publishNodeTraversed:
+    action: send
+    channel:
+      $ref: '#/channels/nodeTraversed'
+    summary: Publish a NodeTraversed event
+    messages:
+      - $ref: '#/channels/nodeTraversed/messages/nodeTraversed'
+
+  consumeNodeTraversed:
+    action: receive
+    channel:
+      $ref: '#/channels/nodeTraversed'
+    summary: Subscribe to NodeTraversed events
+    description: |
+      Primary consumers:
+      - Sharing — curiosity reputation accrual
+      - Observability — discovery funnel + edge-popularity analytics
+    messages:
+      - $ref: '#/channels/nodeTraversed/messages/nodeTraversed'
+
+components:
+  messages:
+    NodeTraversed:
+      name: NodeTraversed
+      title: Node Traversed
+      summary: A learner traversed to a KnowledgeGraph node in Discovery mode
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/consumption/knowledge_graph.proto#/chora.consumption.v1.NodeTraversed'

@@ -1,0 +1,129 @@
+// =============================================================================
+// chora.governance.v1 — IMDA Model AI Governance Framework events
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 5
+//   (IMDA Model AI Governance Framework as NorthStar — all 4 dimensions
+//    parallel from launch in O+)
+// + .claude/skills/imda-governance-4-dimensions/SKILL.md
+// + ADR-141 IMDA Dimension Labels Reconciliation (gold-standard from
+//   AssessorFlow o-plus-dashboard / IMDA MGF v2 / AI Verify Testing Framework)
+//
+// Owning domain : Governance (chora_governance database)
+// Owning team   : Team 3 (Platform)
+// Topic prefix  : chora.governance.imda.*
+//
+// IMDA Framework v2 4 canonical dimensions (per ADR-141):
+//   D1 Accountability                — AI Verify #8 Data Governance, #9 Accountability
+//   D2 Transparency                  — AI Verify #1 Transparency, #2 Explainability
+//   D3 Safety + Robustness           — AI Verify #3-#6 Repeatability, Safety, Security, Robustness
+//   D4 Fairness + Human Oversight    — AI Verify #7 Fairness, #10 Human Agency, #11 Inclusive Growth
+//
+// v2.0 BREAKING: ImdaDimension enum values renamed to canonical labels per
+// ADR-141. Deprecated v1 aliases (TRANSPARENCY/EXPLAINABILITY/REPEATABILITY/
+// SECURITY_SAFETY) reserved at the same field numbers — consumers MUST migrate
+// to new identifiers; producers MUST emit canonical values.
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.governance.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/governance/v1;governancev1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// ImdaDimension — IMDA Framework v2 canonical dimension (per ADR-141).
+// -----------------------------------------------------------------------------
+//
+// v2.0 BREAKING: identifiers renamed to canonical labels.
+//   D1 IMDA_DIMENSION_ACCOUNTABILITY                = 1
+//   D2 IMDA_DIMENSION_TRANSPARENCY                  = 2
+//   D3 IMDA_DIMENSION_SAFETY_AND_ROBUSTNESS         = 3
+//   D4 IMDA_DIMENSION_FAIRNESS_AND_HUMAN_OVERSIGHT  = 4
+//
+// Deprecated v1 identifiers reserved (DO NOT REUSE field numbers):
+//   v1 IMDA_DIMENSION_EXPLAINABILITY (was =2)   -> use TRANSPARENCY
+//   v1 IMDA_DIMENSION_REPEATABILITY  (was =3)   -> use SAFETY_AND_ROBUSTNESS
+//   v1 IMDA_DIMENSION_SECURITY_SAFETY (was =4)  -> use SAFETY_AND_ROBUSTNESS
+//
+// Field numbers 1-4 are reused with REWRITTEN semantics — this is a wire-
+// breaking change requiring major version bump. Producers MUST adopt
+// canonical labels before publishing v2.0 events.
+enum ImdaDimension {
+  IMDA_DIMENSION_UNSPECIFIED = 0;
+  IMDA_DIMENSION_ACCOUNTABILITY = 1;                  // D1 — AI Verify #8, #9
+  IMDA_DIMENSION_TRANSPARENCY = 2;                    // D2 — AI Verify #1, #2
+  IMDA_DIMENSION_SAFETY_AND_ROBUSTNESS = 3;           // D3 — AI Verify #3-#6
+  IMDA_DIMENSION_FAIRNESS_AND_HUMAN_OVERSIGHT = 4;    // D4 — AI Verify #7, #10, #11
+}
+
+// -----------------------------------------------------------------------------
+// ImdaEvidenceGathered — chora.governance.imda.evidence_gathered.v1
+// -----------------------------------------------------------------------------
+//
+// Published when evidence supporting an IMDA dimension is gathered (e.g.,
+// red-team test report, eval suite run, model card publish, decision log
+// snapshot). Builds the cumulative evidence chain for tenant-level
+// IMDA attestation.
+message ImdaEvidenceGathered {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — evidence record identifier.
+  string evidence_id = 2;
+
+  ImdaDimension dimension = 3;
+
+  // GCS URI for the evidence artifact (PDF / JSON / YAML / log bundle).
+  string evidence_uri = 4;
+
+  // Free-text caption (e.g., "Q2 2026 red-team report", "Atom Validator
+  // eval baseline v1.4"). Max 256 chars.
+  string caption = 5;
+
+  // Tenant scope — empty for platform-wide evidence.
+  string scope_tenant_id = 6;
+
+  // GCID / AGID of the gatherer (human attester or evidence-collector agent).
+  string gathered_by_gcid = 7;
+
+  google.protobuf.Timestamp gathered_at = 8;
+}
+
+// -----------------------------------------------------------------------------
+// ImdaDimensionAttested — chora.governance.imda.dimension_attested.v1
+// -----------------------------------------------------------------------------
+//
+// Published when an authorised attester signs off on an IMDA dimension
+// for a tenant + period. Drives the O+ IMDA dashboard's "compliant /
+// pending / overdue" status indicators.
+message ImdaDimensionAttested {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — attestation record identifier.
+  string attestation_id = 2;
+
+  ImdaDimension dimension = 3;
+
+  // Tenant scope — empty for platform-wide attestations.
+  string scope_tenant_id = 4;
+
+  // Period covered (e.g., "2026-Q2", "2026-05").
+  string period = 5;
+
+  // Evidence record IDs cited in this attestation (referencing prior
+  // ImdaEvidenceGathered events).
+  repeated string evidence_ids = 6;
+
+  // GCID of the AUDITOR or OWNER role who attested.
+  string attested_by_gcid = 7;
+
+  // URI of the signed attestation document (GCS).
+  string attestation_uri = 8;
+
+  google.protobuf.Timestamp attested_at = 9;
+}

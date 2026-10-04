@@ -1,0 +1,65 @@
+asyncapi: "3.0.0"
+info:
+  title: "Chora Content Sharing — relationship.friend_accepted.v1"
+  version: "1.0.0"
+  description: |
+    Published when the addressee accepts; the undirected friendship edge exists
+    from this moment (canonical ordered pair in the SoR).
+
+    Part of the complete relationship lifecycle spine (ADR-230 D4, upgrade
+    seam 2): every committed transition publishes exactly one relationship
+    event through the sharing outbox, written in the SAME transaction as the
+    state change. Supersedes the never-published follow.* family.
+
+    Owning team   : Team 1 (Content)
+    Owning domain : Content Sharing (chora_sharing database)
+    Surface       : C+ Connect+
+  contact:
+    name: "Chora Platform Team — Content Track"
+  license:
+    name: "Proprietary"
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  production:
+    host: "pubsub.googleapis.com"
+    protocol: googlepubsub
+    description: "Google Cloud Pub/Sub (production)"
+  emulator:
+    host: "localhost:8085"
+    protocol: googlepubsub
+    description: "Cloud Pub/Sub Emulator (local dev)"
+
+channels:
+  relationshipFriendAccepted:
+    address: "chora.sharing.relationship.friend_accepted.v1"
+    messages:
+      relationshipFriendAccepted:
+        $ref: "#/components/messages/RelationshipFriendAccepted"
+
+operations:
+  publishRelationshipFriendAccepted:
+    action: send
+    channel:
+      $ref: "#/channels/relationshipFriendAccepted"
+    summary: "Publish a Relationship Friend Accepted event"
+    description: |
+      Producer: chora-sharing (RelationshipRepo outbox enqueue, ADR-230 D4).
+      Consumers: Notifications (notify requester), future graph projector (FRIENDS_WITH edge).
+    messages:
+      - $ref: "#/channels/relationshipFriendAccepted/messages/relationshipFriendAccepted"
+
+components:
+  messages:
+    RelationshipFriendAccepted:
+      name: "RelationshipFriendAccepted"
+      title: "Relationship Friend Accepted"
+      summary: "A friend request was accepted — the friendship now exists"
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf;version=3
+      payload:
+        schemaFormat: "application/vnd.google.protobuf;version=3"
+        schema:
+          protoFile: "proto/events/sharing/relationship.proto"
+          messageName: "chora.sharing.v1.RelationshipFriendAccepted"

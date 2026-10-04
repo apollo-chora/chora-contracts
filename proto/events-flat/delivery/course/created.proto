@@ -1,0 +1,61 @@
+// =============================================================================
+// GENERATED — DO NOT EDIT.
+// Source : events/delivery/course.proto message CourseCreated
+// Tool   : chora-contracts/internal/protoflatten
+// Why    : GCP Pub/Sub Schema Registry rejects (a) schemas with `import`
+//          statements and (b) schemas with more than one top-level message.
+//          This flat copy contains exactly ONE top-level message;
+//          EventEnvelope + Timestamp + transitive deps are nested inside.
+// Path C : see chora-contracts/CHANGELOG.md and m10-data-plane main.tf.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.delivery.v1;
+
+message CourseCreated {
+  // Inlined chora.common.v1.EventEnvelope (nested for self-contained schema).
+  message Envelope {
+    string event_id = 1;
+    string idempotency_key = 2;
+    string tenant_id = 3;
+    string gcid = 4;
+    Timestamp occurred_at = 5;
+    Timestamp published_at = 6;
+    string traceparent = 7;
+    string tracestate = 8;
+    string source_project = 9;
+    string source_service = 10;
+    int32 schema_version = 11;
+    string correlation_id = 12;
+    string causation_id = 13;
+    string chora_imda_dimension = 14;
+    string imda_lifecycle_stage = 15;
+  }
+
+  // Inlined google.protobuf.Timestamp (nested; wire-compatible).
+  message Timestamp {
+    int64 seconds = 1;
+    int32 nanos = 2;
+  }
+
+  // Inlined enum dep: Modality
+  enum Modality {
+    MODALITY_UNSPECIFIED = 0;
+    MODALITY_IN_PERSON = 1;
+    MODALITY_ONLINE_SYNC = 2;
+    MODALITY_ONLINE_ASYNC = 3;
+    MODALITY_BLENDED = 4;
+  }
+
+  Envelope envelope = 1;
+  string course_id = 2;
+  string title = 3;
+  string instructor_gcid = 4;
+  string atom_path_id = 5;
+  Modality modality = 6;
+  Timestamp starts_at = 7;
+  Timestamp ends_at = 8;
+  int32 capacity = 9;
+  Timestamp created_at = 10;
+}

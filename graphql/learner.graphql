@@ -1,0 +1,160 @@
+# =============================================================================
+# Chora Learner GraphQL — Federated root schema
+# =============================================================================
+#
+# This is the unified gateway-level schema served at /graphql by
+# `services/chora-bff-gateway`. It STITCHES four domain subschemas that live
+# alongside this file:
+#
+#   - engagement.graphql   (Content Consumption — paths, sessions, daily-dose)
+#   - gamification.graphql (Content Consumption + Sharing — xp, badges,
+#                           leaderboards, currencies)
+#   - companion.graphql     (Content Consumption — Companion RPG companion
+#                           DOMAIN entity; AI agent details remain hidden)
+#   - circle.graphql       (Content Sharing — feeds, posts, reactions, duels)
+#
+# Per CLAUDE.md §4 (Protocol Strategy) GraphQL is for LEARNER-FACING READS only:
+# knowledge-graph traversal, atom queries, persona, discovery. Admin CRUD and
+# inter-service async are unaffected (REST + Pub/Sub respectively).
+#
+# Federation: the four subschemas are federation-ready (Apollo Federation v2
+# style `@key`). The BFF gateway uses gqlgen's federation plugin to compose a
+# single supergraph. See `services/chora-bff-gateway/internal/graphql/`.
+#
+# Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 2 D8 +
+# chora-contracts/CLAUDE.md §5. Phase 31 (CHO-1288 to CHO-1300).
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Federation directives (Apollo Federation v2 / gqlgen federation)
+# -----------------------------------------------------------------------------
+
+directive @key(fields: String!, resolvable: Boolean = true) repeatable on OBJECT | INTERFACE
+directive @shareable on OBJECT | FIELD_DEFINITION
+directive @external on FIELD_DEFINITION
+directive @inaccessible on FIELD_DEFINITION | OBJECT | INTERFACE | UNION | ARGUMENT_DEFINITION | SCALAR | ENUM | ENUM_VALUE | INPUT_OBJECT | INPUT_FIELD_DEFINITION
+
+# -----------------------------------------------------------------------------
+# Common scalars (re-declared at root for stitched gateway)
+# -----------------------------------------------------------------------------
+
+scalar UUID
+scalar DateTime
+scalar JSON
+
+# -----------------------------------------------------------------------------
+# Stitched Query Root
+#
+# Each field below is fanned out to the owning subschema's resolver:
+#   - learner / atom / path / dailyDose -> engagement + companion
+#   - badges / leaderboard / wallet     -> gamification
+#   - companion                          -> companion
+#   - feed / discovery                  -> circle + engagement
+# -----------------------------------------------------------------------------
+
+type Query {
+  """
+  The current learner — entry point for the learner-facing graph. Returns
+  null only if the JWT GCID is not resolvable (rare: kernel race after
+  account closure).
+  """
+  learner: Learner
+
+  """
+  Fetch a single PUBLISHED LearningAtom by ID. Federated: Creation domain
+  owns canonical fields; Consumption + Sharing extend with progression /
+  social context for the current learner.
+  """
+  atom(id: ID!): LearningAtom
+
+  """The current learner's enrolled LearningPaths (Consumption domain)."""
+  path(id: ID!): LearningPath
+
+  """The current learner's RPG Companion (Consumption domain — domain entity, NOT AI agent)."""
+  companion: Companion
+
+  """
+  Discovery feed — KnowledgeGraph edges around an optional seed atom. Used
+  by Discovery / curiosity-driven mode (per Tier 1 D1 bimodal delivery).
+  """
+  discovery(seedAtomId: ID, depth: Int = 2): [KnowledgeGraphEdge!]!
+}
+
+# -----------------------------------------------------------------------------
+# Top-level Learner aggregate
+#
+# Composed across all four subschemas. Each subschema owns its own fields.
+# -----------------------------------------------------------------------------
+
+"""
+The current learner — root aggregate composed across Engagement, Gamification,
+Companion, and Circle subschemas via Federation.
+"""
+type Learner @key(fields: "gcid") {
+  """Global Chora ID (UUIDv7, opaque, cross-tenant portable)."""
+  gcid: ID!
+
+  """Public display name (safe to expose without consent)."""
+  displayName: String!
+
+  """Active LearningPaths (engagement subschema)."""
+  paths: [LearningPath!]!
+
+  """Companion entity (companion subschema — NOT the AI agent)."""
+  companion: Companion
+
+  """XP balance + currency wallet (gamification subschema)."""
+  wallet: Wallet
+
+  """Social profile (circle subschema)."""
+  circleProfile: CircleProfile
+}
+
+# -----------------------------------------------------------------------------
+# Cross-subschema type stubs (full definitions live in subschema files)
+# -----------------------------------------------------------------------------
+
+"""LearningAtom — primary aggregate root. Owned by Creation; extended by others."""
+type LearningAtom @key(fields: "id") {
+  id: ID!
+  title: String!
+  difficulty: Int!
+}
+
+"""LearningPath — owned by Engagement subschema."""
+type LearningPath @key(fields: "id") {
+  id: ID!
+  title: String!
+  totalSteps: Int!
+  completionPercentage: Float
+}
+
+"""Companion — owned by Companion subschema."""
+type Companion @key(fields: "id") {
+  id: ID!
+  species: String!
+  level: Int!
+}
+
+"""Wallet — owned by Gamification subschema."""
+type Wallet @key(fields: "gcid") {
+  gcid: ID!
+  xp: Int!
+  coins: Int!
+  reputation: Int!
+}
+
+"""CircleProfile — owned by Circle subschema."""
+type CircleProfile @key(fields: "gcid") {
+  gcid: ID!
+  followerCount: Int!
+  followingCount: Int!
+}
+
+"""KnowledgeGraphEdge — owned by Engagement subschema (Discovery mode)."""
+type KnowledgeGraphEdge {
+  fromAtomId: UUID!
+  toAtomId: UUID!
+  edgeType: String!
+  weight: Float!
+}

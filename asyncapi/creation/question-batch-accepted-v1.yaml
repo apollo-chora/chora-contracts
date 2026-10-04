@@ -1,0 +1,93 @@
+asyncapi: "3.0.0"
+info:
+  title: "Chora Content Creation — question_batch.accepted.v1"
+  version: "1.0.0"
+  description: |
+    Published when an author ACCEPTS a batch question-generation job WITH the
+    "Create test set" toggle ON (Lane 1c — CHO-1703 / ADR-180). The event
+    carries the author-CURATED test-set composition (title / description /
+    per-item points + display order from the batch review composer) plus the
+    role-tagged grounding-file provenance, so chora-delivery can assemble ONE
+    DRAFT test set without any cross-DB read.
+
+    Publisher invariants (chora-creation acceptQuestionJob path):
+      - atoms persist FIRST, the outbox row in the SAME transaction;
+      - AT MOST ONE accepted.v1 per job_id (job-status guard);
+      - BINARY-encoded at the outbox publish bridge against the Schema
+        Registry flat schema (the in_app.created dead-letter lesson: an
+        unhandled binary topic falls through to JSON and silently DLQs);
+      - NOT published when the toggle is OFF / the accept request carries no
+        `test_set` block (pre-1c behaviour bit-identical).
+
+    Subscriber invariants (chora-delivery):
+      - idempotent on job_id → `test_sets.source_job_id` UNIQUE partial
+        index; duplicate delivery no-ops (Pub/Sub is at-least-once);
+      - assembles the DRAFT via the domain aggregate (HTTP-gate bypass is
+        expected for the subscriber path — domain invariants live in the
+        aggregate, not the handler);
+      - emits the EXISTING `chora.delivery.test_set.created.v1` on success;
+      - FE discovery: `GET /api/v1/test-sets?source_job_id={job_id}`.
+
+    Owning team    : Team 1 (Content)
+    Owning domain  : Content Creation (chora_creation database)
+    Surface (admin): A+ Creator mode (batch authoring review step)
+
+    Source-of-truth: docs/HANDOFF_BATCH_TESTSET_COMPOSE_2026-06-10.md (D1-D16)
+    + docs/architecture/adrs/adr-180 (D9+D10) + .claude/rules/ddd-enforcement.md
+  contact:
+    name: "Chora Platform Team — Content Track"
+  license:
+    name: "Proprietary"
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  production:
+    host: "pubsub.googleapis.com"
+    protocol: googlepubsub
+    description: "Google Cloud Pub/Sub (production)"
+  emulator:
+    host: "localhost:8085"
+    protocol: googlepubsub
+    description: "Cloud Pub/Sub Emulator (local dev via PUBSUB_EMULATOR_HOST)"
+
+channels:
+  questionBatchAccepted:
+    address: "chora.creation.question_batch.accepted.v1"
+    description: |
+      Pub/Sub topic for QuestionBatchAccepted events. Topic resides in the
+      centralised platform host project (`chora-489812`) with a paired
+      dead-letter topic `chora.dlq.creation.question_batch.accepted.v1`.
+      Schema Registry validates the BINARY Protobuf payload at publish time
+      (flat schema: proto/events-flat/creation/question_batch/accepted.proto).
+    messages:
+      questionBatchAccepted:
+        $ref: "#/components/messages/QuestionBatchAccepted"
+
+operations:
+  publishQuestionBatchAccepted:
+    action: send
+    channel:
+      $ref: "#/channels/questionBatchAccepted"
+    summary: "Publish the author-curated batch→test-set acceptance fact"
+    description: |
+      Producer: chora-creation service (transactional outbox, BINARY encode
+      at the publish bridge, exactly-once per job_id by status guard).
+      Consumers: chora-delivery (assembles ONE DRAFT test set, idempotent on
+      source_job_id), chora-observability (IMDA D1 accountability evidence).
+    messages:
+      - $ref: "#/channels/questionBatchAccepted/messages/questionBatchAccepted"
+
+components:
+  messages:
+    QuestionBatchAccepted:
+      name: "QuestionBatchAccepted"
+      title: "Question Batch Accepted"
+      summary: "An author accepted a question batch with curated test-set composition"
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf;version=3
+      payload:
+        schemaFormat: "application/vnd.google.protobuf;version=3"
+        schema:
+          protoFile: "proto/events/creation/question_batch.proto"
+          messageName: "chora.creation.v1.QuestionBatchAccepted"

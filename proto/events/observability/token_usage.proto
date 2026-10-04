@@ -1,0 +1,183 @@
+// =============================================================================
+// chora.observability.v1 — Token usage / cost ledger events
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 3
+// + .claude/skills/ai-cost-tracking/SKILL.md (dual-axis: OTLP trace level
+//   ephemeral + TokenUsageLedger ledger level canonical billing-grade)
+// + .claude/skills/pub-sub-topology/SKILL.md (canonical topic taxonomy)
+//
+// Owning domain : Observability (chora_observability database)
+// Owning team   : Team 3 (Platform)
+// Topic prefix  : chora.observability.token_usage.*
+//
+// CANONICAL TOPIC (v2.0 reconciliation 2026-05-09):
+//   chora.observability.token_usage.recorded.v1
+//
+// Per `docs/m13/contracts-reconciliation-2026-05-09.md` §1, this topic is
+// the SINGLE canonical name across the platform. Three earlier spellings
+// existed across docs / SQL comments / skill text:
+//   - chora.ai_kernel.token-usage.recorded.v1   (Phyllis MVP §6 + chora-observability migration comment) — DEPRECATED
+//   - chora.observability.token_usage.recorded.v1 (this file + pub-sub-topology skill)               — CANONICAL
+//   - chora.ai_kernel.token_usage.recorded.v1   (some older drafts)                                  — DEPRECATED
+//
+// Rationale: ownership of the TokenUsageLedger aggregate is in the
+// Observability supporting domain (chora_observability database). The
+// topic taxonomy formula chora.{domain}.{aggregate}.{event_type}.v{N} maps
+// 1:1 to the owning domain. AI Kernel is the PRODUCER (via Model Gateway
+// outbox publish) but Observability OWNS the ledger.
+//
+// Producers MUST emit on `chora.observability.token_usage.recorded.v1`.
+// Skill `ai-cost-tracking` text references the deprecated form; that text
+// will be reconciled in a follow-up M11.2 skill refresh PR.
+//
+// TokenUsageRecorded is the canonical billing-grade ledger event emitted at
+// the Model Gateway via transactional outbox. BigQuery streaming +
+// pre-aggregations consume it for cost dashboards + tenant invoicing.
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.observability.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/observability/v1;observabilityv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// TokenUsageRecorded — chora.observability.token_usage.recorded.v1
+// -----------------------------------------------------------------------------
+//
+// Published by the Model Gateway (via outbox) on every successful model
+// invocation. Carries token counts for input/output/cached and the
+// canonical micro-dollar cost.
+//
+// Note: gcid field carries either a learner GCID OR an agent AGID (per
+// envelope semantics — actor identifier slot). The agent_role field
+// disambiguates the calling agent's role within its crew.
+message TokenUsageRecorded {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — TokenUsageLedger entry identifier.
+  string usage_id = 2;
+
+  // Tenant scope (also carried in envelope.tenant_id for redundancy).
+  string tenant_id = 3;
+
+  // Either GCID (learner-attributed cost) or AGID (system-attributed cost).
+  // Disambiguate by lookup in chora_identity.
+  string gcid = 4;
+
+  // Model identifier (e.g., "gemini-2.5-flash", "gemini-2.5-pro",
+  // "gemma-tenant-lora:01HABC...", "text-embedding-004").
+  string model_id = 5;
+
+  // Input prompt tokens.
+  int64 input_tokens = 6;
+
+  // Output completion tokens.
+  int64 output_tokens = 7;
+
+  // Cached prompt tokens (when prompt caching is in effect — discounted
+  // billing).
+  int64 cached_tokens = 8;
+
+  // Canonical cost in micro-dollars (1e-6 USD). Integer to avoid float
+  // drift. Example: $0.0123 -> 12300.
+  int64 cost_micros = 9;
+
+  // Correlation back to AI Kernel ModelInvoked / ModelInvocationCompleted
+  // event chain. Allows joining cost to invocation context.
+  string invocation_id = 10;
+
+  // Free-text role of the calling agent within its crew (e.g.,
+  // "atom_validator", "router", "classifier", "companion_persona",
+  // "guardrail_eval"). Empty for non-agentic direct calls.
+  string agent_role = 11;
+
+  google.protobuf.Timestamp recorded_at = 12;
+
+  // ---------------------------------------------------------------------------
+  // ADR-163 additive v1 fields — added 2026-05-24 for the M15 Model Gateway.
+  //
+  // The Model Gateway (asia-southeast1, GKE Autopilot) is the sole producer
+  // of this event post-cutover; the legacy TokenUsageLedgerOutboxWriter
+  // in chora-ai-kernel-orchestrator is on its retirement path. These
+  // fields are OPTIONAL on the wire — pre-gateway producers MAY omit
+  // them and consumers MUST treat the zero value as "unknown".
+  //
+  // No field number reuse; numbers extend past 12 (recorded_at) per
+  // additive evolution within v1.
+  // ---------------------------------------------------------------------------
+
+  // Resolved vendor identifier (e.g., "vertex_ai_gemini",
+  // "vertex_ai_gemma", "openai_byoa", "anthropic_byoa",
+  // "gemma_cloud_run_gpu"). Mirrors InvokeResponse.vendor.
+  string vendor = 13;
+
+  // Adapter dispatch chain. Index 0 is the first vendor:model the
+  // gateway tried; subsequent entries indicate retries / fallbacks.
+  // Length 1 on happy-path. Mirrors InvokeResponse.fallback_chain.
+  repeated string fallback_chain = 14;
+
+  // Cloud Model Armor verdicts captured at the gateway — same enum
+  // shape as chora.services.model_gateway.v1.ModelArmorVerdict.
+  // Embedded as an enum here (rather than importing the service proto
+  // into this events proto) to keep the events tree dependency-free
+  // per the proto/events/ self-contained convention.
+  ModelArmorVerdict model_armor_verdict_pre = 15;
+  ModelArmorVerdict model_armor_verdict_post = 16;
+
+  // Build identifier of the gateway that emitted this event, e.g.,
+  // "chora-model-gateway:58b28eb". Lets BigQuery cost aggregations
+  // attribute anomalies to a specific gateway build.
+  string gateway_version = 17;
+
+  // ---------------------------------------------------------------------------
+  // ADR-205 additive v1 fields — added 2026-06-29 for the Contextual
+  // Transaction History projection (transaction_ledger, chora_tenancy).
+  //
+  // This event is the source the `transaction_ledger` projection folds into
+  // `mana_spend_daily` rollup rows + `transaction_ledger_detail` per-call rows
+  // (ADR-205 plan sec 3.2). The projection's mana timeline is denominated in
+  // MANA (the umbrella currency) and labelled by mana action_code — neither
+  // was on this event, which carried only token counts + micro-USD cost. The
+  // Model Gateway already meters the mana charged per call (ManaMetering),
+  // so it has both values at emit time.
+  //
+  // OPTIONAL on the wire — pre-ADR-205 producers MAY omit them; consumers
+  // MUST treat the zero value as "unknown" and fall back to the
+  // chora.identity.user_mana.debited.v1 ledger (UserManaDebited.units /
+  // .action_code, correlated via request_id == invocation_id). No field
+  // number reuse; numbers extend past 17 (gateway_version) per additive
+  // evolution within v1.
+  // ---------------------------------------------------------------------------
+
+  // Mana units charged for this call (the umbrella-currency debit the gateway
+  // metered). 0 = unknown (pre-ManaMetering or non-metered direct call).
+  int64 mana_units = 18;
+
+  // Stable mana action code (e.g., "question_generation", "companion_chat",
+  // "oe_grading", "image_generation"). Mirrors
+  // chora.identity.v1.UserManaDebited.action_code so the projection can label
+  // a per-call detail row without a cross-domain lookup. Empty = unknown.
+  string action_code = 19;
+}
+
+// -----------------------------------------------------------------------------
+// ModelArmorVerdict — duplicated here from
+// chora.services.model_gateway.v1.ModelArmorVerdict so the events tree
+// remains import-free per proto/events/ self-contained convention. Values
+// MUST stay numerically in sync with the service-side enum.
+// -----------------------------------------------------------------------------
+enum ModelArmorVerdict {
+  MODEL_ARMOR_VERDICT_UNSPECIFIED = 0;
+  MODEL_ARMOR_VERDICT_ALLOW = 1;
+  MODEL_ARMOR_VERDICT_BLOCK = 2;
+  MODEL_ARMOR_VERDICT_SANITISE = 3;
+  MODEL_ARMOR_VERDICT_ERROR = 4;
+  MODEL_ARMOR_VERDICT_BYPASSED = 5;
+}

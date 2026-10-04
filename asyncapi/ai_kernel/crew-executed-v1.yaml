@@ -1,0 +1,61 @@
+asyncapi: 3.0.0
+info:
+  title: Chora AI Kernel — CrewExecuted
+  version: 1.0.0
+  description: |
+    Published when a crew run reaches a terminal state. Carries aggregated
+    stats — total invocations, total cost, outcome.
+
+    - Domain: AI Kernel (`chora_ai_kernel` DB)
+    - Topic: `chora.ai_kernel.crew.executed.v1`
+    - Source proto: `proto/events/ai_kernel/crew.proto`
+       message `chora.ai_kernel.v1.CrewExecuted`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  crewExecuted:
+    address: chora.ai_kernel.crew.executed.v1
+    messages:
+      crewExecuted:
+        $ref: '#/components/messages/CrewExecuted'
+
+operations:
+  publishCrewExecuted:
+    action: send
+    channel:
+      $ref: '#/channels/crewExecuted'
+    messages:
+      - $ref: '#/channels/crewExecuted/messages/crewExecuted'
+
+  consumeCrewExecuted:
+    action: receive
+    channel:
+      $ref: '#/channels/crewExecuted'
+    description: |
+      Consumers: Observability (cost rollup, success-rate KPI),
+      O+ agent performance dashboards.
+    messages:
+      - $ref: '#/channels/crewExecuted/messages/crewExecuted'
+
+components:
+  messages:
+    CrewExecuted:
+      name: CrewExecuted
+      title: Crew Executed
+      summary: An agent crew run has reached a terminal state
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/ai_kernel/crew.proto#/chora.ai_kernel.v1.CrewExecuted'

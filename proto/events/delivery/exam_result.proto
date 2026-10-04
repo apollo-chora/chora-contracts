@@ -1,0 +1,92 @@
+// =============================================================================
+// chora.delivery.v1 — Exam RESULT outcome-event (W4 Exam BC follow-up C)
+// =============================================================================
+//
+// Source-of-truth: ADR-190 D1 ("one event-fed seam out of Delivery" — the
+// Delivery-side outcome-event contract, FK-less, Pub/Sub) +
+// .claude/rules/ddd-enforcement.md + .claude/skills/{coding-protobuf,
+// event-driven,pub-sub-topology}.
+//
+// Owning domain  : Content Delivery (chora_delivery database)
+// Owning team    : Team 2 (Delivery)
+// Topic          : chora.delivery.exam_result.released.v1
+//
+// ExamResultReleased is emitted when a candidate's ExamResult is FINALISED
+// against a revision-pinned, exposure-locked ExamForm (the pure cut-score →
+// PASS/FAIL verdict, services/chora-delivery/internal/domain/exam/examresult.go
+// ExamResultReleased value). The durable exam_results row is the source of
+// truth; this event is the outcome-spine / certificate seam (W6) — the
+// cert-from-exam consumer is unbuilt, so there is no subscriber yet.
+//
+// DISTINCT from chora.delivery.exam.graded.v1 (ExamGraded, exam.proto): that is
+// the seed proctored-exam admin lifecycle keyed by candidate_gcid; THIS is the
+// W4 ExamForm/ExamResult bounded context keyed by candidate_ref + exam_form_id
+// (ADR-190 D2), carrying the exact scoring facts (raw/max/cut) a downstream
+// cert-issuer or per-learner transcript needs.
+//
+// Cross-domain references (no FK — validated over events):
+//   - candidate_ref : opaque UUID of the Candidate (ADR-190 D2, owned elsewhere)
+//   - exam_id / exam_form_id : chora_delivery UUIDs (same DB)
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.delivery.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/delivery/v1;deliveryv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// ExamResultOutcome — the terminal pass/fail verdict. Mirrors the domain
+// exam.Outcome (PASS/FAIL); UNSPECIFIED is the proto3 zero-guard (never emitted).
+enum ExamResultOutcome {
+  EXAM_RESULT_OUTCOME_UNSPECIFIED = 0;
+  EXAM_RESULT_OUTCOME_PASS = 1;
+  EXAM_RESULT_OUTCOME_FAIL = 2;
+}
+
+// -----------------------------------------------------------------------------
+// ExamResultReleased — chora.delivery.exam_result.released.v1
+// -----------------------------------------------------------------------------
+//
+// Topic: chora.delivery.exam_result.released.v1
+//
+// Published when an ExamResult is finalised (ExamForm.Grade). Carries exactly
+// the facts the outcome-spine needs: the durable result id, the exam + form +
+// candidate references, the verdict, and the score triple (raw / max / cut) the
+// verdict was computed on.
+message ExamResultReleased {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 of the durable ExamResult row (the source-of-truth correlation id).
+  string result_id = 2;
+
+  // UUID of the ProctoredExam the form belongs to (same DB, no FK).
+  string exam_id = 3;
+
+  // UUID of the revision-pinned, exposure-locked ExamForm graded against.
+  string exam_form_id = 4;
+
+  // Opaque UUID of the candidate (ADR-190 D2; owned elsewhere, no FK).
+  string candidate_ref = 5;
+
+  // Tenant context (carried on the message in addition to the envelope, mirrors
+  // the sibling delivery outcome events).
+  string tenant_id = 6;
+
+  // Terminal verdict.
+  ExamResultOutcome outcome = 7;
+
+  // Raw score the candidate achieved, in [0, max_score].
+  int32 raw_score = 8;
+
+  // Maximum attainable score the verdict was computed on.
+  int32 max_score = 9;
+
+  // Cut score (pass mark) applied — raw_score >= cut_score ⇒ PASS.
+  int32 cut_score = 10;
+
+  // When the result was scored / finalised (domain event time).
+  google.protobuf.Timestamp scored_at = 11;
+}

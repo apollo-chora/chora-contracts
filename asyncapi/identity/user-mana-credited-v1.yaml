@@ -1,0 +1,67 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Identity — UserManaCredited
+  version: 1.0.0
+  description: |
+    Published when mana is credited to a user's wallet. Sources include
+    subscription grants (onboarding bonus + monthly drip), top-ups,
+    promotional credits, and tenant subsidy allocations claimed.
+
+    Mirrors a `mana_ledger` row one-for-one — idempotency_key in the
+    envelope MUST equal the ledger entry_id for deterministic replay.
+
+    - Domain: Identity (`chora_identity` DB)
+    - Topic: `chora.identity.user_mana.credited.v1`
+    - Source proto: `proto/events/identity/user_mana.proto`
+       message `chora.identity.v1.UserManaCredited`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  userManaCredited:
+    address: chora.identity.user_mana.credited.v1
+    messages:
+      userManaCredited:
+        $ref: '#/components/messages/UserManaCredited'
+
+operations:
+  publishUserManaCredited:
+    action: send
+    channel:
+      $ref: '#/channels/userManaCredited'
+    messages:
+      - $ref: '#/channels/userManaCredited/messages/userManaCredited'
+
+  consumeUserManaCredited:
+    action: receive
+    channel:
+      $ref: '#/channels/userManaCredited'
+    description: |
+      Consumers: Notifications (mana-credited toast + email),
+      Observability (mana flow dashboards), BigQuery streaming
+      (mana_ledger fact table), Tenancy (acknowledge claimed
+      TenantManaAllocation when source_allocation_id present).
+    messages:
+      - $ref: '#/channels/userManaCredited/messages/userManaCredited'
+
+components:
+  messages:
+    UserManaCredited:
+      name: UserManaCredited
+      title: User Mana Credited
+      summary: Mana has been credited to a user's wallet
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/identity/user_mana.proto#/chora.identity.v1.UserManaCredited'

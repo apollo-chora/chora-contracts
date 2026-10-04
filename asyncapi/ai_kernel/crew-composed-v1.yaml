@@ -1,0 +1,61 @@
+asyncapi: 3.0.0
+info:
+  title: Chora AI Kernel — CrewComposed
+  version: 1.0.0
+  description: |
+    Published when the LangGraph orchestrator composes / instantiates a
+    crew for a workflow run.
+
+    - Domain: AI Kernel (`chora_ai_kernel` DB)
+    - Topic: `chora.ai_kernel.crew.composed.v1`
+    - Source proto: `proto/events/ai_kernel/crew.proto`
+       message `chora.ai_kernel.v1.CrewComposed`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  crewComposed:
+    address: chora.ai_kernel.crew.composed.v1
+    messages:
+      crewComposed:
+        $ref: '#/components/messages/CrewComposed'
+
+operations:
+  publishCrewComposed:
+    action: send
+    channel:
+      $ref: '#/channels/crewComposed'
+    messages:
+      - $ref: '#/channels/crewComposed/messages/crewComposed'
+
+  consumeCrewComposed:
+    action: receive
+    channel:
+      $ref: '#/channels/crewComposed'
+    description: |
+      Consumers: Observability (crew lifecycle tracking),
+      O+ agent inspector view, Audit log.
+    messages:
+      - $ref: '#/channels/crewComposed/messages/crewComposed'
+
+components:
+  messages:
+    CrewComposed:
+      name: CrewComposed
+      title: Crew Composed
+      summary: An agent crew has been composed / instantiated
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/ai_kernel/crew.proto#/chora.ai_kernel.v1.CrewComposed'

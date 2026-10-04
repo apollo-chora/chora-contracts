@@ -1,0 +1,85 @@
+asyncapi: "3.0.0"
+info:
+  title: "chora.delivery.campusops.incident_reported.v1"
+  version: "1.0.0"
+  description: |
+    Published when a campus incident is logged (broken equipment, behaviour,
+    safety, IT failure). Drives admin paging + ticket creation.
+    Companion to `proto/events/delivery/campusops.proto` message `IncidentReported`.
+  contact: { name: "Chora Platform Team" }
+  license: { name: "Proprietary" }
+
+defaultContentType: application/x-protobuf
+
+servers:
+  local: { host: "localhost:8085", protocol: googlepubsub, description: "Pub/Sub Emulator" }
+  production: { host: "pubsub.googleapis.com", protocol: googlepubsub, description: "Google Cloud Pub/Sub" }
+
+channels:
+  incidentReported:
+    address: chora.delivery.campusops.incident_reported.v1
+    description: |
+      Carries IncidentReported Protobuf payload.
+
+      Downstream consumers:
+        - chora-notifications : admin paging (severity-routed)
+        - chora-governance    : compliance audit trail
+    messages:
+      incidentReported:
+        $ref: "#/components/messages/IncidentReported"
+
+operations:
+  publishIncidentReported:
+    action: send
+    channel: { $ref: "#/channels/incidentReported" }
+    summary: "Publish IncidentReported"
+    messages: [ { $ref: "#/channels/incidentReported/messages/incidentReported" } ]
+  consumeIncidentReported:
+    action: receive
+    channel: { $ref: "#/channels/incidentReported" }
+    summary: "Consume IncidentReported"
+    messages: [ { $ref: "#/channels/incidentReported/messages/incidentReported" } ]
+
+components:
+  messages:
+    IncidentReported:
+      name: IncidentReported
+      title: "Incident Reported"
+      summary: "A campus incident was logged."
+      contentType: application/x-protobuf
+      payload:
+        type: object
+        description: "Mirrors chora.delivery.v1.IncidentReported."
+        properties:
+          envelope: { $ref: "#/components/schemas/EventEnvelope" }
+          booking_id: { type: string, format: uuid }
+          resource_id: { type: string }
+          course_id: { type: string }
+          starts_at: { type: string, format: date-time }
+          ends_at: { type: string, format: date-time }
+          incident_severity: { $ref: "#/components/schemas/IncidentSeverity" }
+          description: { type: string, maxLength: 1024 }
+          reported_by_gcid: { type: string }
+          reported_at: { type: string, format: date-time }
+  schemas:
+    EventEnvelope:
+      type: object
+      description: "Mirrors chora.common.v1.EventEnvelope."
+      required: [event_id, idempotency_key, tenant_id, occurred_at, published_at, traceparent, source_project, source_service, schema_version]
+      properties:
+        event_id: { type: string, format: uuid }
+        idempotency_key: { type: string }
+        tenant_id: { type: string }
+        gcid: { type: string }
+        occurred_at: { type: string, format: date-time }
+        published_at: { type: string, format: date-time }
+        traceparent: { type: string }
+        tracestate: { type: string }
+        source_project: { type: string }
+        source_service: { type: string }
+        schema_version: { type: integer }
+        correlation_id: { type: string }
+        causation_id: { type: string }
+    IncidentSeverity:
+      type: string
+      enum: [INCIDENT_SEVERITY_UNSPECIFIED, INCIDENT_SEVERITY_LOW, INCIDENT_SEVERITY_MEDIUM, INCIDENT_SEVERITY_HIGH, INCIDENT_SEVERITY_CRITICAL]

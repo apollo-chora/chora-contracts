@@ -1,0 +1,220 @@
+// =============================================================================
+// chora.creation.v1 — Personal Collection domain events (WS-6a, 2026-05-26)
+// =============================================================================
+//
+// Source-of-truth:
+//   - docs/architecture-review-inputs-2026-05-07.md Tier 2 D8 (Pub/Sub +
+//     Protobuf Schema Registry)
+//   - .claude/rules/ddd-enforcement.md (5-core-domain Content {verb} map +
+//     Aggregate Invariants — LearningAtom is the primary aggregate root,
+//     collections QUERY atoms, they NEVER own them)
+//   - chora-contracts/CLAUDE.md §2 topic taxonomy
+//     `chora.{domain}.{aggregate}.{event_type}.v{N}`
+//
+// Owning domain  : Content Creation (chora_creation database)
+// Owning team    : Team 1 (Content)
+// Topic prefix   : chora.creation.collection.*
+// Surface (admin): A+ Creator mode (curated atom lists owned by a
+//                  learner/creator across courses — WS-6a)
+//
+// Aggregate root : Collection (NEW per WS-6a, 2026-05-26)
+//   - Collection.collection_id (UUIDv7, PK)
+//   - Collection holds child CollectionAtom rows that reference LearningAtom
+//     by atom_id (cross-aggregate UUID reference, no FK constraint — per
+//     ddd-enforcement Aggregate Invariant #3, validated via domain service).
+//
+// Collection is a CURATION aggregate: it tracks ordered atom_id references
+// but DOES NOT own atom content. LearningAtom remains the primary aggregate
+// root per CLAUDE.md §1.
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// Tenant scope, GCID, trace context, schema version live in the envelope —
+// payload fields are domain data only.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.creation.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/creation/v1;creationv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// CollectionVisibility — visibility scope of a Collection.
+//
+// PRIVATE         — only the owning learner can read.
+// TENANT_INTERNAL — any GCID in the same tenant can read.
+// PUBLIC          — readable across tenants (the only path that permits
+//                   cross-tenant atom inclusion per BP-01 learner-ownership;
+//                   see CLAUDE.md §5 principle conflict resolution).
+// -----------------------------------------------------------------------------
+enum CollectionVisibility {
+  COLLECTION_VISIBILITY_UNSPECIFIED = 0;
+  COLLECTION_VISIBILITY_PRIVATE = 1;
+  COLLECTION_VISIBILITY_TENANT_INTERNAL = 2;
+  COLLECTION_VISIBILITY_PUBLIC = 3;
+}
+
+// -----------------------------------------------------------------------------
+// CollectionCreated — chora.creation.collection.created.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a learner/creator creates a new personal Collection. At
+// this point no CollectionAtom rows exist yet; atoms are appended via
+// subsequent atom_added events.
+//
+// Consumers: A+/C+ activity feeds, search-index (Meilisearch optional),
+// audit log.
+message CollectionCreated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 identifier of the newly created Collection.
+  string collection_id = 2;
+
+  // GCID (UUIDv7) of the learner/creator who owns the collection.
+  string owner_gcid = 3;
+
+  // Display title (required at the OpenAPI surface; ≤200 chars).
+  string title = 4;
+
+  // Free-text description (optional; ≤2000 chars at the OpenAPI surface).
+  string description = 5;
+
+  // Visibility scope at creation time. Defaults to PRIVATE per ADR-related
+  // learner-ownership invariants.
+  CollectionVisibility visibility = 6;
+
+  // When the collection was created in the producer's domain database.
+  google.protobuf.Timestamp created_at = 7;
+}
+
+// -----------------------------------------------------------------------------
+// CollectionUpdated — chora.creation.collection.updated.v1
+// -----------------------------------------------------------------------------
+//
+// Published when collection-level metadata changes (title / description /
+// visibility). Atom membership changes do NOT use this event — they emit
+// atom_added.v1 / atom_removed.v1 below.
+message CollectionUpdated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string collection_id = 2;
+  string owner_gcid = 3;
+  string title = 4;
+  string description = 5;
+  CollectionVisibility visibility = 6;
+
+  // Names of metadata fields that were modified (e.g., ["title", "visibility"]).
+  // Allows downstream consumers to filter relevant changes without diffing.
+  repeated string changed_fields = 7;
+
+  google.protobuf.Timestamp updated_at = 8;
+}
+
+// -----------------------------------------------------------------------------
+// CollectionAtomAdded — chora.creation.collection.atom_added.v1
+// -----------------------------------------------------------------------------
+//
+// Published when an atom is appended to a Collection. Position is the
+// 0-based ordering slot within the collection (clients render in
+// ascending position order).
+//
+// Cross-tenant atom inclusion is permitted ONLY when the Collection's
+// visibility is PUBLIC (per BP-01 learner-ownership; see CLAUDE.md §5).
+// The domain service validates this invariant before persisting.
+message CollectionAtomAdded {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string collection_id = 2;
+  string owner_gcid = 3;
+
+  // UUIDv7 of the referenced LearningAtom (cross-aggregate UUID reference
+  // per ddd-enforcement Aggregate Invariant #3 — validated via domain
+  // service against learning_atoms in the same chora_creation database;
+  // NOT a FK constraint).
+  string atom_id = 4;
+
+  // 0-based ordering slot within the collection at the time of insertion.
+  int32 position = 5;
+
+  // When the atom was added to the collection.
+  google.protobuf.Timestamp added_at = 6;
+}
+
+// -----------------------------------------------------------------------------
+// CollectionAtomRemoved — chora.creation.collection.atom_removed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when an atom is removed from a Collection. The LearningAtom
+// itself is NOT affected (CollectionAtom is a curation row, not an atom
+// owner per .claude/rules/ddd-enforcement.md).
+message CollectionAtomRemoved {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string collection_id = 2;
+  string owner_gcid = 3;
+  string atom_id = 4;
+
+  google.protobuf.Timestamp removed_at = 5;
+}
+
+// -----------------------------------------------------------------------------
+// CollectionDeleted — chora.creation.collection.deleted.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a Collection is soft-deleted (deleted_at set). Per
+// ddd-enforcement aggregate invariant #5, this is NEVER a hard delete.
+// Consumers must remove the collection from active queries (default
+// `WHERE deleted_at IS NULL` filter) but preserve audit trail.
+//
+// CollectionAtom child rows are cascade-soft-deleted with the parent
+// (within-aggregate cascade per ddd-enforcement #8). The cascade is a
+// repository-layer operation — it does NOT emit per-row atom_removed
+// events.
+message CollectionDeleted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string collection_id = 2;
+  string owner_gcid = 3;
+
+  // GCID of the actor who deleted the collection (typically the owner;
+  // platform admins may delete via entitled roles in later milestones).
+  string deleted_by_gcid = 4;
+
+  google.protobuf.Timestamp deleted_at = 5;
+}
+
+// -----------------------------------------------------------------------------
+// CollectionConvertedToStudyList — chora.creation.collection.converted_to_study_list.v1
+// -----------------------------------------------------------------------------
+//
+// Atom Sharing Redesign (feat/atom-sharing-redesign) — R-11/R-17.
+//
+// Published when a collection owner converts their Collection into a
+// spaced-repetition study list. chora-creation OWNS the Collection aggregate
+// (shipped bff-gateway.yaml /api/v1/collections contract), so chora-creation
+// owns this conversion transition + event — a domain only publishes events for
+// its OWN aggregates. chora-sharing publishes NO collection events.
+//
+// Consumer: chora-consumption — receives this event and builds a LearningPath
+// from the collection's atoms. NO cross-DB read: the atom_ids[] are carried
+// in the event payload. Idempotent on study_list_event_id.
+//
+// Topic: chora.creation.collection.converted_to_study_list.v1
+message CollectionConvertedToStudyList {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string collection_id = 2;
+
+  string owner_gcid = 3;
+
+  // The collection's atoms to seed the study list with (cross-aggregate UUID
+  // references; no FK). Order is preserved from the collection.
+  repeated string atom_ids = 4;
+
+  // Idempotency key for the consumption-side LearningPath creation. = the
+  // event_id of this event by default; consumption dedups on this.
+  string study_list_event_id = 5;
+}

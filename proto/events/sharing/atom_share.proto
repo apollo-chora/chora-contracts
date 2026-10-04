@@ -1,0 +1,174 @@
+// =============================================================================
+// Chora Content Sharing — Shared-Atom Feed events (Atom Sharing Redesign)
+// =============================================================================
+//
+// Source-of-truth:
+//   - docs/design/atom-sharing-redesign/chora-sharing-full-design.md §4.1 + App B
+//   - specs/001-atom-sharing-redesign/contracts/events-flat.md (T002)
+//   - .claude/rules/ddd-enforcement.md (Atom-Centric; collections/refs are
+//     UUID with no FK — validated via Pub/Sub + gRPC)
+//   - chora-contracts/CLAUDE.md §2 topic taxonomy
+//
+// Owning domain  : Content Sharing (chora_sharing database)
+// Owning team    : Team 1 (Content)
+// Topic prefix   : chora.sharing.atom_share.*  (hide/revoke/price-change
+//                  audit) + chora.sharing.atom.shared.v1 (the share itself)
+// Surface        : C+ Connect+
+//
+// Aggregate root : the existing immutable share Post (social_feed_entries,
+//                  entry_type='share', migration 0019). R-15-A: this feature
+//                  extends that Post with license_terms + royalty_rate in its
+//                  content JSONB. NO new SharedAtomEntry aggregate; NO new
+//                  feed_entry_type enum value (reuse 'share', R-16).
+//
+// R1 (author stays the original): author_gcid == projection.owner_gcid,
+//   enforced at share time; author_display_name is a denormalised snapshot.
+// R2 (author decides licensing per atom): LicenseTerms governs reuse
+//   everywhere; snapshotted onto each grant at grant time (see grant.proto).
+//
+// social_feed_entries is IMMUTABLE → hide/revoke/price-change are emitted as
+// events (and appended to atom_share_events) but NEVER mutate the entry.
+// The read-side status (visible/hidden_by_author/moderation_hidden/revoked)
+// is a derived projection over these events.
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.sharing.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/sharing/v1;sharingv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// LicenseTerms — per-atom licensing (R2). MUST stay in sync with the
+// LicenseTerms enum in proto/services/sharing/v1/sharing.proto (same names +
+// ordinals). Inlined into each flat event proto by protoflatten.
+// -----------------------------------------------------------------------------
+enum LicenseTerms {
+  LICENSE_TERMS_UNSPECIFIED = 0;
+  LICENSE_TERMS_FREE = 1;          // free + attribution (≈ CC BY)
+  LICENSE_TERMS_ROYALTY_PCT = 2;   // paid reuse, revenue-share %
+  LICENSE_TERMS_ROYALTY_FIXED = 3; // paid reuse, fixed per-use fee
+  LICENSE_TERMS_CC_BY_SA = 4;      // free + attribution + share-alike
+  LICENSE_TERMS_CC_ND = 5;         // free + attribution + no-derivatives
+}
+
+// RoyaltyRate — the per-atom royalty terms. Inlined into each flat event
+// proto by protoflatten where referenced.
+message RoyaltyRate {
+  // "pct" (revenue-share percentage, 0..100) | "fixed_per_use" (flat fee).
+  string kind = 1;
+  double value = 2;
+}
+
+// -----------------------------------------------------------------------------
+// AtomShared — chora.sharing.atom.shared.v1
+// -----------------------------------------------------------------------------
+//
+// Published when an author shares their own atom to the feed (R1 enforced:
+// author_gcid == projection.owner_gcid). The share Post itself is the
+// immutable social_feed_entries row (entry_type='share'); this event is the
+// cross-domain notification. Consumers: C+ feed renderer, Notifications,
+// Observability.
+//
+// Topic: chora.sharing.atom.shared.v1
+message AtomShared {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // = social_feed_entries.id (the immutable share Post).
+  string share_entry_id = 2;
+
+  // The AUTHOR of record (R1). = envelope.gcid.
+  string author_gcid = 3;
+
+  // Denormalised snapshot at share time (R1 — "by {author}").
+  string author_display_name = 4;
+
+  // Cross-domain UUID (no FK → chora_creation).
+  string atom_id = 5;
+
+  // Pinned revision at share time (immutable).
+  string atom_revision_id = 6;
+
+  // 0..512 chars.
+  string caption = 7;
+
+  // Per-atom licensing (R2).
+  LicenseTerms license_terms = 8;
+
+  // REQUIRED iff license_terms ∈ {ROYALTY_PCT, ROYALTY_FIXED}.
+  RoyaltyRate royalty_rate = 9;
+}
+
+// -----------------------------------------------------------------------------
+// AtomSharePriceChanged — chora.sharing.atom_share.price_changed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when the author changes the license/price of an already-shared
+// atom. The immutable share Post is NOT mutated; this event records the new
+// terms (and an atom_share_events row is appended). CRITICAL (R1/R2):
+// existing grants keep their frozen snapshot — the price change affects only
+// FUTURE grants.
+//
+// Topic: chora.sharing.atom_share.price_changed.v1
+message AtomSharePriceChanged {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string share_entry_id = 2;
+
+  // The new license terms going forward.
+  LicenseTerms new_license_terms = 3;
+
+  RoyaltyRate new_royalty_rate = 4;
+
+  // = envelope.gcid (MUST be the author).
+  string changed_by_gcid = 5;
+
+  google.protobuf.Timestamp changed_at = 6;
+}
+
+// -----------------------------------------------------------------------------
+// AtomShareHidden — chora.sharing.atom_share.hidden.v1
+// -----------------------------------------------------------------------------
+//
+// Published when an author hides their share (tombstone + read-side flag;
+// the immutable entry is NEVER mutated). The atom itself is unaffected.
+//
+// Topic: chora.sharing.atom_share.hidden.v1
+message AtomShareHidden {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string share_entry_id = 2;
+
+  // = envelope.gcid (the author).
+  string hidden_by_gcid = 3;
+
+  string reason = 4;
+}
+
+// -----------------------------------------------------------------------------
+// AtomShareRevoked — chora.sharing.atom_share.revoked.v1
+// -----------------------------------------------------------------------------
+//
+// Published when an author revokes a share (terminal read-side status) OR
+// when the underlying atom is withdrawn (creation.atom.withdrawn → revoke
+// all shares for that atom). Existing grants are invalidated. The immutable
+// entry is NEVER mutated.
+//
+// Topic: chora.sharing.atom_share.revoked.v1
+message AtomShareRevoked {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string share_entry_id = 2;
+
+  string atom_id = 3;
+
+  // = envelope.gcid (the author; or system for atom-withdrawn).
+  string revoked_by_gcid = 4;
+
+  string reason = 5;
+}

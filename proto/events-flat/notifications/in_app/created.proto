@@ -1,0 +1,60 @@
+// =============================================================================
+// GENERATED — DO NOT EDIT.
+// Source : events/notifications/in_app.proto message InAppNotificationCreated
+// Tool   : chora-contracts/internal/protoflatten
+// Why    : GCP Pub/Sub Schema Registry rejects (a) schemas with `import`
+//          statements and (b) schemas with more than one top-level message.
+//          This flat copy contains exactly ONE top-level message;
+//          EventEnvelope + Timestamp + transitive deps are nested inside.
+// Path C : see chora-contracts/CHANGELOG.md and m10-data-plane main.tf.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.notifications.v1;
+
+message InAppNotificationCreated {
+  // Inlined chora.common.v1.EventEnvelope (nested for self-contained schema).
+  message Envelope {
+    string event_id = 1;
+    string idempotency_key = 2;
+    string tenant_id = 3;
+    string gcid = 4;
+    Timestamp occurred_at = 5;
+    Timestamp published_at = 6;
+    string traceparent = 7;
+    string tracestate = 8;
+    string source_project = 9;
+    string source_service = 10;
+    int32 schema_version = 11;
+    string correlation_id = 12;
+    string causation_id = 13;
+    string chora_imda_dimension = 14;
+    string imda_lifecycle_stage = 15;
+  }
+
+  // Inlined google.protobuf.Timestamp (nested; wire-compatible).
+  message Timestamp {
+    int64 seconds = 1;
+    int32 nanos = 2;
+  }
+
+  // Inlined enum dep: InAppKind
+  enum InAppKind {
+    IN_APP_KIND_UNSPECIFIED = 0;
+    IN_APP_KIND_SOCIAL = 1;
+    IN_APP_KIND_ACADEMIC = 2;
+    IN_APP_KIND_SYSTEM = 3;
+    IN_APP_KIND_BILLING = 4;
+    IN_APP_KIND_GOVERNANCE = 5;
+  }
+
+  Envelope envelope = 1;
+  string notif_id = 2;
+  string recipient_gcid = 3;
+  InAppKind kind = 4;
+  string title = 5;
+  string body = 6;
+  string deeplink = 7;
+  Timestamp created_at = 8;
+}

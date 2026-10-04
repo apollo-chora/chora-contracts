@@ -1,0 +1,63 @@
+asyncapi: "3.0.0"
+info:
+  title: "Chora Content Sharing — leaderboard.updated.v1"
+  version: "1.0.0"
+  description: |
+    Published when the top-N snapshot of a Leaderboard changes. Producer
+    debounces — at most one event per leaderboard per minute under normal
+    load. Top-N width is 50 by default.
+
+    Owning team   : Team 1 (Content)
+    Owning domain : Content Sharing (chora_sharing database)
+    Surface       : C+ Connect+
+  contact:
+    name: "Chora Platform Team — Content Track"
+  license:
+    name: "Proprietary"
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  production:
+    host: "pubsub.googleapis.com"
+    protocol: googlepubsub
+    description: "Google Cloud Pub/Sub (production)"
+  emulator:
+    host: "localhost:8085"
+    protocol: googlepubsub
+    description: "Cloud Pub/Sub Emulator (local dev)"
+
+channels:
+  leaderboardUpdated:
+    address: "chora.sharing.leaderboard.updated.v1"
+    messages:
+      leaderboardUpdated:
+        $ref: "#/components/messages/LeaderboardUpdated"
+
+operations:
+  publishLeaderboardUpdated:
+    action: send
+    channel:
+      $ref: "#/channels/leaderboardUpdated"
+    summary: "Publish a Leaderboard update event"
+    description: |
+      Producer: chora-sharing (rank-recomputation worker).
+      Consumers: C+ feed renderer,
+                 Notifications (rank-change nudges, top-N entries),
+                 Observability.
+    messages:
+      - $ref: "#/channels/leaderboardUpdated/messages/leaderboardUpdated"
+
+components:
+  messages:
+    LeaderboardUpdated:
+      name: "LeaderboardUpdated"
+      title: "Leaderboard Updated"
+      summary: "A Leaderboard top-N snapshot changed"
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf;version=3
+      payload:
+        schemaFormat: "application/vnd.google.protobuf;version=3"
+        schema:
+          protoFile: "proto/events/sharing/leaderboard.proto"
+          messageName: "chora.sharing.v1.LeaderboardUpdated"

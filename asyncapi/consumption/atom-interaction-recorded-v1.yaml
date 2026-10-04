@@ -1,0 +1,70 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Content Consumption — AtomInteractionRecorded
+  version: 1.0.0
+  description: |
+    Published for each discrete interaction within an `AtomicSession`
+    (e.g., option selected, hint requested, draft submitted).
+
+    - Domain: Content Consumption (`chora_consumption` DB)
+    - Aggregate root: `AtomicSession` (interaction is a child entity)
+    - Topic: `chora.consumption.session.atom_interaction_recorded.v1`
+    - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
+    - Source proto: `proto/events/consumption/session.proto`
+       message `chora.consumption.v1.AtomInteractionRecorded`
+
+    Embeds the mandatory `chora.common.v1.EventEnvelope` as field 1.
+  contact:
+    name: Chora Platform Team (Team 3) + Team 1 (Content)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+    description: Google Cloud Pub/Sub (chora-489812 platform host)
+
+channels:
+  atomInteractionRecorded:
+    address: chora.consumption.session.atom_interaction_recorded.v1
+    description: Single-event topic for AtomInteractionRecorded.
+    messages:
+      atomInteractionRecorded:
+        $ref: '#/components/messages/AtomInteractionRecorded'
+
+operations:
+  publishAtomInteractionRecorded:
+    action: send
+    channel:
+      $ref: '#/channels/atomInteractionRecorded'
+    summary: Publish an AtomInteractionRecorded event
+    messages:
+      - $ref: '#/channels/atomInteractionRecorded/messages/atomInteractionRecorded'
+
+  consumeAtomInteractionRecorded:
+    action: receive
+    channel:
+      $ref: '#/channels/atomInteractionRecorded'
+    summary: Subscribe to AtomInteractionRecorded events
+    description: |
+      Primary consumers:
+      - AI Kernel — RAG memory enrichment for Companion persona
+      - Observability — interaction-level analytics + dwell-time
+    messages:
+      - $ref: '#/channels/atomInteractionRecorded/messages/atomInteractionRecorded'
+
+components:
+  messages:
+    AtomInteractionRecorded:
+      name: AtomInteractionRecorded
+      title: Atom Interaction Recorded
+      summary: A learner interaction with an atom was recorded inside an AtomicSession
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/consumption/session.proto#/chora.consumption.v1.AtomInteractionRecorded'

@@ -1,0 +1,61 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Payments — ApplicationPaymentCheckoutStarted
+  version: 1.0.0
+  description: |
+    chora-payments created a Stripe Checkout Session for the
+    Singpass+SkillsFuture-mediated course application payment. Replaces the
+    legacy chora-tenancy billing-webhook ingress for this flow.
+
+    - Domain: Payments (`chora_payments` DB)
+    - Topic: `chora.payments.application_payment.checkout_started.v1`
+    - Source proto: `proto/events/payments/application_payment.proto`
+       message `chora.payments.v1.ApplicationPaymentCheckoutStarted`
+    - Aggregate: ApplicationPayment
+    - Per ADR-164 (chora-payments service + 13th DB).
+    - IMDA: envelope.chora_imda_dimension = "accountability"
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  applicationPaymentCheckoutStarted:
+    address: chora.payments.application_payment.checkout_started.v1
+    messages:
+      applicationPaymentCheckoutStarted:
+        $ref: '#/components/messages/ApplicationPaymentCheckoutStarted'
+
+operations:
+  publishApplicationPaymentCheckoutStarted:
+    action: send
+    channel:
+      $ref: '#/channels/applicationPaymentCheckoutStarted'
+    messages:
+      - $ref: '#/channels/applicationPaymentCheckoutStarted/messages/applicationPaymentCheckoutStarted'
+
+  consumeApplicationPaymentCheckoutStarted:
+    action: receive
+    channel:
+      $ref: '#/channels/applicationPaymentCheckoutStarted'
+    messages:
+      - $ref: '#/channels/applicationPaymentCheckoutStarted/messages/applicationPaymentCheckoutStarted'
+
+components:
+  messages:
+    ApplicationPaymentCheckoutStarted:
+      name: ApplicationPaymentCheckoutStarted
+      title: Stripe Checkout Session created for a course application
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/payments/application_payment.proto#/chora.payments.v1.ApplicationPaymentCheckoutStarted'

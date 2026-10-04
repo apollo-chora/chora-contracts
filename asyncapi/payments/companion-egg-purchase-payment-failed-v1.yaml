@@ -1,0 +1,60 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Payments — CompanionEggPurchasePaymentFailed
+  version: 1.0.0
+  description: |
+    Stripe payment failed — chora-tenancy closes the in-progress
+    purchase. No Companion provisioning.
+
+    - Domain: Payments (`chora_payments` DB)
+    - Topic: `chora.payments.companion_egg_purchase.payment_failed.v1`
+    - Source proto: `proto/events/payments/companion_egg_purchase.proto`
+       message `chora.payments.v1.CompanionEggPurchasePaymentFailed`
+    - Aggregate: CompanionEggPurchase
+    - Per ADR-164 (chora-payments service + 13th DB).
+    - IMDA: envelope.chora_imda_dimension = "accountability"
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  companionEggPurchasePaymentFailed:
+    address: chora.payments.companion_egg_purchase.payment_failed.v1
+    messages:
+      companionEggPurchasePaymentFailed:
+        $ref: '#/components/messages/CompanionEggPurchasePaymentFailed'
+
+operations:
+  publishCompanionEggPurchasePaymentFailed:
+    action: send
+    channel:
+      $ref: '#/channels/companionEggPurchasePaymentFailed'
+    messages:
+      - $ref: '#/channels/companionEggPurchasePaymentFailed/messages/companionEggPurchasePaymentFailed'
+
+  consumeCompanionEggPurchasePaymentFailed:
+    action: receive
+    channel:
+      $ref: '#/channels/companionEggPurchasePaymentFailed'
+    messages:
+      - $ref: '#/channels/companionEggPurchasePaymentFailed/messages/companionEggPurchasePaymentFailed'
+
+components:
+  messages:
+    CompanionEggPurchasePaymentFailed:
+      name: CompanionEggPurchasePaymentFailed
+      title: Stripe reported a payment failure for a Companion-egg purchase
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/payments/companion_egg_purchase.proto#/chora.payments.v1.CompanionEggPurchasePaymentFailed'

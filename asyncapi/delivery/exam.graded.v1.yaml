@@ -1,0 +1,88 @@
+asyncapi: "3.0.0"
+info:
+  title: "chora.delivery.exam.graded.v1"
+  version: "1.0.0"
+  description: |
+    Published when the exam is graded. Drives Certification issuance flow
+    (on PASS_FAIL_PASS) + Consumption path completion.
+    Companion to `proto/events/delivery/exam.proto` message `ExamGraded`.
+  contact: { name: "Chora Platform Team" }
+  license: { name: "Proprietary" }
+
+defaultContentType: application/x-protobuf
+
+servers:
+  local: { host: "localhost:8085", protocol: googlepubsub, description: "Pub/Sub Emulator" }
+  production: { host: "pubsub.googleapis.com", protocol: googlepubsub, description: "Google Cloud Pub/Sub" }
+
+channels:
+  examGraded:
+    address: chora.delivery.exam.graded.v1
+    description: |
+      Carries ExamGraded Protobuf payload.
+
+      Downstream consumers:
+        - chora-delivery (cert issuer) : trigger cert flow on pass
+        - chora-consumption            : path completion
+        - chora-notifications          : result email
+    messages:
+      examGraded:
+        $ref: "#/components/messages/ExamGraded"
+
+operations:
+  publishExamGraded:
+    action: send
+    channel: { $ref: "#/channels/examGraded" }
+    summary: "Publish ExamGraded"
+    messages: [ { $ref: "#/channels/examGraded/messages/examGraded" } ]
+  consumeExamGraded:
+    action: receive
+    channel: { $ref: "#/channels/examGraded" }
+    summary: "Consume ExamGraded"
+    messages: [ { $ref: "#/channels/examGraded/messages/examGraded" } ]
+
+components:
+  messages:
+    ExamGraded:
+      name: ExamGraded
+      title: "Exam Graded"
+      summary: "An exam was graded."
+      contentType: application/x-protobuf
+      payload:
+        type: object
+        description: "Mirrors chora.delivery.v1.ExamGraded."
+        properties:
+          envelope: { $ref: "#/components/schemas/EventEnvelope" }
+          exam_id: { type: string, format: uuid }
+          course_id: { type: string, format: uuid }
+          candidate_gcid: { type: string }
+          scheduled_for: { type: string, format: date-time }
+          proctor_method: { $ref: "#/components/schemas/ProctorMethod" }
+          score: { type: integer, minimum: 0, maximum: 100 }
+          pass_fail: { $ref: "#/components/schemas/PassFail" }
+          graded_at: { type: string, format: date-time }
+  schemas:
+    EventEnvelope:
+      type: object
+      description: "Mirrors chora.common.v1.EventEnvelope."
+      required: [event_id, idempotency_key, tenant_id, occurred_at, published_at, traceparent, source_project, source_service, schema_version]
+      properties:
+        event_id: { type: string, format: uuid }
+        idempotency_key: { type: string }
+        tenant_id: { type: string }
+        gcid: { type: string }
+        occurred_at: { type: string, format: date-time }
+        published_at: { type: string, format: date-time }
+        traceparent: { type: string }
+        tracestate: { type: string }
+        source_project: { type: string }
+        source_service: { type: string }
+        schema_version: { type: integer }
+        correlation_id: { type: string }
+        causation_id: { type: string }
+    ProctorMethod:
+      type: string
+      enum: [PROCTOR_METHOD_UNSPECIFIED, PROCTOR_METHOD_NONE, PROCTOR_METHOD_AUTO_AI, PROCTOR_METHOD_HUMAN_LIVE, PROCTOR_METHOD_HUMAN_RECORDED]
+    PassFail:
+      type: string
+      enum: [PASS_FAIL_UNSPECIFIED, PASS_FAIL_PASS, PASS_FAIL_FAIL]

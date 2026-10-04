@@ -1,0 +1,67 @@
+asyncapi: 3.0.0
+info:
+  title: Chora AI Kernel — ClosureSagaPseudonymizationOrchestrated [DEPRECATED v2.0]
+  version: 1.0.0
+  description: |
+    **DEPRECATED v2.0** — Replaced by
+    `chora.closure.pseudonymise_per_domain_complete.v1`. See
+    `asyncapi/closure/pseudonymise-per-domain-complete-v1.yaml`.
+
+    Original purpose: published when ALL participating domains have completed
+    their pseudonymisation steps. Marks the SUSPENDED -> PSEUDONYMIZED
+    transition for the AccountLifecycleChanged event in chora_identity.
+
+    - Domain: AI Kernel (`chora_ai_kernel` DB)
+    - Topic (deprecated): `chora.ai_kernel.closure_orchestrator.pseudonymization_orchestrated.v1`
+    - Canonical replacement: `chora.closure.pseudonymise_per_domain_complete.v1`
+    - Source proto: `proto/events/ai_kernel/closure_orchestrator.proto`
+       message `chora.ai_kernel.v1.ClosureSagaPseudonymizationOrchestrated`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  closureSagaPseudonymizationOrchestrated:
+    address: chora.ai_kernel.closure_orchestrator.pseudonymization_orchestrated.v1
+    messages:
+      closureSagaPseudonymizationOrchestrated:
+        $ref: '#/components/messages/ClosureSagaPseudonymizationOrchestrated'
+
+operations:
+  publishClosureSagaPseudonymizationOrchestrated:
+    action: send
+    channel:
+      $ref: '#/channels/closureSagaPseudonymizationOrchestrated'
+    messages:
+      - $ref: '#/channels/closureSagaPseudonymizationOrchestrated/messages/closureSagaPseudonymizationOrchestrated'
+
+  consumeClosureSagaPseudonymizationOrchestrated:
+    action: receive
+    channel:
+      $ref: '#/channels/closureSagaPseudonymizationOrchestrated'
+    description: |
+      Consumers: Identity (advance AccountLifecycleChanged to PSEUDONYMIZED),
+      Governance (audit + IMDA evidence), Observability.
+    messages:
+      - $ref: '#/channels/closureSagaPseudonymizationOrchestrated/messages/closureSagaPseudonymizationOrchestrated'
+
+components:
+  messages:
+    ClosureSagaPseudonymizationOrchestrated:
+      name: ClosureSagaPseudonymizationOrchestrated
+      title: Closure Saga Pseudonymization Orchestrated
+      summary: Federated pseudonymisation across all domains has completed
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/ai_kernel/closure_orchestrator.proto#/chora.ai_kernel.v1.ClosureSagaPseudonymizationOrchestrated'

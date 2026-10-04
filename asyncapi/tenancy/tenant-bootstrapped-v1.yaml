@@ -1,0 +1,70 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Tenancy — TenantBootstrapped
+  version: 1.0.0
+  description: |
+    Published by chora-tenancy when a caller self-onboards via
+    `POST /api/v1/tenants/bootstrap` (CHO-1628). Emitted from the same
+    Postgres transaction that writes the new tenant, owner member, and
+    `core` add-on subscription — at-least-once delivery via the outbox
+    dispatcher → Cloud Pub/Sub.
+
+    Sole consumer (Phase 2): chora-identity, which inserts a mirror row
+    into `chora_identity.tenant_memberships` so the BFF session-mint
+    can discover the bootstrapped tenant. Other downstream domains
+    (Notifications, Observability) MAY subscribe later — additive.
+
+    - Domain: Tenancy (`chora_tenancy` DB)
+    - Topic: `chora.tenancy.tenant.bootstrapped.v1`
+    - Source proto: `proto/events/tenancy/tenant_bootstrapped.proto`
+       message `chora.tenancy.v1.TenantBootstrapped`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  tenantBootstrapped:
+    address: chora.tenancy.tenant.bootstrapped.v1
+    messages:
+      tenantBootstrapped:
+        $ref: '#/components/messages/TenantBootstrapped'
+
+operations:
+  publishTenantBootstrapped:
+    action: send
+    channel:
+      $ref: '#/channels/tenantBootstrapped'
+    messages:
+      - $ref: '#/channels/tenantBootstrapped/messages/tenantBootstrapped'
+
+  consumeTenantBootstrapped:
+    action: receive
+    channel:
+      $ref: '#/channels/tenantBootstrapped'
+    description: |
+      Consumers: chora-identity (mirror tenant_memberships row);
+      Notifications (welcome email — future); Observability (audit
+      timeline — future).
+    messages:
+      - $ref: '#/channels/tenantBootstrapped/messages/tenantBootstrapped'
+
+components:
+  messages:
+    TenantBootstrapped:
+      name: TenantBootstrapped
+      title: Tenant Bootstrapped
+      summary: A caller self-onboarded and now owns a fresh tenant
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/tenancy/tenant_bootstrapped.proto#/chora.tenancy.v1.TenantBootstrapped'

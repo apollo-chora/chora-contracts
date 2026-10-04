@@ -1,0 +1,61 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Notifications — EmailQueued
+  version: 1.0.0
+  description: |
+    Published when an email is enqueued for SendGrid delivery
+    (transactional outbox).
+
+    - Domain: Notifications (`chora_notifications` DB)
+    - Topic: `chora.notifications.email.queued.v1`
+    - Source proto: `proto/events/notifications/email.proto`
+       message `chora.notifications.v1.EmailQueued`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  emailQueued:
+    address: chora.notifications.email.queued.v1
+    messages:
+      emailQueued:
+        $ref: '#/components/messages/EmailQueued'
+
+operations:
+  publishEmailQueued:
+    action: send
+    channel:
+      $ref: '#/channels/emailQueued'
+    messages:
+      - $ref: '#/channels/emailQueued/messages/emailQueued'
+
+  consumeEmailQueued:
+    action: receive
+    channel:
+      $ref: '#/channels/emailQueued'
+    description: |
+      Consumers: Notifications email sender (SendGrid dispatcher),
+      Observability (queue depth tracking).
+    messages:
+      - $ref: '#/channels/emailQueued/messages/emailQueued'
+
+components:
+  messages:
+    EmailQueued:
+      name: EmailQueued
+      title: Email Queued
+      summary: An email has been enqueued for SendGrid delivery
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/notifications/email.proto#/chora.notifications.v1.EmailQueued'

@@ -1,0 +1,74 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Content Consumption — SessionCompleted
+  version: 1.0.0
+  description: |
+    Published when an `AtomicSession` ends with a final outcome.
+
+    - Domain: Content Consumption (`chora_consumption` DB)
+    - Aggregate root: `AtomicSession`
+    - Topic: `chora.consumption.session.completed.v1`
+    - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
+    - Source proto: `proto/events/consumption/session.proto`
+       message `chora.consumption.v1.SessionCompleted`
+
+    Use the **transactional outbox** pattern when this event triggers a
+    downstream XP award — see `transactional-outbox` skill + `data-consistency`.
+
+    Embeds the mandatory `chora.common.v1.EventEnvelope` as field 1.
+  contact:
+    name: Chora Platform Team (Team 3) + Team 1 (Content)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+    description: Google Cloud Pub/Sub (chora-489812 platform host)
+
+channels:
+  sessionCompleted:
+    address: chora.consumption.session.completed.v1
+    description: Single-event topic for SessionCompleted.
+    messages:
+      sessionCompleted:
+        $ref: '#/components/messages/SessionCompleted'
+
+operations:
+  publishSessionCompleted:
+    action: send
+    channel:
+      $ref: '#/channels/sessionCompleted'
+    summary: Publish a SessionCompleted event
+    messages:
+      - $ref: '#/channels/sessionCompleted/messages/sessionCompleted'
+
+  consumeSessionCompleted:
+    action: receive
+    channel:
+      $ref: '#/channels/sessionCompleted'
+    summary: Subscribe to SessionCompleted events
+    description: |
+      Primary consumers:
+      - Sharing — XP / streak / combo award (atomic via outbox)
+      - Delivery — certification progress accrual
+      - Notifications — completion summary
+      - Observability — completion-rate analytics
+    messages:
+      - $ref: '#/channels/sessionCompleted/messages/sessionCompleted'
+
+components:
+  messages:
+    SessionCompleted:
+      name: SessionCompleted
+      title: Session Completed
+      summary: An AtomicSession finished with a final outcome
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/consumption/session.proto#/chora.consumption.v1.SessionCompleted'

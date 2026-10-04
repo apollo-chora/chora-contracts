@@ -1,0 +1,174 @@
+// =============================================================================
+// Chora Closure Orchestrator Service (gRPC)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 3 D11
+//   + .claude/rules/ddd-enforcement.md ("Account Closure (federated saga)")
+//   + .claude/skills/account-closure-saga/SKILL.md
+//
+// Federated PII closure saga coordinator. NEVER hard-deletes — pseudonymises
+// + crypto-shreds. Preserves FK integrity + audit trail + GDPR Art. 17.
+//
+// 5-state machine (per ddd-enforcement):
+//   ACTIVE → CLOSING (grace) → SUSPENDED → PSEUDONYMIZED →
+//          COLD_ARCHIVED → CRYPTO_SHREDDED
+//
+// Saga state lives in chora_identity (Platform-owned). Per-domain
+// pseudonymisation is triggered via Pub/Sub events (each domain owns its
+// PII_Closure_Map.yaml declaring fields-to-tokenize, retention rules,
+// on-creator-closure behaviour).
+//
+// CMEK per-tenant master key + per-user DEK; deleting DEK = crypto-shred
+// (data unrecoverable).
+//
+// This service exposes the synchronous control plane (start saga, query
+// state, fan-out triggers). The actual per-domain work runs asynchronously
+// via Pub/Sub events emitted by this service.
+//
+// Deployed in chora-489812 team-platform; Team 3 (Platform) owned.
+// mTLS via Cloud Service Mesh; SPIFFE identity in mesh.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.services.closure_orchestrator.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/closure_orchestrator/v1;closure_orchestratorv1";
+
+import "google/protobuf/timestamp.proto";
+
+// -----------------------------------------------------------------------------
+// Service
+// -----------------------------------------------------------------------------
+
+service ClosureOrchestrator {
+  // Begin a closure saga for a GCID. Initial state = CLOSING (grace period).
+  // Idempotent on (gcid) — repeated calls return the existing saga.
+  rpc StartClosure(StartClosureRequest) returns (StartClosureResponse);
+
+  // Read current saga state. Lookup by saga_id OR by gcid (oneof).
+  rpc GetSagaState(GetSagaStateRequest) returns (GetSagaStateResponse);
+
+  // Fan out the pseudonymisation step to all domains via Pub/Sub. Each domain
+  // executes its PII_Closure_Map.yaml asynchronously and acks back via event.
+  // Synchronously returns the dispatch result; per-domain completion is
+  // observed via GetSagaState (per_domain_completion_map).
+  rpc OrchestratePseudonymize(OrchestrateRequest) returns (OrchestrateResponse);
+
+  // Fan out the crypto-shred step (delete per-user DEK + cold-archive purge)
+  // to all domains via Pub/Sub. Same async + Pub/Sub pattern as Pseudonymize.
+  rpc OrchestrateCryptoShred(OrchestrateRequest) returns (OrchestrateResponse);
+}
+
+// -----------------------------------------------------------------------------
+// Lifecycle state — mirrors Identity domain Account lifecycle
+// -----------------------------------------------------------------------------
+
+enum LifecycleState {
+  LIFECYCLE_STATE_UNSPECIFIED = 0;
+  LIFECYCLE_STATE_ACTIVE = 1;
+  LIFECYCLE_STATE_CLOSING = 2;          // grace period (default 30 days)
+  LIFECYCLE_STATE_SUSPENDED = 3;        // grace ended; user cannot reactivate
+  LIFECYCLE_STATE_PSEUDONYMIZED = 4;    // PII tokenised across all domains
+  LIFECYCLE_STATE_COLD_ARCHIVED = 5;    // moved to Coldline storage
+  LIFECYCLE_STATE_CRYPTO_SHREDDED = 6;  // DEK deleted; data unrecoverable
+}
+
+// -----------------------------------------------------------------------------
+// StartClosure RPC
+// -----------------------------------------------------------------------------
+
+message StartClosureRequest {
+  // GCID of the user being closed.
+  string gcid = 1;
+
+  // GCID of the actor requesting closure (admin / self / regulator). Required
+  // for audit trail (AccountLifecycleEvent.requested_by_gcid).
+  string requested_by_gcid = 2;
+
+  // Grace period before SUSPENDED. Default 30 days if zero.
+  int32 grace_period_days = 3;
+
+  // Reason text for the audit log (e.g., "user-initiated", "GDPR-Art-17",
+  // "regulatory-compliance", "fraud").
+  string reason = 4;
+}
+
+message StartClosureResponse {
+  // UUIDv7. Stable identifier for this saga.
+  string saga_id = 1;
+
+  // Initial state — typically CLOSING (grace).
+  LifecycleState initial_state = 2;
+
+  // When the grace period expires (saga transitions to SUSPENDED at this time).
+  google.protobuf.Timestamp grace_expires_at = 3;
+}
+
+// -----------------------------------------------------------------------------
+// GetSagaState RPC
+// -----------------------------------------------------------------------------
+
+message GetSagaStateRequest {
+  // Lookup either by saga_id or by gcid. Exactly one MUST be set.
+  oneof lookup {
+    string saga_id = 1;
+    string gcid = 2;
+  }
+}
+
+message GetSagaStateResponse {
+  // Saga identifier.
+  string saga_id = 1;
+
+  // GCID being closed.
+  string gcid = 2;
+
+  // Current state of the saga.
+  LifecycleState current_state = 3;
+
+  // When the saga was started (StartClosure timestamp).
+  google.protobuf.Timestamp started_at = 4;
+
+  // Estimated completion of the full lifecycle (CRYPTO_SHREDDED). Computed
+  // from grace + per-domain async expected durations.
+  google.protobuf.Timestamp eta_complete = 5;
+
+  // Per-domain completion of the current step (e.g., during pseudonymisation,
+  // each domain's ack flips its bool). Keys are domain names matching the
+  // 11-domain set ("creation", "consumption", ..., "ai_kernel").
+  map<string, bool> per_domain_completion_map = 6;
+}
+
+// -----------------------------------------------------------------------------
+// Orchestrate RPCs (Pseudonymize / CryptoShred share shapes)
+// -----------------------------------------------------------------------------
+
+message OrchestrateRequest {
+  // Saga to advance.
+  string saga_id = 1;
+}
+
+message OrchestrateResponse {
+  // True if the dispatch step itself succeeded (per-domain async ack tracked
+  // separately via GetSagaState).
+  bool success = 1;
+
+  // Domains the orchestrator dispatched to (subset of the 11-domain set).
+  // Useful when some domains have no PII_Closure_Map and are skipped.
+  repeated string domains_dispatched = 2;
+
+  // Per-domain dispatch errors (if any). Empty list on full success.
+  repeated DomainError errors = 3;
+
+  // Dispatch timestamp.
+  google.protobuf.Timestamp dispatched_at = 4;
+}
+
+message DomainError {
+  // Domain name (one of the 11-domain set).
+  string domain = 1;
+
+  // Human-readable error message.
+  string message = 2;
+}

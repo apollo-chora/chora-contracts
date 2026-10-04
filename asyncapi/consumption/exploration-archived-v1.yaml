@@ -1,0 +1,64 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Content Consumption — ExplorationArchived
+  version: 1.0.0
+  description: |
+    Published when an exploration is archived (per ADR-143).
+
+    - Domain: Content Consumption (`chora_consumption` DB)
+    - Aggregate root: `Exploration` (kg_user_explorations table)
+    - Topic: `chora.consumption.kg_exploration.archived.v1`
+    - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
+    - Source proto: `proto/events/consumption/knowledge_graph.proto`
+       message `chora.consumption.v1.ExplorationArchived`
+
+    Embeds the mandatory `chora.common.v1.EventEnvelope` as field 1.
+  contact:
+    name: Chora Content Team (Team 1)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+    description: Google Cloud Pub/Sub (chora-489812 platform host)
+
+channels:
+  explorationArchived:
+    address: chora.consumption.kg_exploration.archived.v1
+    description: Single-event topic for ExplorationArchived.
+    messages:
+      explorationArchived:
+        $ref: '#/components/messages/ExplorationArchived'
+
+operations:
+  publishExplorationArchived:
+    action: send
+    channel:
+      $ref: '#/channels/explorationArchived'
+    summary: Publish an ExplorationArchived event
+
+  consumeExplorationArchived:
+    action: receive
+    channel:
+      $ref: '#/channels/explorationArchived'
+    summary: Subscribe to ExplorationArchived events
+    description: |
+      Primary consumers:
+      - Observability — engagement analytics
+
+components:
+  messages:
+    ExplorationArchived:
+      name: ExplorationArchived
+      title: Exploration Archived
+      summary: An exploration was archived
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/consumption/knowledge_graph.proto#/chora.consumption.v1.ExplorationArchived'

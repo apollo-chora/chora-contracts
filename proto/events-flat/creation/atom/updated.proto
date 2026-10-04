@@ -1,0 +1,120 @@
+// =============================================================================
+// GENERATED — DO NOT EDIT.
+// Source : events/creation/atom.proto message AtomUpdated
+// Tool   : chora-contracts/internal/protoflatten
+// Why    : GCP Pub/Sub Schema Registry rejects (a) schemas with `import`
+//          statements and (b) schemas with more than one top-level message.
+//          This flat copy contains exactly ONE top-level message;
+//          EventEnvelope + Timestamp + transitive deps are nested inside.
+// Path C : see chora-contracts/CHANGELOG.md and m10-data-plane main.tf.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.creation.v1;
+
+message AtomUpdated {
+  // Inlined chora.common.v1.EventEnvelope (nested for self-contained schema).
+  message Envelope {
+    string event_id = 1;
+    string idempotency_key = 2;
+    string tenant_id = 3;
+    string gcid = 4;
+    Timestamp occurred_at = 5;
+    Timestamp published_at = 6;
+    string traceparent = 7;
+    string tracestate = 8;
+    string source_project = 9;
+    string source_service = 10;
+    int32 schema_version = 11;
+    string correlation_id = 12;
+    string causation_id = 13;
+    string chora_imda_dimension = 14;
+    string imda_lifecycle_stage = 15;
+  }
+
+  // Inlined google.protobuf.Timestamp (nested; wire-compatible).
+  message Timestamp {
+    int64 seconds = 1;
+    int32 nanos = 2;
+  }
+
+  // Inlined dep: AtomMediaAsset
+  message AtomMediaAsset {
+    AtomMediaAssetType type = 1;
+    string url = 2;
+    string alt_text = 3;
+    string mime = 4;
+    int64 size_bytes = 5;
+  }
+
+  // Inlined enum dep: AtomMediaAssetType
+  enum AtomMediaAssetType {
+    ATOM_MEDIA_ASSET_TYPE_UNSPECIFIED = 0;
+    ATOM_MEDIA_ASSET_TYPE_IMAGE = 1;
+  }
+
+  // Inlined enum dep: AtomStatus
+  enum AtomStatus {
+    ATOM_STATUS_UNSPECIFIED = 0;
+    ATOM_STATUS_DRAFT = 1;
+    ATOM_STATUS_PUBLISHED = 2;
+    ATOM_STATUS_ARCHIVED = 3;
+  }
+
+  // Inlined enum dep: AtomType
+  enum AtomType {
+    ATOM_TYPE_UNSPECIFIED = 0;
+    ATOM_TYPE_MULTIPLE_CHOICE = 1;
+    ATOM_TYPE_FILL_BLANK = 2;
+    ATOM_TYPE_TRUE_FALSE = 3;
+    ATOM_TYPE_SHORT_ANSWER = 4;
+    ATOM_TYPE_MATCHING = 5;
+    ATOM_TYPE_ORDERING = 6;
+    ATOM_TYPE_CODE = 7;
+    ATOM_TYPE_ESSAY = 8;
+    ATOM_TYPE_MULTIMEDIA = 9;
+    ATOM_TYPE_SIMULATION = 10;
+    ATOM_TYPE_OUTLINE = 11;
+    ATOM_TYPE_FLASHCARD = 12;
+    ATOM_TYPE_VIDEO = 13;
+  }
+
+  // Inlined enum dep: CognitiveLevel
+  enum CognitiveLevel {
+    COGNITIVE_LEVEL_UNSPECIFIED = 0;
+    COGNITIVE_LEVEL_KNOWLEDGE = 1;
+    COGNITIVE_LEVEL_COMPREHENSION = 2;
+    COGNITIVE_LEVEL_APPLICATION = 3;
+    COGNITIVE_LEVEL_ANALYSIS = 4;
+    COGNITIVE_LEVEL_SYNTHESIS = 5;
+    COGNITIVE_LEVEL_EVALUATION = 6;
+  }
+
+  // Inlined enum dep: ImdaDimensionTag
+  enum ImdaDimensionTag {
+    IMDA_DIMENSION_TAG_UNSPECIFIED = 0;
+    IMDA_DIMENSION_TAG_ACCOUNTABILITY = 1;
+    IMDA_DIMENSION_TAG_TRANSPARENCY = 2;
+    IMDA_DIMENSION_TAG_SAFETY_ROBUSTNESS = 3;
+    IMDA_DIMENSION_TAG_FAIRNESS_HUMAN_OVERSIGHT = 4;
+  }
+
+  Envelope envelope = 1;
+  string atom_id = 2;
+  AtomType question_type = 3;
+  AtomStatus status = 4;
+  string title = 5;
+  string author_gcid = 6;
+  repeated string topic_node_ids = 7;
+  int32 difficulty = 8;
+  string locale = 9;
+  repeated string changed_fields = 10;
+  Timestamp updated_at = 11;
+  string stem = 20;
+  string subject = 21;
+  CognitiveLevel cognitive_level = 22;
+  repeated ImdaDimensionTag imda_dimension_tags = 23;
+  string author_note = 24;
+  repeated AtomMediaAsset media_assets = 25;
+}

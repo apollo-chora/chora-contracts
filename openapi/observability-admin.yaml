@@ -1,0 +1,915 @@
+openapi: "3.2.0"
+info:
+  title: "Chora Observability Admin API"
+  version: "1.1.0"
+  description: |
+    Admin-only REST API for the Observability supporting domain.
+
+    READ-ONLY (no writes via this API — all data flows in via Pub/Sub
+    events: TokenUsageRecorded, AgentDecisionLogged, KpiMetricRecorded).
+
+    Covers token usage queries, agent decision history, KPI dashboards.
+
+    v1.1.0 (2026-05-26): backfill `/api/v1/observability/agent-decisions/count`
+    route that backs the O+ Dashboard `recent_decisions_24h` rollup. The
+    chora-gateway BFF calls this endpoint with the last-24h window so the
+    dashboard envelope can surface a count without leaking raw rows.
+
+    Owning domain : Observability (`chora_observability` database)
+    Owning team   : Team 3 (Platform)
+    Surface       : O+ Observability+ (admin + auditor)
+  contact:
+    name: "Chora Platform Team (Team 3)"
+  license:
+    name: "Proprietary"
+
+servers:
+  - url: "https://api.chora.app"
+    description: "Production"
+  - url: "http://localhost:8080"
+    description: "Local development"
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: TokenUsage
+    description: "Token usage + cost ledger queries"
+  - name: AgentDecision
+    description: "Agent decision history (IMDA D2 explainability feed)"
+  - name: KpiMetric
+    description: "KPI metric queries (read-only dashboards)"
+  - name: Health
+    description: "Health check"
+
+paths:
+  /api/v1/admin/token-usage:
+    get:
+      operationId: queryTokenUsage
+      summary: "Query token usage ledger (read-only)"
+      tags: [TokenUsage]
+      parameters:
+        - $ref: "#/components/parameters/TenantIdQuery"
+        - $ref: "#/components/parameters/GcidQuery"
+        - $ref: "#/components/parameters/AgidQuery"
+        - $ref: "#/components/parameters/ModelIdQuery"
+        - $ref: "#/components/parameters/FromQuery"
+        - $ref: "#/components/parameters/ToQuery"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: "Token usage records"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenUsageListResponse"
+
+  /api/v1/admin/token-usage/aggregate:
+    get:
+      operationId: aggregateTokenUsage
+      summary: "Pre-aggregated token usage by tenant + period"
+      tags: [TokenUsage]
+      parameters:
+        - $ref: "#/components/parameters/TenantIdQuery"
+        - $ref: "#/components/parameters/GroupByQuery"
+        - $ref: "#/components/parameters/FromQuery"
+        - $ref: "#/components/parameters/ToQuery"
+      responses:
+        "200":
+          description: "Aggregated usage"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenUsageAggregateResponse"
+
+  /api/v1/admin/companion/suspension:
+    get:
+      operationId: getCompanionSuspension
+      summary: "Learning Companion containment state (ADR-252 via ADR-254 D7)"
+      description: |
+        Platform-scope rows plus the caller's tenant rows (under RLS), engaged
+        first, newest first. Readable by platform_operator, auditor, admin and
+        owner (validated mesh roles; an absent role denies). Proxied by
+        chora-gateway from the same path. The O+ panel renders this.
+      tags: [CompanionSuspension]
+      responses:
+        "200":
+          description: "Current containment state"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [platform, tenant]
+                properties:
+                  platform:
+                    type: array
+                    items: { $ref: "#/components/schemas/CompanionSuspension" }
+                  tenant:
+                    type: array
+                    items: { $ref: "#/components/schemas/CompanionSuspension" }
+                  tenant_id:
+                    type: string
+                    format: uuid
+        "403": { description: "Caller lacks a reading role (fail closed)" }
+        "503": { description: "Control not wired (OBS_COMPANION_SUSPENSION_UNWIRED); never a silent default" }
+    patch:
+      operationId: patchCompanionSuspension
+      summary: "Engage or release a Learning Companion containment"
+      description: |
+        engaged=true contains (scope, tenant, skill_key) and returns the row
+        (idempotent: an identical engaged row is returned, no duplicate);
+        engaged=false releases every engaged row matching the key and returns
+        them. Role matrix (ADR-252 D3): platform scope = platform_operator only;
+        tenant scope = that tenant's admin / owner (their own tenant only) or the
+        operator (any tenant_id). reason is mandatory on both engage and release
+        and rides the governance audit event
+        chora.governance.audit.companion_suspension_changed.v1, written in the
+        same transaction. chora-model-gateway reads the result on every
+        companion turn (deny-before-debit).
+      tags: [CompanionSuspension]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [scope, engaged, reason]
+              properties:
+                scope: { type: string, enum: [platform, tenant] }
+                tenant_id: { type: string, format: uuid, description: "Tenant scope target; operator only (admins are pinned to their own tenant)" }
+                skill_key: { type: string, description: "Mana action code naming the skill; omit for every companion turn in the scope" }
+                engaged: { type: boolean }
+                reason: { type: string, minLength: 1 }
+      responses:
+        "200":
+          description: "Engaged row, or the released rows"
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    required: [suspension]
+                    properties:
+                      suspension: { $ref: "#/components/schemas/CompanionSuspension" }
+                  - type: object
+                    required: [released]
+                    properties:
+                      released:
+                        type: array
+                        items: { $ref: "#/components/schemas/CompanionSuspension" }
+        "400": { description: "Malformed JSON (OBS_INVALID_BODY)" }
+        "401": { description: "No actor gcid (OBS_UNAUTHENTICATED): a containment change is never anonymous" }
+        "403": { description: "Role matrix refused (OBS_FORBIDDEN)" }
+        "422": { description: "Validation failed (OBS_VALIDATION_FAILED): scope, engaged or reason missing / invalid" }
+
+  /api/v1/admin/agent-decisions:
+    get:
+      operationId: queryAgentDecisions
+      summary: "Query AgentDecisionLog (IMDA D2 explainability)"
+      tags: [AgentDecision]
+      parameters:
+        - $ref: "#/components/parameters/AgidQuery"
+        - $ref: "#/components/parameters/InvocationIdQuery"
+        - $ref: "#/components/parameters/DecisionKindQuery"
+        - $ref: "#/components/parameters/FromQuery"
+        - $ref: "#/components/parameters/ToQuery"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: "Decision records"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentDecisionListResponse"
+
+  /api/v1/observability/agent-decisions/count:
+    get:
+      operationId: countAgentDecisions
+      summary: "Count AgentDecisionLog rows in a half-open window"
+      description: |
+        Returns the count of `agent_decision_log` rows for the caller's
+        tenant in the half-open window `[since, until)`. Backs the O+
+        Dashboard `recent_decisions_24h` rollup — the chora-gateway BFF
+        calls this endpoint with the last-24h window so the dashboard
+        envelope can surface a count without re-rendering the raw rows.
+
+        Tenant scope: `X-Tenant-Id` header (extracted by the tenant
+        context middleware); the header is required.
+
+        Window semantics:
+          - `until` defaults to `now` (UTC) when unset.
+          - `since` defaults to `until - 24h` when unset.
+          - `since` MUST be strictly before `until` (otherwise 400).
+        Both timestamps echo back in the response in RFC3339 form so the
+        caller can confirm exactly which window the count covers.
+
+        Per `feedback-no-stubs-real-wiring`: this is a real
+        `SELECT COUNT(*)` against `chora_observability.agent_decision_log`
+        (in-memory dev path mirrors the same semantics). A zero count is
+        honest; query errors surface as 500.
+      tags: [AgentDecision]
+      parameters:
+        - name: since
+          in: query
+          required: false
+          description: "RFC3339 lower bound (inclusive). Defaults to until-24h when omitted."
+          schema:
+            type: string
+            format: date-time
+        - name: until
+          in: query
+          required: false
+          description: "RFC3339 upper bound (exclusive). Defaults to now (UTC) when omitted."
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: "Decision count for the requested window"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentDecisionCountResponse"
+        "400":
+          description: "Invalid query (malformed RFC3339, or since >= until, or missing X-Tenant-Id)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/observability/eval-runs:
+    get:
+      operationId: listEvalRuns
+      summary: "List agent-eval crew runs grouped by candidate_label"
+      description: |
+        Reads the BigQuery view
+        `chora_observability_analytics.agent_eval_evidence` (per-row eval
+        evidence written by the agent CI/CD eval gate — ADR-169 / CHO-1674)
+        and returns one entry per crew run (`candidate_label`), each with its
+        members (`experiment` = crew-member identity, e.g.
+        `chora-agent-eval-qgen-question`) and per-metric autorater +
+        adversarial summaries. Backs the O+ Agent-Eval drill-down (IMDA D2
+        transparency evidence) via the chora-gateway BFF
+        `GET /bff/oplus/eval-runs`.
+
+        Scope: PLATFORM-level eval telemetry. The view has NO tenant_id column
+        — the `X-Tenant-Id` header is required by the tenant-context
+        middleware but is NOT applied as a query filter. Auditor/admin-role
+        gated upstream at the BFF.
+
+        Per `feedback-no-stubs-real-wiring`: a real BigQuery read. An empty
+        list is honest; query errors surface as 500.
+      tags: [AgentEval]
+      parameters:
+        - name: experiment
+          in: query
+          required: false
+          description: "Filter to one crew member (e.g. chora-agent-eval-qgen-question)."
+          schema:
+            type: string
+        - name: kind
+          in: query
+          required: false
+          description: "Filter by evidence kind."
+          schema:
+            type: string
+            enum: [autorater, adversarial]
+        - name: limit
+          in: query
+          required: false
+          description: "Max crew runs to return (most-recent first). Defaults to 50."
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        "200":
+          description: "Crew run index"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvalRunListResponse"
+        "400":
+          description: "Invalid query (missing X-Tenant-Id, bad kind/limit)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/observability/eval-runs/{candidateLabel}:
+    parameters:
+      - name: candidateLabel
+        in: path
+        required: true
+        description: "The crew-run key shared by all members (e.g. depbump0607, scheduled-20260606-195228)."
+        schema:
+          type: string
+    get:
+      operationId: getEvalRunEvidence
+      summary: "Per-row eval evidence for one crew run (both members)"
+      description: |
+        Returns the per-row evidence (golden prompt -> agent response ->
+        autorater score + rationale, OR adversarial attack -> verdict) for a
+        single crew run (`candidate_label`) across all members, ordered by
+        member + kind + row_index. Drill-down behind the O+ Agent-Eval view.
+        Same platform-scope + middleware semantics as the list endpoint.
+      tags: [AgentEval]
+      parameters:
+        - name: experiment
+          in: query
+          required: false
+          description: "Restrict to one crew member."
+          schema:
+            type: string
+        - name: kind
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [autorater, adversarial]
+        - name: limit
+          in: query
+          required: false
+          description: "Max rows (most-recent first). Defaults to 200."
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 200
+      responses:
+        "200":
+          description: "Per-row evidence"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvalRunEvidenceResponse"
+        "400":
+          description: "Invalid query (missing X-Tenant-Id, bad kind/limit)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/admin/agent-decisions/{decisionId}:
+    parameters:
+      - name: decisionId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getAgentDecision
+      summary: "Get a single agent decision record"
+      tags: [AgentDecision]
+      responses:
+        "200":
+          description: "Decision found"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentDecision"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/admin/kpis:
+    get:
+      operationId: queryKpiMetrics
+      summary: "Query KPI metric samples"
+      tags: [KpiMetric]
+      parameters:
+        - $ref: "#/components/parameters/MetricNameQuery"
+        - $ref: "#/components/parameters/TenantIdQuery"
+        - $ref: "#/components/parameters/FromQuery"
+        - $ref: "#/components/parameters/ToQuery"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: "KPI samples"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KpiMetricListResponse"
+
+  /api/v1/admin/kpis/series:
+    get:
+      operationId: queryKpiSeries
+      summary: "Time-bucketed KPI series for dashboards"
+      tags: [KpiMetric]
+      parameters:
+        - $ref: "#/components/parameters/MetricNameQuery"
+        - $ref: "#/components/parameters/TenantIdQuery"
+        - $ref: "#/components/parameters/FromQuery"
+        - $ref: "#/components/parameters/ToQuery"
+        - name: bucket
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [minute, hour, day, week, month]
+            default: day
+      responses:
+        "200":
+          description: "Series points"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KpiSeriesResponse"
+
+  /healthz:
+    get:
+      operationId: healthCheck
+      summary: "Health check"
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: "Healthy"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    TenantIdQuery:
+      name: tenant_id
+      in: query
+      required: false
+      schema:
+        type: string
+        format: uuid
+    GcidQuery:
+      name: gcid
+      in: query
+      required: false
+      schema:
+        type: string
+        format: uuid
+    AgidQuery:
+      name: agid
+      in: query
+      required: false
+      schema:
+        type: string
+        format: uuid
+    ModelIdQuery:
+      name: model_id
+      in: query
+      required: false
+      schema:
+        type: string
+    InvocationIdQuery:
+      name: invocation_id
+      in: query
+      required: false
+      schema:
+        type: string
+        format: uuid
+    DecisionKindQuery:
+      name: decision_kind
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [CLASSIFY, ROUTE, GENERATE, CRITIQUE, REFINE, BLOCK]
+    GroupByQuery:
+      name: group_by
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [tenant, gcid, model, agent_role]
+        default: tenant
+    MetricNameQuery:
+      name: metric_name
+      in: query
+      required: false
+      schema:
+        type: string
+    FromQuery:
+      name: from
+      in: query
+      required: true
+      schema:
+        type: string
+        format: date-time
+    ToQuery:
+      name: to
+      in: query
+      required: true
+      schema:
+        type: string
+        format: date-time
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      schema:
+        type: string
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+
+  responses:
+    NotFound:
+      description: "Resource not found"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    CompanionSuspension:
+      type: object
+      description: |
+        One Learning Companion containment row (ADR-252 D2). Platform scope
+        rows carry no tenant_id; skill_key empty means every companion turn in
+        the scope. Release is a state change (engaged=false + released_by/at),
+        never a delete; version is per-row monotonic (engage 1, release 2).
+      required: [id, scope, engaged, reason, engaged_by, engaged_at, version]
+      properties:
+        id: { type: string, format: uuid }
+        scope: { type: string, enum: [platform, tenant] }
+        tenant_id: { type: string, format: uuid }
+        skill_key: { type: string }
+        engaged: { type: boolean }
+        reason: { type: string }
+        engaged_by: { type: string, format: uuid }
+        engaged_at: { type: string, format: date-time }
+        released_by: { type: string, format: uuid }
+        released_at: { type: string, format: date-time }
+        version: { type: integer, format: int64 }
+    TokenUsage:
+      type: object
+      required: [usage_id, tenant_id, gcid, model_id, input_tokens, output_tokens, cost_micros, recorded_at]
+      properties:
+        usage_id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        gcid:
+          type: string
+          description: "Either GCID or AGID"
+        model_id:
+          type: string
+        input_tokens:
+          type: integer
+          format: int64
+        output_tokens:
+          type: integer
+          format: int64
+        cached_tokens:
+          type: integer
+          format: int64
+        cost_micros:
+          type: integer
+          format: int64
+        invocation_id:
+          type: string
+          format: uuid
+        agent_role:
+          type: string
+        recorded_at:
+          type: string
+          format: date-time
+
+    TokenUsageListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/TokenUsage"
+        next_cursor:
+          type: string
+          nullable: true
+
+    TokenUsageAggregate:
+      type: object
+      required: [group, total_input_tokens, total_output_tokens, total_cost_micros]
+      properties:
+        group:
+          type: string
+          description: "Group-by key value"
+        total_input_tokens:
+          type: integer
+          format: int64
+        total_output_tokens:
+          type: integer
+          format: int64
+        total_cached_tokens:
+          type: integer
+          format: int64
+        total_cost_micros:
+          type: integer
+          format: int64
+
+    TokenUsageAggregateResponse:
+      type: object
+      required: [groups]
+      properties:
+        groups:
+          type: array
+          items:
+            $ref: "#/components/schemas/TokenUsageAggregate"
+
+    AgentDecision:
+      type: object
+      required: [decision_id, invocation_id, agid, decision_kind, decided_at]
+      properties:
+        decision_id:
+          type: string
+          format: uuid
+        invocation_id:
+          type: string
+          format: uuid
+        agid:
+          type: string
+          format: uuid
+        prompt_template_id:
+          type: string
+          format: uuid
+        model_id:
+          type: string
+        decision_kind:
+          type: string
+          enum: [CLASSIFY, ROUTE, GENERATE, CRITIQUE, REFINE, BLOCK]
+        input_summary:
+          type: string
+          maxLength: 2048
+        output_summary:
+          type: string
+          maxLength: 2048
+        confidence:
+          type: number
+          format: float
+        decided_at:
+          type: string
+          format: date-time
+
+    AgentDecisionListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentDecision"
+        next_cursor:
+          type: string
+          nullable: true
+
+    AgentDecisionCountResponse:
+      type: object
+      required: [count, since, until]
+      description: |
+        Response envelope for `/api/v1/observability/agent-decisions/count`.
+        The `since` + `until` echo back the half-open window the count
+        covers so the caller can confirm defaults (e.g. last-24h).
+      properties:
+        count:
+          type: integer
+          format: int64
+          minimum: 0
+          description: "COUNT(*) over agent_decision_log in [since, until) for the X-Tenant-Id."
+        since:
+          type: string
+          format: date-time
+          description: "RFC3339 lower bound (inclusive), echoed from query or default."
+        until:
+          type: string
+          format: date-time
+          description: "RFC3339 upper bound (exclusive), echoed from query or default."
+
+    EvalMetricSummary:
+      type: object
+      required: [metric, count, avg_score]
+      description: |
+        Per-metric autorater aggregate within one crew member. Scores are
+        metric-scaled (e.g. `safety` is binary 0/1, `instruction_following`
+        is a 1-5 Likert) so the average is taken PER metric — never blended
+        across metrics.
+      properties:
+        metric:
+          type: string
+          description: "safety | instruction_following | ..."
+        count:
+          type: integer
+          minimum: 0
+        avg_score:
+          type: number
+          format: double
+
+    EvalAdversarialSummary:
+      type: object
+      required: [total, blocked, leaked]
+      description: |
+        Red-team outcome aggregate within one crew member. `blocked` = the
+        attack was refused (pass); `leaked` = the attack succeeded (fail).
+      properties:
+        total:
+          type: integer
+          minimum: 0
+        blocked:
+          type: integer
+          minimum: 0
+        leaked:
+          type: integer
+          minimum: 0
+
+    EvalRunMember:
+      type: object
+      required: [experiment, autorater_metrics, adversarial]
+      description: "One crew member (`experiment` = member identity) within a crew run."
+      properties:
+        experiment:
+          type: string
+        autorater_metrics:
+          type: array
+          items:
+            $ref: "#/components/schemas/EvalMetricSummary"
+        adversarial:
+          allOf:
+            - $ref: "#/components/schemas/EvalAdversarialSummary"
+          nullable: true
+          description: "Null when the run had no adversarial rows."
+
+    EvalRun:
+      type: object
+      required: [candidate_label, last_recorded_at, members]
+      description: |
+        One crew run keyed by `candidate_label` (shared by all members of the
+        run). Per the agent-eval crew-view decision (2026-06-07) the crew is a
+        drill-down grouping keyed by candidate_label; member identity is the
+        `experiment` column.
+      properties:
+        candidate_label:
+          type: string
+        last_recorded_at:
+          type: string
+          format: date-time
+        members:
+          type: array
+          items:
+            $ref: "#/components/schemas/EvalRunMember"
+
+    EvalRunListResponse:
+      type: object
+      required: [runs]
+      properties:
+        runs:
+          type: array
+          items:
+            $ref: "#/components/schemas/EvalRun"
+
+    EvalEvidenceRow:
+      type: object
+      required: [experiment, kind, row_index, metric, score, recorded_at]
+      description: "One scored evidence row from `agent_eval_evidence`."
+      properties:
+        experiment:
+          type: string
+          description: "Crew-member identity."
+        kind:
+          type: string
+          enum: [autorater, adversarial]
+        case_id:
+          type: string
+        row_index:
+          type: integer
+        metric:
+          type: string
+          description: "autorater: safety|instruction_following; adversarial: attack category."
+        score:
+          type: number
+          format: double
+          description: "autorater: 0/1 or 1-5; adversarial: 1.0 blocked / 0.0 leaked."
+        adversarial_verdict:
+          type: string
+          nullable: true
+          description: "Only for kind=adversarial: BLOCKED(pass) | LEAKED(fail)."
+        explanation:
+          type: string
+        prompt:
+          type: string
+        response:
+          type: string
+        reference:
+          type: string
+          nullable: true
+        recorded_at:
+          type: string
+          format: date-time
+
+    EvalRunEvidenceResponse:
+      type: object
+      required: [candidate_label, rows]
+      properties:
+        candidate_label:
+          type: string
+        rows:
+          type: array
+          items:
+            $ref: "#/components/schemas/EvalEvidenceRow"
+
+    KpiMetric:
+      type: object
+      required: [metric_name, value, recorded_at]
+      properties:
+        metric_name:
+          type: string
+        value:
+          type: number
+          format: double
+        tenant_id:
+          type: string
+          format: uuid
+          nullable: true
+        dimensions:
+          type: object
+          additionalProperties:
+            type: string
+        unit:
+          type: string
+        recorded_at:
+          type: string
+          format: date-time
+
+    KpiMetricListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/KpiMetric"
+        next_cursor:
+          type: string
+          nullable: true
+
+    KpiSeriesPoint:
+      type: object
+      required: [bucket_at, value]
+      properties:
+        bucket_at:
+          type: string
+          format: date-time
+        value:
+          type: number
+          format: double
+
+    KpiSeriesResponse:
+      type: object
+      required: [metric_name, bucket, points]
+      properties:
+        metric_name:
+          type: string
+        bucket:
+          type: string
+        points:
+          type: array
+          items:
+            $ref: "#/components/schemas/KpiSeriesPoint"
+
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            correlation_id:
+              type: string
+              format: uuid

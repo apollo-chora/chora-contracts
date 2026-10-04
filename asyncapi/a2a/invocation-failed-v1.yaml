@@ -1,0 +1,68 @@
+asyncapi: "3.0.0"
+info:
+  title: "Chora Agent-to-Agent — invocation.failed.v1"
+  version: "1.0.0"
+  description: |
+    Published when an A2A invocation fails — owning agent or upstream
+    dependency raised a non-guardrail error (timeout, downstream
+    unavailable, validation error, internal error).
+
+    For guardrail blocks use chora.a2a.invocation.guardrail_blocked.v1
+    instead — the two are kept distinct for governance vs. reliability
+    analytics.
+
+    Owning team   : Team 3 (Platform)
+    Owning domain : Agent-to-Agent (chora_a2a database)
+    Reference     : ADR-132 §5
+  contact:
+    name: "Chora Platform Team — Platform Track"
+  license:
+    name: "Proprietary"
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  production:
+    host: "pubsub.googleapis.com"
+    protocol: googlepubsub
+    description: "Google Cloud Pub/Sub (production)"
+  emulator:
+    host: "localhost:8085"
+    protocol: googlepubsub
+    description: "Cloud Pub/Sub Emulator (local dev)"
+
+channels:
+  invocationFailed:
+    address: "chora.a2a.invocation.failed.v1"
+    messages:
+      invocationFailed:
+        $ref: "#/components/messages/InvocationFailed"
+
+operations:
+  publishInvocationFailed:
+    action: send
+    channel:
+      $ref: "#/channels/invocationFailed"
+    summary: "Publish an A2A invocation failure event"
+    description: |
+      Producer: chora-a2a-gateway.
+      Consumers: O+ governance dashboard (error-rate SLO),
+                 A2A billing meter (failure counters),
+                 Audit log,
+                 Notifications (alert capability owner on threshold breach).
+    messages:
+      - $ref: "#/channels/invocationFailed/messages/invocationFailed"
+
+components:
+  messages:
+    InvocationFailed:
+      name: "InvocationFailed"
+      title: "A2A Invocation Failed"
+      summary: "An A2A invocation raised a non-guardrail error"
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf;version=3
+      payload:
+        schemaFormat: "application/vnd.google.protobuf;version=3"
+        schema:
+          protoFile: "proto/events/a2a/invocation.proto"
+          messageName: "chora.a2a.v1.InvocationFailed"

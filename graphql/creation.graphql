@@ -1,0 +1,368 @@
+# =============================================================================
+# Chora Content Creation — GraphQL SDL (learner-facing READS only)
+# =============================================================================
+#
+# Owning team    : Team 1 (Content)
+# Owning domain  : Content Creation (chora_creation database)
+# Surface (learner) : A+ (Reader / Discovery)
+#
+# Per AP-01 + chora-contracts/CLAUDE.md §5 protocol strategy:
+#   * Learner-facing READS  -> GraphQL (this file)
+#   * Admin CRUD            -> REST    (openapi/creation-admin.yaml)
+#   * Inter-service async   -> Pub/Sub (proto/events/creation/*.proto)
+#
+# This schema is FEDERATION-READY: LearningAtom carries `@key` so other
+# domain subgraphs (Consumption, Sharing, Delivery) can extend the type
+# with their own fields (LearningPath progression, social reactions,
+# Course inclusion) without owning the atom data.
+#
+# Mutations are NOT defined here — all writes flow through the admin REST
+# API (openapi/creation-admin.yaml). Validate-answer style mutations live
+# in the Content Consumption subgraph (graphql/consumption.graphql).
+#
+# Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 2 D8
+# + .claude/rules/ddd-enforcement.md (LearningAtom is the PRIMARY aggregate
+# root; AtomRevision is APPEND-ONLY).
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Federation directives (Apollo Federation v2 / gqlgen federation)
+# -----------------------------------------------------------------------------
+
+directive @key(fields: String!, resolvable: Boolean = true) repeatable on OBJECT | INTERFACE
+directive @shareable on OBJECT | FIELD_DEFINITION
+directive @external on FIELD_DEFINITION
+directive @inaccessible on FIELD_DEFINITION | OBJECT | INTERFACE | UNION | ARGUMENT_DEFINITION | SCALAR | ENUM | ENUM_VALUE | INPUT_OBJECT | INPUT_FIELD_DEFINITION
+
+# -----------------------------------------------------------------------------
+# Scalars
+# -----------------------------------------------------------------------------
+
+"""UUIDv7 identifier string."""
+scalar UUID
+
+"""ISO-8601 date-time string (RFC 3339)."""
+scalar DateTime
+
+"""Arbitrary JSON object (used for atom content JSONB)."""
+scalar JSON
+
+# -----------------------------------------------------------------------------
+# Enums (mirror proto enums in proto/events/creation/atom.proto + revision.proto)
+# -----------------------------------------------------------------------------
+
+"""Type of LearningAtom — drives content schema and validation strategy."""
+enum AtomType {
+  MULTIPLE_CHOICE
+  FILL_BLANK
+  TRUE_FALSE
+  SHORT_ANSWER
+  MATCHING
+  ORDERING
+  CODE
+  ESSAY
+  MULTIMEDIA
+  SIMULATION
+  # CHO-2178 — the three flavours chora-creation authors but could not express.
+  # Kept aligned with chora.creation.v1.AtomType (proto/events/creation/atom.proto).
+  OUTLINE
+  FLASHCARD
+  VIDEO
+}
+
+"""Lifecycle state of a LearningAtom (learner queries see PUBLISHED only)."""
+enum AtomStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+"""Strategy for evaluating a learner's answer."""
+enum ValidationRuleType {
+  EXACT_MATCH
+  REGEX
+  RANGE
+  KEYWORD
+  MANUAL
+  LLM_GRADED
+}
+
+"""High-level Media asset class."""
+enum MediaType {
+  IMAGE
+  VIDEO
+  AUDIO
+  DOCUMENT
+  INTERACTIVE
+}
+
+"""Edge type between two atoms in the knowledge graph."""
+enum KnowledgeGraphEdgeType {
+  PREREQUISITE
+  RELATED
+  EXTENSION
+  ALTERNATIVE
+}
+
+# -----------------------------------------------------------------------------
+# Query root
+# -----------------------------------------------------------------------------
+
+type Query {
+  """Fetch a single PUBLISHED LearningAtom by ID. Returns null if not visible to the learner."""
+  atom(id: ID!): LearningAtom
+
+  """
+  List PUBLISHED atoms attached to a TopicNode (knowledge-graph slice).
+  Returns a Relay-style cursor connection.
+  """
+  atomsByTopic(
+    topicNodeId: ID!
+    first: Int = 20
+    after: String
+  ): AtomConnection!
+
+  """
+  Free-text search across atom titles + tags. Backed by Meilisearch on the
+  publish tier; returns at most 50 hits per call.
+  """
+  atomSearch(query: String!, locale: String): [LearningAtom!]!
+
+  """Fetch a single TopicNode by ID."""
+  topicNode(id: ID!): TopicNode
+
+  """
+  List child TopicNodes under a parent. Pass parentId=null to list root
+  nodes. Returns a Relay-style cursor connection.
+  """
+  topicNodeChildren(
+    parentId: ID
+    first: Int = 20
+    after: String
+  ): TopicNodeConnection!
+
+  """
+  Traverse the knowledge graph outward from a starting atom up to `depth`
+  hops. Returns the resulting edges (nodes are resolvable via `atom(id)`).
+  Used by Discovery mode (curiosity-driven navigation).
+  """
+  knowledgeGraphTraversal(
+    startAtomId: ID!
+    depth: Int!
+  ): [KnowledgeGraphEdge!]!
+}
+
+# -----------------------------------------------------------------------------
+# Domain types
+# -----------------------------------------------------------------------------
+
+"""
+The PRIMARY AGGREGATE ROOT of the Chora platform. Collections in other
+domains (LearningPath in Consumption, Course/Booking in Delivery) QUERY
+atoms; they NEVER own them.
+
+@key(fields: "id") makes this type extensible by other domain subgraphs
+(Federation v2). External subgraphs may extend `LearningAtom` with their
+own fields (e.g., social reactions, completion stats) but only the
+Creation subgraph owns the canonical atom data.
+"""
+type LearningAtom @key(fields: "id") {
+  """UUIDv7 identifier."""
+  id: ID!
+
+  """Owning tenant identifier."""
+  tenantId: UUID!
+
+  """Type of the learning atom."""
+  atomType: AtomType!
+
+  """Lifecycle state (learner queries only ever surface PUBLISHED)."""
+  status: AtomStatus!
+
+  """Display title for the atom (1..256 chars)."""
+  title: String!
+
+  """GCID of the author who created this atom."""
+  authorGcid: UUID!
+
+  """TopicNode IDs this atom is associated with (knowledge-graph placement)."""
+  topicNodeIds: [UUID!]!
+
+  """Difficulty level (1=easiest .. 5=hardest); 0 if unscored."""
+  difficulty: Int!
+
+  """BCP-47 / ISO 639-1 locale tag."""
+  locale: String!
+
+  createdAt: DateTime!
+  updatedAt: DateTime!
+
+  """
+  The current published revision for this atom. Drafts are never exposed
+  on this learner-facing schema (admin queries use the REST API).
+  """
+  currentRevision: AtomRevision
+
+  """
+  All published revisions for this atom, ordered by revision_number
+  descending. Withdrawn / draft revisions are excluded.
+  """
+  publishedRevisions(first: Int = 20, after: String): AtomRevisionConnection!
+
+  """Resolvable Media assets bound to this atom (cover image, embedded assets)."""
+  media: [Media!]!
+}
+
+"""
+Append-only content snapshot of a LearningAtom. Content (the JSONB payload
++ validation rules) is IMMUTABLE once published. revision_number is
+monotonically increasing within the parent atom.
+"""
+type AtomRevision {
+  """UUIDv7 identifier."""
+  id: ID!
+
+  """Parent LearningAtom identifier."""
+  atomId: UUID!
+
+  """Monotonically increasing revision number (1..N)."""
+  revisionNumber: Int!
+
+  """Atom-type-specific content payload (JSONB, immutable after publish)."""
+  content: JSON!
+
+  """Hex SHA-256 of the canonical content JSONB (drift detection)."""
+  contentHash: String!
+
+  """Dominant validation-rule type for this revision."""
+  validationRuleType: ValidationRuleType!
+
+  """GCID of the author who published this revision."""
+  publishedByGcid: UUID!
+
+  """When this revision was published."""
+  publishedAt: DateTime!
+}
+
+"""A node in the knowledge graph forming a recursive tree structure."""
+type TopicNode @key(fields: "id") {
+  """UUIDv7 identifier."""
+  id: ID!
+
+  """Owning tenant identifier."""
+  tenantId: UUID!
+
+  """Display name of the topic node."""
+  name: String!
+
+  """Parent TopicNode ID (null for root nodes)."""
+  parentId: UUID
+
+  """Sort position among siblings."""
+  sortOrder: Int!
+
+  """Direct children (recursive tree)."""
+  children: [TopicNode!]!
+
+  """PUBLISHED atoms associated with this topic node."""
+  atoms(first: Int = 20, after: String): AtomConnection!
+
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+"""An edge between two atoms in the knowledge graph."""
+type KnowledgeGraphEdge {
+  """Source atom (the atom from which the edge originates)."""
+  fromAtomId: UUID!
+
+  """Destination atom."""
+  toAtomId: UUID!
+
+  """Semantic relationship between the two atoms."""
+  edgeType: KnowledgeGraphEdgeType!
+
+  """
+  Edge weight (0.0..1.0). Higher = stronger relationship. Used by
+  Discovery mode to rank traversal paths.
+  """
+  weight: Float!
+}
+
+"""
+A media asset bound to (or referenced by) a LearningAtom. Only assets
+whose processing_status is READY are surfaced via this schema; pending /
+quarantined / failed assets are filtered out.
+"""
+type Media {
+  """UUIDv7 identifier."""
+  id: ID!
+
+  """Owning tenant identifier."""
+  tenantId: UUID!
+
+  """Optional FK to the parent LearningAtom."""
+  atomId: UUID
+
+  """High-level asset class."""
+  mediaType: MediaType!
+
+  """IANA media type (e.g., 'image/png')."""
+  mimeType: String!
+
+  """Size of the canonical processed asset in bytes."""
+  sizeBytes: Int!
+
+  """Duration in milliseconds (VIDEO + AUDIO; 0 otherwise)."""
+  durationMs: Int!
+
+  """Public CDN URL of the canonical processed asset (CDN-fronted)."""
+  cdnUrl: String!
+
+  """When the asset finished processing and became serve-safe."""
+  processedAt: DateTime!
+}
+
+# -----------------------------------------------------------------------------
+# Relay-style cursor pagination
+# -----------------------------------------------------------------------------
+
+type AtomConnection {
+  edges: [AtomEdge!]!
+  pageInfo: PageInfo!
+  totalCount: Int
+}
+
+type AtomEdge {
+  node: LearningAtom!
+  cursor: String!
+}
+
+type AtomRevisionConnection {
+  edges: [AtomRevisionEdge!]!
+  pageInfo: PageInfo!
+}
+
+type AtomRevisionEdge {
+  node: AtomRevision!
+  cursor: String!
+}
+
+type TopicNodeConnection {
+  edges: [TopicNodeEdge!]!
+  pageInfo: PageInfo!
+  totalCount: Int
+}
+
+type TopicNodeEdge {
+  node: TopicNode!
+  cursor: String!
+}
+
+"""Pagination metadata for cursor-based connections."""
+type PageInfo {
+  hasNextPage: Boolean!
+  hasPreviousPage: Boolean!
+  startCursor: String
+  endCursor: String
+}

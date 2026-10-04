@@ -1,0 +1,67 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Identity — TenantImportCompleted
+  version: 1.0.0
+  description: |
+    Published when a tenant CSV mass-import job (ADR-221) reaches a terminal
+    state (`completed | completed_with_errors | failed | cancelled`). Carries
+    the fully-reconciled per-outcome counts
+    (created_tenants/invited/granted/merged/minted/skipped/errored) — input
+    rows always equal the sum of outcomes (AC-1/AC-2; nothing is silently
+    dropped). This is the machine-readable half of the per-row result
+    report (IMDA-D2 transparency artifact).
+
+    - Domain: Identity (`chora_identity` DB — ImportJob aggregate)
+    - Topic: `chora.identity.tenant_import.completed.v1`
+    - Source proto: `proto/events/identity/tenant_import.proto`
+       message `chora.identity.v1.TenantImportCompleted`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  tenantImportCompleted:
+    address: chora.identity.tenant_import.completed.v1
+    messages:
+      tenantImportCompleted:
+        $ref: '#/components/messages/TenantImportCompleted'
+
+operations:
+  publishTenantImportCompleted:
+    action: send
+    channel:
+      $ref: '#/channels/tenantImportCompleted'
+    messages:
+      - $ref: '#/channels/tenantImportCompleted/messages/tenantImportCompleted'
+
+  consumeTenantImportCompleted:
+    action: receive
+    channel:
+      $ref: '#/channels/tenantImportCompleted'
+    description: |
+      Consumers: Observability (O+ job telemetry, counts reconciliation),
+      Governance ingest (IMDA-D2 outcome disclosure), Notifications (P3
+      operator completion notice — horizon).
+    messages:
+      - $ref: '#/channels/tenantImportCompleted/messages/tenantImportCompleted'
+
+components:
+  messages:
+    TenantImportCompleted:
+      name: TenantImportCompleted
+      title: Tenant CSV Import Completed
+      summary: An ImportJob reached a terminal state with reconciled outcome counts
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/identity/tenant_import.proto#/chora.identity.v1.TenantImportCompleted'

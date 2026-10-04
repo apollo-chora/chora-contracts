@@ -1,0 +1,63 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Tenancy — TenantManaAllocationExpired
+  version: 1.0.0
+  description: |
+    Published by the housekeeping job when an allocation crosses its
+    `expires_at`. Behaves like a system-driven revocation: pending units
+    revert to the pool; claimed units stay.
+
+    - Domain: Tenancy + Billing (`chora_tenancy` DB)
+    - Topic: `chora.tenancy.tenant_mana_allocation.expired.v1`
+    - Source proto: `proto/events/tenancy/tenant_mana_allocation.proto`
+       message `chora.tenancy.v1.TenantManaAllocationExpired`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  tenantManaAllocationExpired:
+    address: chora.tenancy.tenant_mana_allocation.expired.v1
+    messages:
+      tenantManaAllocationExpired:
+        $ref: '#/components/messages/TenantManaAllocationExpired'
+
+operations:
+  publishTenantManaAllocationExpired:
+    action: send
+    channel:
+      $ref: '#/channels/tenantManaAllocationExpired'
+    messages:
+      - $ref: '#/channels/tenantManaAllocationExpired/messages/tenantManaAllocationExpired'
+
+  consumeTenantManaAllocationExpired:
+    action: receive
+    channel:
+      $ref: '#/channels/tenantManaAllocationExpired'
+    description: |
+      Consumers: Identity (decrement learner subsidy slice if still
+      pending), Notifications (learner expiry notice), Observability
+      (expiry-rate KPI), Tenancy housekeeping (release pool capacity).
+    messages:
+      - $ref: '#/channels/tenantManaAllocationExpired/messages/tenantManaAllocationExpired'
+
+components:
+  messages:
+    TenantManaAllocationExpired:
+      name: TenantManaAllocationExpired
+      title: Tenant Mana Allocation Expired
+      summary: A subsidy allocation has expired
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/tenancy/tenant_mana_allocation.proto#/chora.tenancy.v1.TenantManaAllocationExpired'

@@ -1,0 +1,123 @@
+// =============================================================================
+// chora.governance.v1 — Federated closure saga step events
+// =============================================================================
+//
+// Note (v2.0 reconciliation): per-domain pseudonymisation acks land at
+// chora.{domain}.account.pseudonymised.v1 per
+// .claude/skills/account-closure-saga/SKILL.md and saga lifecycle events
+// land at chora.closure.* (see proto/events/closure/saga.proto). Events in
+// THIS file are governance-domain audit projections — they observe the saga
+// from the audit-side rather than driving it.
+//
+// Source-of-truth: .claude/rules/ddd-enforcement.md (Account Closure —
+//   federated saga, NOT hard-delete)
+// + memory project_chora_concerns.md
+// + .claude/skills/account-closure-saga/SKILL.md
+//
+// Owning domain : Governance (chora_governance database) — saga visibility
+//                 + audit; saga STATE itself lives in chora_identity per
+//                 ddd-enforcement.
+// Owning team   : Team 3 (Platform)
+// Topic prefix  : chora.governance.closure.*
+//
+// The federated closure saga walks an account through:
+//   ACTIVE -> CLOSING -> SUSPENDED -> PSEUDONYMIZED -> COLD_ARCHIVED -> CRYPTO_SHREDDED
+//
+// AI Kernel's Closure Orchestrator coordinates step-by-step pseudonymisation
+// across all 11 domains, each consulting its local PII_Closure_Map.yaml.
+// Each per-domain step emits a ClosureSagaStepCompleted; aggregate failures
+// emit ClosureSagaFailed (paired with compensating saga state).
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.governance.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/governance/v1;governancev1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// ClosureStepState — saga step state matching the identity lifecycle states.
+// -----------------------------------------------------------------------------
+//
+// Mirrors chora.identity.v1.AccountState but is duplicated here to avoid a
+// hard cross-package import dependency in this domain's proto namespace.
+// Values MUST be kept in sync with identity/account.proto AccountState.
+enum ClosureStepState {
+  CLOSURE_STEP_STATE_UNSPECIFIED = 0;
+  CLOSURE_STEP_STATE_ACTIVE = 1;
+  CLOSURE_STEP_STATE_CLOSING = 2;
+  CLOSURE_STEP_STATE_SUSPENDED = 3;
+  CLOSURE_STEP_STATE_PSEUDONYMIZED = 4;
+  CLOSURE_STEP_STATE_COLD_ARCHIVED = 5;
+  CLOSURE_STEP_STATE_CRYPTO_SHREDDED = 6;
+}
+
+// -----------------------------------------------------------------------------
+// ClosureSagaStepCompleted — chora.governance.closure.saga_step_completed.v1
+// -----------------------------------------------------------------------------
+//
+// Published by EACH domain when it has completed its local closure step
+// (e.g., chora_creation has tokenized its PII fields per its
+// PII_Closure_Map.yaml). The Closure Orchestrator aggregates these to
+// determine when the GCID can advance to the next saga state.
+message ClosureSagaStepCompleted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — saga correlation identifier (matches AI Kernel
+  // closure_orchestrator saga_id; ties together all per-domain steps for
+  // a single closure flow).
+  string saga_id = 2;
+
+  // GCID being closed.
+  string gcid = 3;
+
+  // The state this domain has completed transitioning to (e.g., a Creation
+  // domain reporting it has finished its PSEUDONYMIZED-step work emits
+  // step_state = CLOSURE_STEP_STATE_PSEUDONYMIZED).
+  ClosureStepState step_state = 4;
+
+  // Domain that just completed (snake_case domain name — e.g., "creation",
+  // "consumption", "delivery", "sharing", "a2a", "tenancy", "governance",
+  // "observability", "notifications", "ai_kernel"). The Identity domain
+  // itself completes via chora.identity.account.lifecycle_changed.v1.
+  string domain_completed = 5;
+
+  // Optional count of records affected (for observability dashboards).
+  int64 records_affected = 6;
+
+  google.protobuf.Timestamp completed_at = 7;
+}
+
+// -----------------------------------------------------------------------------
+// ClosureSagaFailed — chora.governance.closure.saga_failed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a closure saga step fails irrecoverably (e.g., a domain
+// can't tokenize a field, KMS DEK delete failed, or compensating action
+// is required). Triggers human-in-the-loop review in O+.
+message ClosureSagaFailed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string saga_id = 2;
+  string gcid = 3;
+
+  // The state the saga was attempting to reach when failure occurred.
+  ClosureStepState target_step_state = 4;
+
+  // Domain that failed.
+  string domain_failed = 5;
+
+  // Free-text failure reason (max 1024 chars).
+  string failure_reason = 6;
+
+  // Whether the saga has been compensated (rollback applied) or is awaiting
+  // human intervention.
+  bool compensated = 7;
+
+  google.protobuf.Timestamp failed_at = 8;
+}

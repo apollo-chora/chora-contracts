@@ -1,0 +1,61 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Payments — UserSubscriptionExpired
+  version: 1.0.0
+  description: |
+    Stripe `checkout.session.expired` for the initial Checkout
+    Session (customer abandoned sign-up before paying). NOT the same as
+    an ongoing subscription expiring — that's a `cancelled` event.
+
+    - Domain: Payments (`chora_payments` DB)
+    - Topic: `chora.payments.user_subscription.expired.v1`
+    - Source proto: `proto/events/payments/user_subscription.proto`
+       message `chora.payments.v1.UserSubscriptionExpired`
+    - Aggregate: UserSubscription
+    - Per ADR-164 (chora-payments service + 13th DB).
+    - IMDA: envelope.chora_imda_dimension = "accountability"
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  userSubscriptionExpired:
+    address: chora.payments.user_subscription.expired.v1
+    messages:
+      userSubscriptionExpired:
+        $ref: '#/components/messages/UserSubscriptionExpired'
+
+operations:
+  publishUserSubscriptionExpired:
+    action: send
+    channel:
+      $ref: '#/channels/userSubscriptionExpired'
+    messages:
+      - $ref: '#/channels/userSubscriptionExpired/messages/userSubscriptionExpired'
+
+  consumeUserSubscriptionExpired:
+    action: receive
+    channel:
+      $ref: '#/channels/userSubscriptionExpired'
+    messages:
+      - $ref: '#/channels/userSubscriptionExpired/messages/userSubscriptionExpired'
+
+components:
+  messages:
+    UserSubscriptionExpired:
+      name: UserSubscriptionExpired
+      title: Stripe Checkout Session expired for an INITIAL subscription sign-up
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/payments/user_subscription.proto#/chora.payments.v1.UserSubscriptionExpired'

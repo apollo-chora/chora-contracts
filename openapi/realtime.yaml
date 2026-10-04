@@ -1,0 +1,235 @@
+openapi: "3.2.0"
+info:
+  title: "Chora Realtime API — learner-scoped SSE channel"
+  version: "1.0.0"
+  description: |
+    The per-learner multiplexed Server-Sent-Events channel served by the
+    `chora-realtime` service (ADR-183). One EventSource carries every
+    learner-facing live signal — mana balance, Companion growth, in-app
+    notifications, and learner payment-state changes — keyed per `gcid`.
+
+    Phase-1 contract per AP-01 (API-First). Two operations:
+
+      r1) GET /api/v1/realtime/ticket  — mint a short-lived (~60s), one-time
+          stream ticket. Bearer-authed; served by chora-gateway (the existing
+          trust boundary). EventSource cannot send an Authorization header, so
+          the ticket (not the session JWT) is the stream credential.
+      r2) GET /api/v1/realtime/stream?ticket=…  — open the SSE connection.
+          Served by chora-realtime via a dedicated 3600s HTTPRoute that
+          BYPASSES the chora-gateway pod (whose route caps requests at 60s).
+
+    Auth model (ADR-183): the ticket is a ~60s one-time HMAC JWT (aud
+    `chora-realtime`) signed by chora-gateway with the
+    `chora-realtime-ticket-signer` secret and validated by chora-realtime
+    (aud/exp + single-use `SET NX rt:ticket:jti`). It binds gcid+tenant; the
+    stream only ever delivers that gcid's frames, and drops any frame whose
+    tenant_id != the ticket's tenant.
+
+    Delivery is at-most-once and unordered (Redis pub/sub backplane). Clients
+    MUST reconcile via the authoritative GET per surface on every (re)connect
+    — the stream is a latency optimiser over polling, never the source of
+    truth. No Last-Event-ID replay in v1.
+
+servers:
+  - url: https://api.chora.site
+    description: Production (Cloud Armor + GCLB → istio ingress)
+
+security:
+  - BearerAuth: []
+
+paths:
+  /api/v1/realtime/ticket:
+    get:
+      operationId: mintRealtimeTicket
+      summary: "Mint a short-lived one-time SSE stream ticket"
+      description: |
+        Returns a ~60s, single-use ticket bound to the caller's gcid+tenant
+        (read from the ChoraSession JWT). The client immediately opens
+        `GET /api/v1/realtime/stream?ticket=<ticket>`. On reconnect the client
+        mints a fresh ticket (the previous one is expired/consumed).
+      tags: [Realtime]
+      responses:
+        "200":
+          description: "A fresh stream ticket"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RealtimeTicket"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/realtime/stream:
+    get:
+      operationId: openRealtimeStream
+      summary: "Open the learner-scoped SSE channel"
+      description: |
+        Long-lived SSE connection (served by chora-realtime, not the BFF pod).
+        Authenticated solely by the `ticket` query parameter. Each frame:
+
+        ```
+        id: 42
+        event: mana.balance.changed
+        data: {"topic":"mana.balance.changed","occurred_at":"2026-06-06T…Z",
+               "payload":{"reason":"debit","ledger_seq":1188}}
+        \n\n
+        ```
+
+        `event:` is the topic; `data:` is a JSON `RealtimeEnvelope`. The `id:`
+        is a per-connection monotonic sequence for client-side gap *detection*
+        only — the server ignores inbound Last-Event-ID. Heartbeat comments
+        (`:keepalive\n\n`) are emitted every 15s.
+
+        Topics (v1): `mana.balance.changed` (signal-only — re-fetch
+        /api/v1/me/mana), `companion.leveled_up`, `companion.bonded`,
+        `companion.retired`, `companion.skin_equipped`, `notification.created`,
+        `notification.read`, `payment.state.changed`.
+      tags: [Realtime]
+      security: []   # the ticket query param is the credential, not the Bearer
+      parameters:
+        - name: ticket
+          in: query
+          required: true
+          description: "A one-time ticket from GET /api/v1/realtime/ticket."
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "Open SSE connection"
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  SSE stream. Each `data:` line is a JSON-encoded
+                  RealtimeEnvelope; see the operation description.
+        "401":
+          description: "Missing, expired, replayed, or invalid ticket"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RealtimeError"
+
+  /healthz:
+    get:
+      operationId: healthCheck
+      summary: "Health check"
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: "Healthy"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  responses:
+    Unauthorized:
+      description: "Missing or invalid ChoraSession bearer token"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/RealtimeError"
+
+  schemas:
+    RealtimeTicket:
+      type: object
+      required: [ticket, expires_at]
+      properties:
+        ticket:
+          type: string
+          description: "Opaque one-time HMAC ticket; pass as ?ticket= to the stream."
+        expires_at:
+          type: string
+          format: date-time
+          description: "RFC3339 expiry (~60s out). Mint a fresh ticket past this."
+
+    RealtimeEnvelope:
+      type: object
+      required: [topic, occurred_at, payload]
+      description: |
+        The FE-facing SSE frame. `topic` mirrors the SSE `event:` name; the
+        `payload` shape is topic-specific (see RealtimeManaChanged etc.).
+      properties:
+        topic:
+          type: string
+          example: mana.balance.changed
+        occurred_at:
+          type: string
+          format: date-time
+        payload:
+          type: object
+          additionalProperties: true
+
+    RealtimeManaChanged:
+      type: object
+      description: |
+        Signal-only — carries NO balance (delivery is at-most-once/unordered).
+        The client re-fetches GET /api/v1/me/mana; `ledger_seq` lets it ignore
+        a stale signal that arrives after a newer reconcile.
+      required: [reason, ledger_seq]
+      properties:
+        reason:
+          type: string
+          enum: [credit, debit, refund]
+        ledger_seq:
+          type: integer
+          format: int64
+
+    RealtimeCompanionLeveledUp:
+      type: object
+      required: [companion_id, to_stage]
+      properties:
+        companion_id: { type: string, format: uuid }
+        from_stage: { type: integer }
+        to_stage: { type: integer }
+
+    RealtimeNotificationCreated:
+      type: object
+      required: [notification_id]
+      properties:
+        notification_id: { type: string, format: uuid }
+        kind: { type: string }
+        title: { type: string }
+
+    RealtimePaymentStateChanged:
+      type: object
+      required: [purchase_id, aggregate_type, state]
+      properties:
+        purchase_id: { type: string, format: uuid }
+        aggregate_type: { type: string, example: course_purchase }
+        state:
+          type: string
+          enum: [captured, refunded, failed, expired]
+
+    RealtimeError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                - REALTIME_TICKET_MISSING
+                - REALTIME_TICKET_INVALID
+                - REALTIME_TICKET_EXPIRED
+                - REALTIME_TICKET_REPLAYED
+                - REALTIME_UNAUTHENTICATED
+            message: { type: string }
+            correlation_id: { type: string }
+
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, example: ok }

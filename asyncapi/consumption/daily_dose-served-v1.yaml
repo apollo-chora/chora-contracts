@@ -1,0 +1,85 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Content Consumption — DailyDoseServed
+  version: 1.0.0
+  description: |
+    Published when the Companion daily-dose composer serves a 5-atom
+    bundle to a learner via `GET /v1/me/companion/daily-dose` (Phyllis
+    MVP §5.4 Step 8).
+
+    - Domain: Content Consumption (`chora_consumption` DB)
+    - Aggregate root: `Companion` (daily-dose is a deterministic
+      composition over the learner's TopicRetention + ActivePath +
+      MCQ-accuracy state, owned by chora-consumption)
+    - Topic: `chora.consumption.daily_dose.served.v1`
+    - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
+    - Source proto (planned, M11.4): `proto/events/consumption/daily_dose.proto`
+       message `chora.consumption.v1.DailyDoseServed`
+
+    Composition (deterministic, no LLM call):
+    - 40% Ebbinghaus review (atoms with decay > 0.4)
+    - 30% Weakness drill (topics with MCQ accuracy < 0.7)
+    - 30% Curiosity (topics adjacent to active LearningPath)
+    - Fresh top-up to guarantee 5-card budget
+
+    Embeds the mandatory `chora.common.v1.EventEnvelope` as field 1.
+
+    IMDA evidence: every served event MUST carry
+    `chora_imda_dimension=accountability` (D1) +
+    `imda_lifecycle_stage=runtime` per ADR-141.
+  contact:
+    name: Chora Platform Team (Team 3) + Team 1 (Content)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+    description: Google Cloud Pub/Sub (chora-489812 platform host)
+
+channels:
+  dailyDoseServed:
+    address: chora.consumption.daily_dose.served.v1
+    description: Single-event topic for DailyDoseServed.
+    messages:
+      dailyDoseServed:
+        $ref: '#/components/messages/DailyDoseServed'
+
+operations:
+  publishDailyDoseServed:
+    action: send
+    channel:
+      $ref: '#/channels/dailyDoseServed'
+    summary: Publish a DailyDoseServed event
+    messages:
+      - $ref: '#/channels/dailyDoseServed/messages/dailyDoseServed'
+
+  consumeDailyDoseServed:
+    action: receive
+    channel:
+      $ref: '#/channels/dailyDoseServed'
+    summary: Subscribe to DailyDoseServed events
+    description: |
+      Primary consumers:
+      - Notifications — in-app banner trigger ("Your Daily Dose is ready")
+      - Observability — engagement-loop metric (dose-served count per
+        tenant per day, retention curve correlation)
+      - Sharing (future) — daily-dose XP award via outbox
+    messages:
+      - $ref: '#/channels/dailyDoseServed/messages/dailyDoseServed'
+
+components:
+  messages:
+    DailyDoseServed:
+      name: DailyDoseServed
+      title: Daily Dose Served
+      summary: A Companion Daily Dose was composed + returned to a learner
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/consumption/daily_dose.proto#/chora.consumption.v1.DailyDoseServed'

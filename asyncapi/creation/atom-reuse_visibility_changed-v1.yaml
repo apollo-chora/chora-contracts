@@ -1,0 +1,78 @@
+asyncapi: "3.0.0"
+info:
+  title: "Chora Content Creation — atom.reuse_visibility_changed.v1"
+  version: "1.0.0"
+  description: |
+    Published when the author changes an atom's reuse-consent audience
+    (private | friends | tenant) per ADR-229 D1/D5 + Amendment A1 (CHO-2127).
+    The mutation is author-only (the first author-level authorization check
+    in chora-creation); a same-value change emits nothing.
+
+    Consumers update discovery surfaces immediately: the sharing
+    atom_projections read-model maps `reuse_visibility` onto its column;
+    pickers exclude the atom on narrowing; new snapshots and quiz-arms
+    refuse. Per Amendment A1.1 narrowing NEVER revokes grants — stranded-
+    consumer continuity is the orphan-edition machinery's job
+    (atom.orphan_created.v1, successor story).
+
+    Owning team    : Team 1 (Content)
+    Owning domain  : Content Creation (chora_creation database)
+
+    Source-of-truth: docs/architecture/adrs/adr-229-atom-reuse-visibility-
+    consent-gate.md (D1 creation-owned capability bit; A1 amendment)
+  contact:
+    name: "Chora Platform Team — Content Track"
+  license:
+    name: "Proprietary"
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  production:
+    host: "pubsub.googleapis.com"
+    protocol: googlepubsub
+    description: "Google Cloud Pub/Sub (production)"
+  emulator:
+    host: "localhost:8085"
+    protocol: googlepubsub
+    description: "Cloud Pub/Sub Emulator (local dev)"
+
+channels:
+  atomReuseVisibilityChanged:
+    address: "chora.creation.atom.reuse_visibility_changed.v1"
+    description: |
+      Pub/Sub topic for AtomReuseVisibilityChanged events. Low-volume —
+      fires only on an explicit author audience change.
+    messages:
+      atomReuseVisibilityChanged:
+        $ref: "#/components/messages/AtomReuseVisibilityChanged"
+
+operations:
+  publishAtomReuseVisibilityChanged:
+    action: send
+    channel:
+      $ref: "#/channels/atomReuseVisibilityChanged"
+    summary: "Publish an author reuse-consent audience change"
+    description: |
+      Producer: chora-creation service (author-only
+      PATCH /api/atoms/{atom_id}/reuse-visibility, via the outbox).
+      Consumers:
+        - chora-sharing  -> atom_projections.reuse_visibility column update
+                            (picker/snapshot/quiz-arm enforcement reads it)
+        - audit log
+    messages:
+      - $ref: "#/channels/atomReuseVisibilityChanged/messages/atomReuseVisibilityChanged"
+
+components:
+  messages:
+    AtomReuseVisibilityChanged:
+      name: "AtomReuseVisibilityChanged"
+      title: "Atom Reuse Visibility Changed"
+      summary: "An author changed a LearningAtom's reuse-consent audience"
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf;version=3
+      payload:
+        schemaFormat: "application/vnd.google.protobuf;version=3"
+        schema:
+          protoFile: "proto/events/creation/atom.proto"
+          messageName: "chora.creation.v1.AtomReuseVisibilityChanged"

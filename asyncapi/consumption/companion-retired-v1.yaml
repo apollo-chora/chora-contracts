@@ -1,0 +1,87 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Content Consumption — CompanionRetired
+  version: 1.0.0
+  description: |
+    Published when a `Companion` (RPG learning companion) is permanently
+    retired by its owner — a game-mechanic action distinct from account
+    closure.
+
+    - Domain: Content Consumption (`chora_consumption` DB)
+    - Aggregate root: `Companion` (DOMAIN ENTITY)
+    - Topic: `chora.consumption.companion.retired.v1`
+    - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
+    - Source proto: `proto/events/consumption/companion.proto`
+       message `chora.consumption.v1.CompanionRetired`
+
+    Per memory `feedback_companion_vs_agent`: Companion is a DOMAIN ENTITY
+    (RPG companion the learner sees + interacts with). The AI agent that
+    powers Companion responses is a SEPARATE adapter concern in AI Kernel
+    (`chora.ai_kernel.*` events). Retiring the Companion entity does NOT
+    automatically retire the underlying agent runtime; that's a separate
+    AI Kernel action.
+
+    Distinct from account closure (`chora.identity.account.lifecycle_changed.v1`):
+    a learner may retire one Companion and bond a new one without ever
+    closing their Chora account. If the account IS closed, ALL Companions
+    are retired as part of the federated closure saga
+    (Tier 3 D11 — `chora_consumption` `PII_Closure_Map.yaml`).
+
+    Embeds the mandatory `chora.common.v1.EventEnvelope` as field 1.
+  contact:
+    name: Chora Platform Team (Team 3) + Team 1 (Content)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+    description: Google Cloud Pub/Sub (chora-489812 platform host)
+
+channels:
+  companionRetired:
+    address: chora.consumption.companion.retired.v1
+    description: Single-event topic for CompanionRetired.
+    messages:
+      companionRetired:
+        $ref: '#/components/messages/CompanionRetired'
+
+operations:
+  publishCompanionRetired:
+    action: send
+    channel:
+      $ref: '#/channels/companionRetired'
+    summary: Publish a CompanionRetired event
+    messages:
+      - $ref: '#/channels/companionRetired/messages/companionRetired'
+
+  consumeCompanionRetired:
+    action: receive
+    channel:
+      $ref: '#/channels/companionRetired'
+    summary: Subscribe to CompanionRetired events
+    description: |
+      Primary consumers:
+      - Sharing — memorial post on social feed (per Companion lifecycle UX)
+      - Notifications — confirmation email to owner
+      - Observability — Companion churn analytics
+      - AI Kernel — signal to retire the underlying agent runtime
+        (separate concern; Companion entity != agent)
+    messages:
+      - $ref: '#/channels/companionRetired/messages/companionRetired'
+
+components:
+  messages:
+    CompanionRetired:
+      name: CompanionRetired
+      title: Companion Retired
+      summary: A learner retired their Companion (RPG companion) by choice
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/consumption/companion.proto#/chora.consumption.v1.CompanionRetired'

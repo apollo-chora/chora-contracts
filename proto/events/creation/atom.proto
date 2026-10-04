@@ -1,0 +1,499 @@
+// =============================================================================
+// chora.creation.v1 — LearningAtom domain events (authoring lifecycle)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 2 D8
+// + .claude/rules/ddd-enforcement.md (Aggregate Invariants)
+// + memory project_chora_data_plane.md
+// + docs/m13/atom-phase1-execution-plan-2026-05-17.md (ADR-156 Phase 1)
+//
+// Owning domain  : Content Creation (chora_creation database)
+// Owning team    : Team 1 (Content)
+// Topic prefix   : chora.creation.atom.*
+// Surface (admin): A+ Creator mode
+//
+// LearningAtom is the PRIMARY AGGREGATE ROOT of the Chora platform —
+// collections in other domains (LearningPath in Consumption, Course in Delivery)
+// QUERY atoms; they NEVER own them. Cross-domain references are UUID-only with
+// no FK constraint (validated via Pub/Sub events).
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// Tenant scope, GCID, trace context, schema version live in the envelope —
+// payload fields are domain data only.
+//
+// -----------------------------------------------------------------------------
+// ADR-156 Phase 1 rename + new-fields (in-place per Decision #2 + #8; SIT pre-MVP)
+// -----------------------------------------------------------------------------
+//
+//   - FIELD RENAME: `atom_type` (field number 3) → `question_type`
+//     (field number 3 PRESERVED). Wire format unchanged; only the
+//     identifier in *.proto + *.pb.go + *_pb2.py changes.
+//
+//   - ENUM TYPE NAME KEPT AS `AtomType` (10-value content-strategy enum). The
+//     identifier `QuestionType` is ALREADY taken in this package by the
+//     16-value FE-facing enum in proto/events/creation/question.proto (added
+//     in the M14 Question Authoring CR). The two enums represent the same
+//     concept at different fidelities; reconciling them is out-of-scope for
+//     ATOM-3. At the OpenAPI / domain layer, callers see `question_type`
+//     as the field name and a per-spec enum schema named `QuestionType`
+//     (in creation-admin.yaml). Go consumers can alias
+//     `type QuestionType = creationv1.AtomType` in their domain package.
+//
+//   - NEW optional fields per ADR-156 §0 (Decisions #1, #3, #4, #5, #6) use
+//     high field numbers (20+) so they cannot collide with future evolution
+//     of the existing payload.
+//
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.creation.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/creation/v1;creationv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// Shared enums (re-used across atom + revision events)
+// -----------------------------------------------------------------------------
+
+// AtomType — drives the content JSONB schema and answer-validation strategy.
+// Aligned with the GraphQL AtomType enum in chora-contracts/graphql/creation.graphql.
+//
+// NOTE: per ADR-156 Phase 1 (2026-05-17), the FIELD that carries an `AtomType`
+// value has been renamed from `atom_type` to `question_type` on every event
+// in this file. The enum TYPE NAME itself is preserved as `AtomType` because
+// `QuestionType` is already used in proto/events/creation/question.proto for
+// the 16-value FE-facing enum. Domain code can alias
+// `type QuestionType = creationv1.AtomType` for consumer ergonomics.
+// CHO-2178 — values 11-13 close a hole that made four published atoms
+// permanently invisible. chora-creation's domain vocabulary
+// (services/chora-creation/internal/domain/atom/phyllis.go, AllAtomTypes) is
+// mcq | flashcard | video | essay | outline, and three of those five had no
+// value here. An `outline` atom therefore failed its outbox marshal, never
+// emitted atom.published.v1, and could never be reused by anyone but its
+// author — while the publish endpoint returned 200 OK.
+//
+// NAMING LAW (load-bearing): a flavour's constant is ATOM_TYPE_<UPPER(label)>,
+// with ATOM_TYPE_MULTIPLE_CHOICE -> "mcq" the ONE exception. Consumers
+// (chora-sharing / chora-consumption protodecode) derive the domain label back
+// off this descriptor rather than hand-maintaining reverse tables — which is
+// how sharing's table came to be missing ATOM_TYPE_ESSAY and blanked the
+// flavour on every essay atom it projected. Add a value here and both
+// consumers decode it correctly with no code change. Do NOT rename these.
+//
+// Values 2-7, 9, 10 are the pre-MVP aspirational vocabulary: still declared for
+// wire compatibility, but chora-creation authors none of them.
+enum AtomType {
+  ATOM_TYPE_UNSPECIFIED = 0;
+  ATOM_TYPE_MULTIPLE_CHOICE = 1;  // domain label: "mcq" (the naming-law exception)
+  ATOM_TYPE_FILL_BLANK = 2;
+  ATOM_TYPE_TRUE_FALSE = 3;
+  ATOM_TYPE_SHORT_ANSWER = 4;
+  ATOM_TYPE_MATCHING = 5;
+  ATOM_TYPE_ORDERING = 6;
+  ATOM_TYPE_CODE = 7;
+  ATOM_TYPE_ESSAY = 8;
+  ATOM_TYPE_MULTIMEDIA = 9;
+  ATOM_TYPE_SIMULATION = 10;
+  ATOM_TYPE_OUTLINE = 11;
+  ATOM_TYPE_FLASHCARD = 12;
+  ATOM_TYPE_VIDEO = 13;
+}
+
+// AtomStatus — lifecycle state of the LearningAtom aggregate root.
+// Transitions: DRAFT -> PUBLISHED -> ARCHIVED. ARCHIVED is reached via
+// soft-delete (deleted_at) per ddd-enforcement aggregate invariant #5.
+enum AtomStatus {
+  ATOM_STATUS_UNSPECIFIED = 0;
+  ATOM_STATUS_DRAFT = 1;
+  ATOM_STATUS_PUBLISHED = 2;
+  ATOM_STATUS_ARCHIVED = 3;
+}
+
+// ReuseVisibility — the ADR-229 author-consent audience for atom REUSE
+// (pickers, snapshots, quiz arming — learner playback untouched). Author-
+// chosen per atom; server default is PRIVATE (consent-first). UNSPECIFIED /
+// absent on the wire (events from pre-ADR-229 producers) MUST be hardened to
+// PRIVATE by consumers.
+enum ReuseVisibility {
+  REUSE_VISIBILITY_UNSPECIFIED = 0;
+  REUSE_VISIBILITY_PRIVATE = 1;
+  REUSE_VISIBILITY_FRIENDS = 2;
+  REUSE_VISIBILITY_TENANT = 3;
+}
+
+// CognitiveLevel — Bloom's 6-level cognitive taxonomy (ADR-156 Decision #3).
+// Optional initially; mandatory after curriculum onboarding lands.
+enum CognitiveLevel {
+  COGNITIVE_LEVEL_UNSPECIFIED = 0;
+  COGNITIVE_LEVEL_KNOWLEDGE = 1;
+  COGNITIVE_LEVEL_COMPREHENSION = 2;
+  COGNITIVE_LEVEL_APPLICATION = 3;
+  COGNITIVE_LEVEL_ANALYSIS = 4;
+  COGNITIVE_LEVEL_SYNTHESIS = 5;
+  COGNITIVE_LEVEL_EVALUATION = 6;
+}
+
+// ImdaDimensionTag — IMDA Model AI Governance Framework 4-dimension tag.
+// Optional initially; gate before public catalog later. Per ADR-156 Decision #6
+// + ADR-141 canonical labels.
+enum ImdaDimensionTag {
+  IMDA_DIMENSION_TAG_UNSPECIFIED = 0;
+  IMDA_DIMENSION_TAG_ACCOUNTABILITY = 1;
+  IMDA_DIMENSION_TAG_TRANSPARENCY = 2;
+  IMDA_DIMENSION_TAG_SAFETY_ROBUSTNESS = 3;
+  IMDA_DIMENSION_TAG_FAIRNESS_HUMAN_OVERSIGHT = 4;
+}
+
+// AtomMediaAssetType — atom media asset type (ADR-156 Decision #5). Phase 1
+// supports only IMAGE; AUDIO + VIDEO deferred to Phase 4.
+enum AtomMediaAssetType {
+  ATOM_MEDIA_ASSET_TYPE_UNSPECIFIED = 0;
+  ATOM_MEDIA_ASSET_TYPE_IMAGE = 1;
+}
+
+// AtomMediaAsset — embedded media asset on `LearningAtom.media_assets`.
+// Phase 1 ≤1 image entry per ADR-156 Decision #5. `url` is the canonical gs://
+// URL persisted after the `POST /atoms/{atom_id}/media` signed-URL upload completes.
+message AtomMediaAsset {
+  AtomMediaAssetType type = 1;
+  string url = 2;             // canonical gs://chora-atom-media-{env}/... URL
+  string alt_text = 3;        // accessibility alt text (≤280 chars)
+  string mime = 4;            // image/jpeg | image/png | image/webp
+  int64 size_bytes = 5;       // image size in bytes (tenant-cap enforced server-side)
+}
+
+// -----------------------------------------------------------------------------
+// AtomCreated — chora.creation.atom.created.v1
+// -----------------------------------------------------------------------------
+//
+// Published when an author creates a new LearningAtom in DRAFT status.
+// At this point no AtomRevision exists yet (revisions are appended separately
+// per AP-01). Consumers: search index (Meilisearch), audit log, AI Kernel
+// content-validator agent (kicks off the 6-agent gate).
+message AtomCreated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 identifier of the newly created LearningAtom.
+  string atom_id = 2;
+
+  // Type of the learning atom question (drives content schema downstream).
+  // RENAMED from `atom_type` per ADR-156 Phase 1 Decision #2 (wire-compatible —
+  // field number 3 preserved). Enum type name `AtomType` is retained because
+  // `QuestionType` is already used by question.proto's 16-value enum in the
+  // same package.
+  AtomType question_type = 3;
+
+  // Initial lifecycle status — always ATOM_STATUS_DRAFT for *.created events.
+  AtomStatus status = 4;
+
+  // Optional display title (RELAXED from required per ADR-156 Decision #1;
+  // ≤256 chars). FE auto-derives `display_label` from `stem` when empty.
+  string title = 5;
+
+  // GCID (UUIDv7) of the author who created the atom.
+  string author_gcid = 6;
+
+  // TopicNode IDs this atom is associated with (knowledge-graph placement).
+  // Empty list means unclassified — discovery mode will not surface it.
+  repeated string topic_node_ids = 7;
+
+  // Difficulty level (1=easiest .. 5=hardest). 0 = unscored.
+  int32 difficulty = 8;
+
+  // BCP-47 / ISO 639-1 locale tag (e.g., "en", "en-SG", "zh-Hans-SG").
+  string locale = 9;
+
+  // When the atom was created in the producer's domain database.
+  google.protobuf.Timestamp created_at = 10;
+
+  // Course (chora_delivery aggregate, cross-domain UUID, no FK) this atom was
+  // authored against, when created via a course-bound flow (Phyllis POST
+  // /v1/atoms). Additive field — restores the course association that the
+  // JSON→binary payload flip (Task #33, 2026-05-16) silently dropped because
+  // it had no proto field. Consumers (chora-consumption atom_index projection)
+  // key the course-scoped LearningPath bootstrap on this. Empty for
+  // non-course-bound atoms.
+  string course_id = 11;
+
+  // ---- ADR-156 Phase 1 NEW fields (high field numbers per plan) -----------
+
+  // Canonical question prompt (NEW per ADR-156 Decision #1 structural change).
+  // Required at the OpenAPI surface; ≤4096 chars. Backfilled from
+  // mcq_payload.prompt / oe_payload.prompt in migration 0014.
+  string stem = 20;
+
+  // Optional free-text subject (e.g., "biology", "algebra") per Decision #4.
+  // Vocabulary curation deferred.
+  string subject = 21;
+
+  // Optional Bloom's taxonomy level per Decision #3. Will be mandatory after
+  // curriculum onboarding lands.
+  CognitiveLevel cognitive_level = 22;
+
+  // Optional IMDA governance dimension tags per Decision #6 (≤4 entries).
+  repeated ImdaDimensionTag imda_dimension_tags = 23;
+
+  // Optional author's private free-text note. Distinct semantics from `title`
+  // — author scratchpad / context-for-editors.
+  string author_note = 24;
+
+  // Optional embedded media assets per Decision #5. Phase 1 ≤1 image entry.
+  repeated AtomMediaAsset media_assets = 25;
+
+  // ---- L1 grading fields (CHO-1627, 2026-06-02) ---------------------------
+
+  // Stable option_id (UUID) of the correct MCQ option — copied from the
+  // authored mcq_payload (the single option with is_correct=true). Empty for
+  // non-MCQ atoms (empty string = no answer key, so consumers treat the atom
+  // as non-gradable). chora-consumption grades a learner's submitted
+  // `selected_option_id` by identity equality against this value. Identity
+  // (option_id), NOT position: per the MCQ option-naming convention the
+  // option_id is the durable identity while the A/B/C/D marker / index is
+  // ephemeral + auto-computed, so option reorder or per-render shuffle never
+  // corrupts grading.
+  string correct_option_id = 26;
+
+  // Number of answer options on the atom (MCQ). 0 for non-MCQ / unscored.
+  // Lets consumers validate a submitted answer is in range and render
+  // progress without a separate revision lookup.
+  int32 answer_count = 27;
+
+  // ---- ADR-229 WS-1 reuse-consent (CHO-2127) ------------------------------
+
+  // Author-consent audience for atom reuse. Additive; UNSPECIFIED from
+  // pre-ADR-229 producers hardens to PRIVATE downstream. Server-side create
+  // defaults PRIVATE, so created events always carry PRIVATE unless a future
+  // create surface accepts an explicit audience.
+  ReuseVisibility reuse_visibility = 30;
+}
+
+// -----------------------------------------------------------------------------
+// AtomUpdated — chora.creation.atom.updated.v1
+// -----------------------------------------------------------------------------
+//
+// Published when atom-level metadata is updated (title / topic_node_ids /
+// difficulty / locale / NEW fields per ADR-156). Content edits do NOT use
+// this event — content lives in AtomRevision (append-only); see revision.proto.
+message AtomUpdated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string atom_id = 2;
+
+  // RENAMED from `atom_type` per ADR-156 Phase 1 Decision #2.
+  AtomType question_type = 3;
+
+  AtomStatus status = 4;
+
+  string title = 5;
+
+  string author_gcid = 6;
+
+  repeated string topic_node_ids = 7;
+
+  int32 difficulty = 8;
+
+  string locale = 9;
+
+  // Names of metadata fields that were modified (e.g., ["title", "difficulty"]).
+  // Allows downstream consumers to filter relevant changes without diffing.
+  repeated string changed_fields = 10;
+
+  google.protobuf.Timestamp updated_at = 11;
+
+  // ---- ADR-156 Phase 1 NEW fields -----------------------------------------
+
+  string stem = 20;
+  string subject = 21;
+  CognitiveLevel cognitive_level = 22;
+  repeated ImdaDimensionTag imda_dimension_tags = 23;
+  string author_note = 24;
+  repeated AtomMediaAsset media_assets = 25;
+}
+
+// -----------------------------------------------------------------------------
+// AtomPublished — chora.creation.atom.published.v1
+// -----------------------------------------------------------------------------
+//
+// Published when an atom transitions DRAFT -> PUBLISHED. Marks the atom
+// available to learners (Consumption domain) and to collection aggregates
+// (Path / Course / Booking). Publish requires at least one published
+// AtomRevision (see revision.proto AtomRevisionPublished).
+message AtomPublished {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string atom_id = 2;
+
+  // RENAMED from `atom_type` per ADR-156 Phase 1 Decision #2.
+  AtomType question_type = 3;
+
+  // Always ATOM_STATUS_PUBLISHED for this event type.
+  AtomStatus status = 4;
+
+  string title = 5;
+
+  string author_gcid = 6;
+
+  repeated string topic_node_ids = 7;
+
+  int32 difficulty = 8;
+
+  string locale = 9;
+
+  // ID of the AtomRevision that is current at publish time.
+  // Consumers should pin against this revision_id for version-stable reads.
+  string current_revision_id = 10;
+
+  // Monotonic revision number of current_revision_id (denormalised for
+  // consumers that only need the integer, not a full revision lookup).
+  int32 current_revision_number = 11;
+
+  google.protobuf.Timestamp published_at = 12;
+
+  // ---- ADR-156 Phase 1 NEW fields -----------------------------------------
+
+  string stem = 20;
+  string subject = 21;
+  CognitiveLevel cognitive_level = 22;
+  repeated ImdaDimensionTag imda_dimension_tags = 23;
+  string author_note = 24;
+  repeated AtomMediaAsset media_assets = 25;
+
+  // ---- Answerability fields (CHO-1967, 2026-06-30) ------------------------
+  //
+  // Mirror of AtomCreated 26/27 but AUTHORITATIVE at publish time: an atom is
+  // guaranteed to carry a finalised question revision when published (publish
+  // 409s without one). atom.created.v1 fires at draft-creation — before a
+  // question is attached in the manual authoring flow — so its answer key is
+  // unreliable. Consumers (chora-consumption daily-dose playability projection)
+  // MUST take the answer key from THIS event, not from atom.created.v1.
+
+  // Stable option_id of the correct MCQ option (the single is_correct option).
+  // Empty for non-MCQ atoms. chora-consumption grades a submitted
+  // selected_option_id by identity equality against this value.
+  string correct_option_id = 26;
+
+  // Number of MCQ answer options. 0 for non-MCQ / unscored.
+  int32 answer_count = 27;
+
+  // True when the published atom's question is open-ended (model-answer /
+  // rubric graded) rather than MCQ. Lets consumers treat the atom as answerable
+  // (playable in the daily dose) without an MCQ answer key.
+  bool has_open_ended_question = 28;
+
+  // ---- ADR-229 WS-1 reuse-consent (CHO-2127) ------------------------------
+
+  // Author-consent audience for atom reuse at publish time (the sharing
+  // atom_projections read-model maps this onto its reuse_visibility column).
+  // Additive; UNSPECIFIED from pre-ADR-229 producers hardens to PRIVATE
+  // downstream.
+  ReuseVisibility reuse_visibility = 30;
+}
+
+// -----------------------------------------------------------------------------
+// AtomArchived — chora.creation.atom.archived.v1
+// -----------------------------------------------------------------------------
+//
+// Published when an atom is soft-deleted (status = ARCHIVED, deleted_at set).
+// Per ddd-enforcement aggregate invariant #5, this is NEVER a hard delete.
+// Consumers must remove the atom from active queries (default
+// `WHERE deleted_at IS NULL` filter) but preserve audit + revision history.
+message AtomArchived {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string atom_id = 2;
+
+  // RENAMED from `atom_type` per ADR-156 Phase 1 Decision #2.
+  AtomType question_type = 3;
+
+  // Always ATOM_STATUS_ARCHIVED for this event type.
+  AtomStatus status = 4;
+
+  // GCID of the actor who archived the atom (may be the original author
+  // or an admin acting via an entitled role).
+  string archived_by_gcid = 5;
+
+  // Optional human-readable reason (free text; max 512 chars).
+  string reason = 6;
+
+  google.protobuf.Timestamp archived_at = 7;
+}
+
+// -----------------------------------------------------------------------------
+// AtomReuseVisibilityChanged — chora.creation.atom.reuse_visibility_changed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when the author changes an atom's reuse-consent audience
+// (ADR-229 D1/D5 + Amendment A1, CHO-2127). Mutation is author-only (the
+// first author-level authorization check in chora-creation); a same-value
+// change emits nothing. Consumers update discovery surfaces immediately —
+// the sharing atom_projections read-model maps reuse_visibility onto its
+// column; pickers exclude the atom on narrowing; new snapshots + quiz-arms
+// refuse. Per Amendment A1.1 narrowing NEVER revokes grants — stranded-
+// consumer continuity is the orphan-edition machinery's job
+// (atom.orphan_created.v1, successor story).
+message AtomReuseVisibilityChanged {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 identifier of the LearningAtom whose audience changed.
+  string atom_id = 2;
+
+  // The NEW author-consent audience (never UNSPECIFIED — the producer
+  // validates before emitting).
+  ReuseVisibility reuse_visibility = 3;
+
+  // The audience before this change. Lets consumers distinguish narrowing
+  // (e.g. TENANT -> FRIENDS / any -> PRIVATE) from widening without state.
+  ReuseVisibility previous_visibility = 4;
+
+  // GCID of the author who made the change (== envelope gcid; the change is
+  // author-only by construction).
+  string author_gcid = 5;
+
+  // When the audience change was persisted in chora_creation.
+  google.protobuf.Timestamp changed_at = 6;
+}
+
+// -----------------------------------------------------------------------------
+// AtomOrphanCreated — chora.creation.atom.orphan_created.v1
+// -----------------------------------------------------------------------------
+//
+// Published when chora-creation materialises the SINGLETON orphan edition for
+// a withdrawn-while-consumed atom (ADR-229 Amendment A1, CHO-2132). The
+// orphan is an immutable clone of the atom's last-published revision carrying
+// orphaned_from/orphaned_at provenance; it is never discoverable, accepts no
+// revisions, and survives the original's archive and the author's closure.
+//
+// Consumers repoint their STRANDED references to orphan_atom_id via this
+// event, never via cross-DB reads:
+//   - chora-sharing: stranded AtomUsageGrants (grantee outside the new
+//     audience) repoint with an append-only grant_events trail.
+//   - chora-delivery: AtomID-provenance question-bank references repoint.
+//   - chora-creation repoints its own collection entries in-domain at mint
+//     time (same DB; not via this event).
+// Exactly ONE orphan exists per (orphaned_from_atom_id, source_revision_id) —
+// re-deliveries and repeat withdrawals at the same revision reuse it.
+message AtomOrphanCreated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 of the NEW orphan-edition LearningAtom.
+  string orphan_atom_id = 2;
+
+  // UUIDv7 of the original (withdrawn) atom the orphan was cloned from.
+  string orphaned_from_atom_id = 3;
+
+  // The last-published AtomRevision the orphan pins (the singleton key's
+  // second half).
+  string source_revision_id = 4;
+
+  // GCID of the original author (attribution; pseudonymised at closure).
+  string author_gcid = 5;
+
+  // What withdrew the atom: "narrowed" | "unshared" | "archived".
+  string trigger = 6;
+
+  // When the orphan edition was materialised in chora_creation.
+  google.protobuf.Timestamp orphaned_at = 7;
+}

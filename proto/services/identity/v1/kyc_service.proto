@@ -1,0 +1,101 @@
+// =============================================================================
+// Chora KYC Service (gRPC)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture/adrs/adr-142-per-user-economy-mana.md
+//   + chora-contracts/openapi/learner-economy.yaml
+//   + memory project_chora_governance_ai.md (Singpass / SkillsFuture)
+//
+// Inter-service gRPC contract for the KYC verification surface (Identity
+// supporting domain, chora_identity database, Team 3 / Platform). REST
+// surface in chora-contracts/openapi/learner-economy.yaml is the
+// user-facing equivalent; gRPC is for internal service-to-service sync
+// calls (mTLS via Cloud Service Mesh per CLAUDE.md §4 protocol strategy).
+//
+// Primary callers:
+//   - chora-tenancy            — gate instructor onboarding fast-track
+//   - chora-delivery           — gate SkillsFuture entitlement linking
+//   - chora-identity           — internal verification status checks
+//
+// Deployed in chora-489812 team-platform pool. mTLS via Cloud Service Mesh;
+// SPIFFE identity in mesh; W3C trace context in gRPC metadata.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.services.identity.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/identity/v1;identityv1";
+
+import "google/protobuf/timestamp.proto";
+
+// -----------------------------------------------------------------------------
+// Service
+// -----------------------------------------------------------------------------
+
+service KycService {
+  // Resolve the latest KYC verification record for a GCID. Returns
+  // NOT_FOUND (gRPC code 5) when the user has never initiated a
+  // verification. Soft-deleted / expired records are returned with
+  // status set accordingly so callers can decide retry policy.
+  rpc GetVerificationStatus(GetVerificationStatusRequest) returns (KycStatusResponse);
+}
+
+// -----------------------------------------------------------------------------
+// Shared enums
+// -----------------------------------------------------------------------------
+
+enum KycMethod {
+  KYC_METHOD_UNSPECIFIED = 0;
+  KYC_METHOD_SINGPASS = 1;
+  KYC_METHOD_SKILLSFUTURE = 2;
+  KYC_METHOD_MANUAL_DOC = 3;
+}
+
+enum KycStatus {
+  KYC_STATUS_UNSPECIFIED = 0;
+  KYC_STATUS_PENDING = 1;
+  KYC_STATUS_SUBMITTED = 2;
+  KYC_STATUS_VERIFIED = 3;
+  KYC_STATUS_REJECTED = 4;
+  KYC_STATUS_EXPIRED = 5;
+}
+
+// -----------------------------------------------------------------------------
+// GetVerificationStatus RPC
+// -----------------------------------------------------------------------------
+
+message GetVerificationStatusRequest {
+  // GCID to query. Required.
+  string gcid = 1;
+}
+
+message KycStatusResponse {
+  // UUIDv7 of the verification row.
+  string verification_id = 1;
+
+  string gcid = 2;
+
+  KycMethod method = 3;
+
+  KycStatus status = 4;
+
+  // Backend provider code (e.g., "ndi", "skillsfuture_api",
+  // "internal_review").
+  string provider = 5;
+
+  // Set when status = VERIFIED.
+  google.protobuf.Timestamp verified_at = 6;
+
+  // True when SkillsFuture funding scope was granted at verification
+  // time (drives downstream entitlement linking in chora-delivery).
+  bool skillsfuture_scope_granted = 7;
+
+  // Set when status = REJECTED. Mirrors KycRejected event fields.
+  string rejection_code = 8;
+  bool retry_allowed = 9;
+
+  // Optional expiry (e.g., document validity); status flips to EXPIRED
+  // when crossed.
+  google.protobuf.Timestamp expires_at = 10;
+}

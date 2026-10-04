@@ -1,0 +1,112 @@
+asyncapi: "3.0.0"
+info:
+  title: "chora.delivery.course.content_composed.v1"
+  version: "1.0.0"
+  description: |
+    Published whenever a Course's heterogeneous curriculum changes — a content
+    item is added, removed, or reordered, or the course is released. Carries the
+    FULL, ordered item list so downstream consumers project it idempotently
+    (replace-by-course).
+
+    A Course is a COLLECTION of content items (atoms, videos, YouTube videos,
+    documents, live classrooms, assessments) in author-defined order. It
+    references atoms/assessments/classrooms by id and external media by URL —
+    it NEVER owns atom content (atom-centric, ddd-enforcement Aggregate
+    Invariant #1/#3). The event is self-contained: consumers need no cross-DB
+    read to render an item.
+
+    Wire format: JSON (no Schema Registry BINARY mode), consistent with the
+    sibling chora.delivery.enrollment.created.v1 in the same course-journey
+    flow. chora-consumption decodes via protodecode JSON fallback.
+
+    Owning domain : Content Delivery (chora_delivery DB)
+    Owning team   : Team 2 (Delivery)
+    Story         : CHO-1612
+  contact: { name: "Chora Platform Team" }
+  license: { name: "Proprietary" }
+
+defaultContentType: application/json
+
+servers:
+  local: { host: "localhost:8085", protocol: googlepubsub, description: "Pub/Sub Emulator" }
+  production: { host: "pubsub.googleapis.com", protocol: googlepubsub, description: "Google Cloud Pub/Sub" }
+
+channels:
+  courseContentComposed:
+    address: chora.delivery.course.content_composed.v1
+    description: |
+      Carries CourseContentComposed payload (full ordered curriculum).
+
+      Downstream consumers:
+        - chora-consumption   : project the course-content index + bootstrap
+                                 the Straight-Up LearningPath of ordered
+                                 heterogeneous items on enrollment.
+        - chora-observability : audit + IMDA D2 oversight evidence
+    messages:
+      courseContentComposed:
+        $ref: "#/components/messages/CourseContentComposed"
+
+operations:
+  publishCourseContentComposed:
+    action: send
+    channel: { $ref: "#/channels/courseContentComposed" }
+    summary: "Publish CourseContentComposed"
+    messages: [ { $ref: "#/channels/courseContentComposed/messages/courseContentComposed" } ]
+  consumeCourseContentComposed:
+    action: receive
+    channel: { $ref: "#/channels/courseContentComposed" }
+    summary: "Consume CourseContentComposed"
+    messages: [ { $ref: "#/channels/courseContentComposed/messages/courseContentComposed" } ]
+
+components:
+  messages:
+    CourseContentComposed:
+      name: CourseContentComposed
+      title: "Course Content Composed"
+      summary: "A course's full ordered heterogeneous curriculum at a point in time."
+      contentType: application/json
+      payload:
+        type: object
+        description: "Mirrors chora.delivery.v1.CourseContentComposed."
+        required: [course_id, items]
+        properties:
+          envelope: { $ref: "#/components/schemas/EventEnvelope" }
+          course_id: { type: string, format: uuid }
+          composed_at: { type: string, format: date-time }
+          items:
+            type: array
+            items: { $ref: "#/components/schemas/CourseContentItem" }
+    schemas:
+      CourseContentItem:
+        type: object
+        required: [item_id, kind, ref, title, position]
+        properties:
+          item_id: { type: string, format: uuid }
+          kind:
+            type: string
+            enum: [atom, video, youtube, document, live_classroom, assessment]
+          ref:
+            type: string
+            description: "UUID for atom/assessment/live_classroom; http(s) URL for video/youtube/document."
+          title: { type: string, maxLength: 200 }
+          position: { type: integer, minimum: 0 }
+      EventEnvelope:
+        type: object
+        description: "Mirrors chora.common.v1.EventEnvelope."
+        required: [event_id, idempotency_key, tenant_id, occurred_at, published_at, traceparent, source_project, source_service, schema_version]
+        properties:
+          event_id: { type: string, format: uuid }
+          idempotency_key:
+            type: string
+            description: "Deterministic on (course_id, composed_at) so duplicate composes dedupe at the bus."
+          tenant_id: { type: string }
+          gcid: { type: string }
+          occurred_at: { type: string, format: date-time }
+          published_at: { type: string, format: date-time }
+          traceparent: { type: string }
+          tracestate: { type: string }
+          source_project: { type: string }
+          source_service: { type: string }
+          schema_version: { type: integer }
+          correlation_id: { type: string }
+          causation_id: { type: string }

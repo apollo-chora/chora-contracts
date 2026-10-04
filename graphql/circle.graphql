@@ -1,0 +1,126 @@
+# =============================================================================
+# Chora Circle subschema — federated GraphQL
+# =============================================================================
+#
+# Owns social-graph reads for the C+ Connect+ surface: feeds, posts,
+# reactions, duels (read-only here — write mutations live in
+# sharing.graphql / openapi/sharing-admin.yaml).
+#
+# Reactions are positive-only by design (no dislike).
+#
+# Owning team   : Team 1 (Content)
+# Domain        : Content Sharing (chora_sharing DB)
+# Surface       : C+ Connect+ (Surface-3) — "curiosity meets connection"
+# =============================================================================
+
+directive @key(fields: String!, resolvable: Boolean = true) repeatable on OBJECT | INTERFACE
+
+scalar UUID
+scalar DateTime
+
+enum FeedScope {
+  HOME
+  FOLLOWING
+  TENANT
+  GROUP
+}
+
+enum PostVisibility {
+  PUBLIC
+  FOLLOWERS_ONLY
+  TENANT_ONLY
+  GROUP_ONLY
+}
+
+enum ReactionType {
+  LIKE
+  INSIGHTFUL
+  CURIOUS
+  CHEER
+  CELEBRATE
+}
+
+# -----------------------------------------------------------------------------
+# Query root — circle subschema
+# -----------------------------------------------------------------------------
+
+type Query {
+  """
+  Personalised social feed. HOME merges followed authors + subscribed
+  groups; FOLLOWING is strict follow-graph fan-in.
+  """
+  feed(scope: FeedScope = HOME, groupId: ID, first: Int = 20, after: String): PostConnection!
+
+  """Fetch a single Post by ID (must be visible to viewer)."""
+  post(id: ID!): Post
+
+  """The current learner's circle profile."""
+  myCircleProfile: CircleProfile!
+
+  """GCID profiles the viewer is following."""
+  following: [CircleProfile!]!
+
+  """GCID profiles following the viewer."""
+  followers: [CircleProfile!]!
+}
+
+# -----------------------------------------------------------------------------
+# Domain types
+# -----------------------------------------------------------------------------
+
+type Post {
+  id: ID!
+  authorGcid: UUID!
+  body: String!
+  mediaIds: [UUID!]!
+  visibility: PostVisibility!
+  parentPostId: UUID
+  groupId: UUID
+  reactionSummary: ReactionSummary!
+  replyCount: Int!
+  createdAt: DateTime!
+  updatedAt: DateTime
+}
+
+type ReactionSummary {
+  like: Int!
+  insightful: Int!
+  curious: Int!
+  cheer: Int!
+  celebrate: Int!
+  total: Int!
+  myReaction: ReactionType
+}
+
+type CircleProfile @key(fields: "gcid") {
+  gcid: ID!
+  displayName: String!
+  avatarUri: String
+  bio: String
+  followerCount: Int!
+  followingCount: Int!
+  isFollowedByViewer: Boolean!
+  isFollowingViewer: Boolean!
+}
+
+# -----------------------------------------------------------------------------
+# Relay-style cursor pagination
+# -----------------------------------------------------------------------------
+
+type PageInfo {
+  hasNextPage: Boolean!
+  hasPreviousPage: Boolean!
+  startCursor: String
+  endCursor: String
+}
+
+type PostConnection {
+  edges: [PostEdge!]!
+  pageInfo: PageInfo!
+  totalCount: Int
+}
+
+type PostEdge {
+  node: Post!
+  cursor: String!
+}

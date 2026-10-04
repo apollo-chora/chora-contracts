@@ -1,0 +1,61 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Payments — CoursePurchaseCheckoutStarted
+  version: 1.0.0
+  description: |
+    chora-payments created a Stripe Checkout Session for a paid course
+    enrolment; the FE will redirect the browser to Stripe-hosted Checkout.
+    The learner has NOT yet paid. Pre-fulfilment funnel telemetry.
+
+    - Domain: Payments (`chora_payments` DB)
+    - Topic: `chora.payments.course_purchase.checkout_started.v1`
+    - Source proto: `proto/events/payments/course_purchase.proto`
+       message `chora.payments.v1.CoursePurchaseCheckoutStarted`
+    - Aggregate: CoursePurchase
+    - Per ADR-164 (chora-payments service + 13th DB).
+    - IMDA: envelope.chora_imda_dimension = "accountability"
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  coursePurchaseCheckoutStarted:
+    address: chora.payments.course_purchase.checkout_started.v1
+    messages:
+      coursePurchaseCheckoutStarted:
+        $ref: '#/components/messages/CoursePurchaseCheckoutStarted'
+
+operations:
+  publishCoursePurchaseCheckoutStarted:
+    action: send
+    channel:
+      $ref: '#/channels/coursePurchaseCheckoutStarted'
+    messages:
+      - $ref: '#/channels/coursePurchaseCheckoutStarted/messages/coursePurchaseCheckoutStarted'
+
+  consumeCoursePurchaseCheckoutStarted:
+    action: receive
+    channel:
+      $ref: '#/channels/coursePurchaseCheckoutStarted'
+    messages:
+      - $ref: '#/channels/coursePurchaseCheckoutStarted/messages/coursePurchaseCheckoutStarted'
+
+components:
+  messages:
+    CoursePurchaseCheckoutStarted:
+      name: CoursePurchaseCheckoutStarted
+      title: Stripe Checkout Session created for a paid course enrolment (CJ#2)
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/payments/course_purchase.proto#/chora.payments.v1.CoursePurchaseCheckoutStarted'

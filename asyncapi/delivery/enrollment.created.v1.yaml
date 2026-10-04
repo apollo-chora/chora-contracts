@@ -1,0 +1,96 @@
+asyncapi: "3.0.0"
+info:
+  title: "chora.delivery.enrollment.created.v1"
+  version: "1.0.0"
+  description: |
+    Published when a learner registers on a public catalogue Course
+    (Phyllis MVP, Comic Ch5 P10 P3 — "I just enrolled. As me. Same session.").
+
+    Same-identity invariant (Comic Ch4 P8): chora-delivery does NOT create
+    a new user. It just stores a row linking gcid + course_id. Role
+    context (instructor on own course / learner on enrolled course) is
+    computed downstream by chora-identity (`/me/roles?course_id=...`)
+    based on the enrollment row + the Course's creator GCID.
+
+    Idempotency: idempotency_key is deterministic on (course_id, gcid)
+    so duplicate POSTs dedupe at the bus. The publisher emits the event
+    ONLY on a fresh insert; idempotent retries of the HTTP endpoint
+    return 200 with the existing enrollment row and DO NOT republish.
+
+    Owning domain : Content Delivery (chora_delivery DB)
+    Owning team   : Team 2 (Delivery)
+  contact: { name: "Chora Platform Team" }
+  license: { name: "Proprietary" }
+
+defaultContentType: application/x-protobuf
+
+servers:
+  local: { host: "localhost:8085", protocol: googlepubsub, description: "Pub/Sub Emulator" }
+  production: { host: "pubsub.googleapis.com", protocol: googlepubsub, description: "Google Cloud Pub/Sub" }
+
+channels:
+  enrollmentCreated:
+    address: chora.delivery.enrollment.created.v1
+    description: |
+      Carries EnrollmentCreated Protobuf payload.
+
+      Downstream consumers (per docs/m13/phyllis-mvp-2026-05-08.md §6):
+        - chora-identity      : project CourseRole(role='learner') for the gcid
+        - chora-consumption   : bootstrap LearningPath for the new learner
+        - chora-observability : audit + IMDA D2 oversight evidence
+    messages:
+      enrollmentCreated:
+        $ref: "#/components/messages/EnrollmentCreated"
+
+operations:
+  publishEnrollmentCreated:
+    action: send
+    channel: { $ref: "#/channels/enrollmentCreated" }
+    summary: "Publish EnrollmentCreated"
+    messages: [ { $ref: "#/channels/enrollmentCreated/messages/enrollmentCreated" } ]
+  consumeEnrollmentCreated:
+    action: receive
+    channel: { $ref: "#/channels/enrollmentCreated" }
+    summary: "Consume EnrollmentCreated"
+    messages: [ { $ref: "#/channels/enrollmentCreated/messages/enrollmentCreated" } ]
+
+components:
+  messages:
+    EnrollmentCreated:
+      name: EnrollmentCreated
+      title: "Enrollment Created"
+      summary: "A learner has enrolled on a public catalogue course (same gcid)."
+      contentType: application/x-protobuf
+      payload:
+        type: object
+        description: "Mirrors chora.delivery.v1.EnrollmentCreated."
+        properties:
+          envelope: { $ref: "#/components/schemas/EventEnvelope" }
+          enrollment_id: { type: string, format: uuid }
+          course_id: { type: string, format: uuid }
+          learner_gcid: { type: string }
+          enrolled_at: { type: string, format: date-time }
+  schemas:
+    EventEnvelope:
+      type: object
+      description: "Mirrors chora.common.v1.EventEnvelope."
+      required: [event_id, idempotency_key, tenant_id, occurred_at, published_at, traceparent, source_project, source_service, schema_version]
+      properties:
+        event_id: { type: string, format: uuid }
+        idempotency_key:
+          type: string
+          description: |
+            Deterministic on (course_id, gcid) — format
+            `enrollment:{course_id}:{gcid}` — so duplicate POSTs dedupe
+            at the bus regardless of in-memory enrollment id.
+        tenant_id: { type: string }
+        gcid: { type: string }
+        occurred_at: { type: string, format: date-time }
+        published_at: { type: string, format: date-time }
+        traceparent: { type: string }
+        tracestate: { type: string }
+        source_project: { type: string }
+        source_service: { type: string }
+        schema_version: { type: integer }
+        correlation_id: { type: string }
+        causation_id: { type: string }

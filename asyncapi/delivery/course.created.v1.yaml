@@ -1,0 +1,144 @@
+asyncapi: "3.0.0"
+info:
+  title: "chora.delivery.course.created.v1"
+  version: "1.1.0"
+  description: |
+    Published when an admin / instructor scaffolds a new Course in DRAFT.
+    Companion to `proto/events/delivery/course.proto` message `CourseCreated`.
+
+    Owning domain : Content Delivery (chora_delivery DB)
+    Owning team   : Team 2 (Delivery)
+    Surface       : R+ Rhythm+ (admin/instructor) + A+ (public catalogue, Phyllis MVP)
+
+    Per ADR-129/130/131 collapse mandate, this topic supersedes the legacy
+    `chora.training.session.*` and `chora.classroom.*` lifecycle channels.
+
+    AP-01: This contract exists BEFORE implementation.
+
+    v1.1 adds optional Phyllis-MVP marketplace fields (public, price_sgd_cents)
+    for Comic Ch5 P10 — additive, non-breaking. Idempotency_key MUST equal
+    the course_id so reissuance dedupes at the bus.
+  contact:
+    name: "Chora Platform Team"
+  license:
+    name: "Proprietary"
+
+defaultContentType: application/x-protobuf
+
+servers:
+  local:
+    host: "localhost:8085"
+    protocol: googlepubsub
+    description: "Cloud Pub/Sub Emulator (PUBSUB_EMULATOR_HOST)"
+  production:
+    host: "pubsub.googleapis.com"
+    protocol: googlepubsub
+    description: "Google Cloud Pub/Sub (production)"
+
+channels:
+  courseCreated:
+    address: chora.delivery.course.created.v1
+    description: |
+      Single-topic channel carrying the CourseCreated Protobuf payload.
+      Schema validated by Pub/Sub Schema Registry against
+      `chora.delivery.v1.CourseCreated`.
+
+      Downstream consumers:
+        - chora-search           : index new course
+        - chora-marketplace      : enrolment listing
+        - chora-notifications    : announce to followers
+    messages:
+      courseCreated:
+        $ref: "#/components/messages/CourseCreated"
+
+operations:
+  publishCourseCreated:
+    action: send
+    channel:
+      $ref: "#/channels/courseCreated"
+    summary: "Publish CourseCreated"
+    messages:
+      - $ref: "#/channels/courseCreated/messages/courseCreated"
+
+  consumeCourseCreated:
+    action: receive
+    channel:
+      $ref: "#/channels/courseCreated"
+    summary: "Consume CourseCreated"
+    messages:
+      - $ref: "#/channels/courseCreated/messages/courseCreated"
+
+components:
+  messages:
+    CourseCreated:
+      name: CourseCreated
+      title: "Course Created"
+      summary: "A new Course has been scaffolded in DRAFT."
+      contentType: application/x-protobuf
+      payload:
+        type: object
+        description: "Mirrors chora.delivery.v1.CourseCreated. Binary on the wire."
+        properties:
+          envelope:
+            $ref: "#/components/schemas/EventEnvelope"
+          course_id:
+            type: string
+            format: uuid
+          title:
+            type: string
+            minLength: 1
+            maxLength: 256
+          instructor_gcid:
+            type: string
+          atom_path_id:
+            type: string
+          modality:
+            $ref: "#/components/schemas/Modality"
+          starts_at:
+            type: string
+            format: date-time
+          ends_at:
+            type: string
+            format: date-time
+          capacity:
+            type: integer
+          created_at:
+            type: string
+            format: date-time
+          public:
+            type: boolean
+            description: "Phyllis MVP — public catalogue visibility (Comic Ch5 P10)."
+          price_sgd_cents:
+            type: integer
+            minimum: 0
+            description: "Phyllis MVP — price in SGD cents; 0 = free."
+
+  schemas:
+    EventEnvelope:
+      type: object
+      description: "Mirrors chora.common.v1.EventEnvelope."
+      required: [event_id, idempotency_key, tenant_id, occurred_at, published_at,
+                 traceparent, source_project, source_service, schema_version]
+      properties:
+        event_id: { type: string, format: uuid }
+        idempotency_key: { type: string }
+        tenant_id: { type: string }
+        gcid: { type: string }
+        occurred_at: { type: string, format: date-time }
+        published_at: { type: string, format: date-time }
+        traceparent: { type: string }
+        tracestate: { type: string }
+        source_project: { type: string }
+        source_service: { type: string }
+        schema_version: { type: integer }
+        correlation_id: { type: string }
+        causation_id: { type: string }
+
+    Modality:
+      type: string
+      enum:
+        - MODALITY_UNSPECIFIED
+        - MODALITY_IN_PERSON
+        - MODALITY_ONLINE_SYNC
+        - MODALITY_ONLINE_ASYNC
+        - MODALITY_BLENDED

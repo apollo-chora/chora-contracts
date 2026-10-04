@@ -1,0 +1,334 @@
+// =============================================================================
+// Chora Content Creation — Question authoring lifecycle events
+// =============================================================================
+//
+// Source-of-truth: docs/m14/cr-question-authoring-design-2026-05-15.md §6
+//   + ~/.claude/plans/golden-hopping-owl.md (D4 — async-everything)
+//   + .claude/skills/pub-sub-topology
+//
+// Aggregate root : Question (sub-entity of LearningAtom — design §2.6)
+// Owning domain  : Content Creation (chora_creation database)
+// Owning team    : Team 1 (Content)
+// Topic prefix   : chora.creation.question.*
+// Surface (admin): A+ Creator mode
+//
+// Three topics defined here (topic format chora.{domain}.{aggregate}.{event}.v{N}
+// per chora-contracts/CLAUDE.md §2):
+//
+//   - chora.creation.question.authored.v1
+//       Fired on POST manual create + on accept of an AI-generated candidate
+//       (both manual + accepted-AI paths create new Questions). Consumers:
+//       chora-consumption (atom-cache invalidation, refresh learner projection
+//       of mcq_payload / essay_payload), chora-sharing (atom-card update),
+//       Observability + O+ (per-author authoring volume metric).
+//
+//   - chora.creation.question.generation_requested.v1
+//       Fired by the chora-creation outbox at job creation time (D4 — every
+//       AI call is async). The chora-creation question-generation worker
+//       subscribes this topic, dispatches to Vertex AI Agent Engine
+//       (qgen_per_question for single-question jobs OR qgen_batch +
+//       chora-doc-parser for batch jobs), and on completion writes the
+//       candidate_questions_jsonb + emits .generation_completed.v1.
+//
+//   - chora.creation.question.generation_completed.v1
+//       Fired by the worker on terminal job status (success or failure).
+//       Consumers: Observability + O+ (job latency + cost dashboards),
+//       Notifications (notify author the job is ready for review or failed),
+//       chora-governance (record per-job IMDA D1 accountability evidence).
+//
+// Every event embeds chora.common.v1.EventEnvelope as field 1 — tenant scope,
+// GCID, trace context, schema version, and IMDA dimension tagging all live in
+// the envelope per ddd-enforcement.md "Event envelope mandatory fields".
+//
+// Cross-DB queries FORBIDDEN — these events are the ONLY mechanism for
+// cross-domain notification of question-authoring activity (per
+// chora-contracts/CLAUDE.md §4).
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.creation.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/creation/v1;creationv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// QuestionType — payload-shape discriminator
+// -----------------------------------------------------------------------------
+//
+// 16-value enum mirroring chora_creation.question_type Postgres ENUM
+// (services/chora-creation/migrations/0005_question_type_enum.up.sql)
+// + the OpenAPI QuestionType schema in creation-questions.yaml.
+//
+// Phyllis scope ships MCQ + OE only. The 14 RESERVED_* sentinels exist so the
+// proto enum stays additive-stable as new types onboard (per
+// chora-contracts/CLAUDE.md §8 versioning rules).
+//
+// Alphabetical order across reserved_* values is part of the contract.
+// DO NOT reorder; never reuse a tag for a different value.
+// -----------------------------------------------------------------------------
+enum QuestionType {
+  QUESTION_TYPE_UNSPECIFIED = 0;
+
+  // In scope for the 2026-05-15 Question Authoring CR.
+  QUESTION_TYPE_MCQ = 1;  // Multiple-Choice — deterministic grade
+  QUESTION_TYPE_OE  = 2;  // Open-Ended — LLM-graded downstream
+
+  // Reserved sentinels — alphabetical order per design §2.1.
+  QUESTION_TYPE_RESERVED_CODE_EXECUTION  =  3;
+  QUESTION_TYPE_RESERVED_COMPLETION      =  4;
+  QUESTION_TYPE_RESERVED_DRAG_DROP       =  5;
+  QUESTION_TYPE_RESERVED_FILL_BLANK      =  6;
+  QUESTION_TYPE_RESERVED_MATCHING        =  7;
+  QUESTION_TYPE_RESERVED_MULTI_SELECT    =  8;
+  QUESTION_TYPE_RESERVED_MULTIMEDIA      =  9;
+  QUESTION_TYPE_RESERVED_ORAL            = 10;
+  QUESTION_TYPE_RESERVED_ORDERING        = 11;
+  QUESTION_TYPE_RESERVED_PEER_GRADED     = 12;
+  QUESTION_TYPE_RESERVED_SHORT_ANSWER    = 13;
+  QUESTION_TYPE_RESERVED_SIMULATION      = 14;
+  QUESTION_TYPE_RESERVED_TABLE_COMPLETION = 15;
+  QUESTION_TYPE_RESERVED_TRUE_FALSE      = 16;
+}
+
+// -----------------------------------------------------------------------------
+// QuestionSourceType — provenance discriminator
+// -----------------------------------------------------------------------------
+//
+// Mirrors the chora_creation.revision_source_type Postgres ENUM
+// (services/chora-creation/migrations/0001_initial.sql:48).
+//
+// Values:
+//   - MANUAL — author wrote the question directly (path 1 in design §1)
+//   - AI_ASSIST — AI-generated; author reviewed + accepted (paths 2, 3, 4)
+//   - COMMUNITY_ATOM_BANK — sourced from cross-tenant atom bank (out of CR scope)
+// -----------------------------------------------------------------------------
+enum QuestionSourceType {
+  QUESTION_SOURCE_TYPE_UNSPECIFIED          = 0;
+  QUESTION_SOURCE_TYPE_MANUAL               = 1;
+  QUESTION_SOURCE_TYPE_AI_ASSIST            = 2;
+  QUESTION_SOURCE_TYPE_COMMUNITY_ATOM_BANK  = 3;
+}
+
+// -----------------------------------------------------------------------------
+// QuestionGenerationJobStatus — async job lifecycle state
+// -----------------------------------------------------------------------------
+//
+// 7-state lifecycle per design §2.5 + the
+// question_generation_jobs.status CHECK constraint.
+// -----------------------------------------------------------------------------
+enum QuestionGenerationJobStatus {
+  QUESTION_GENERATION_JOB_STATUS_UNSPECIFIED          = 0;
+  QUESTION_GENERATION_JOB_STATUS_REQUESTED            = 1;
+  QUESTION_GENERATION_JOB_STATUS_RUNNING              = 2;
+  QUESTION_GENERATION_JOB_STATUS_SUCCEEDED            = 3;
+  QUESTION_GENERATION_JOB_STATUS_FAILED               = 4;
+  QUESTION_GENERATION_JOB_STATUS_ACCEPTED             = 5;
+  QUESTION_GENERATION_JOB_STATUS_PARTIALLY_ACCEPTED   = 6;
+  QUESTION_GENERATION_JOB_STATUS_CANCELLED            = 7;
+}
+
+// -----------------------------------------------------------------------------
+// QuestionAuthored — chora.creation.question.authored.v1
+// -----------------------------------------------------------------------------
+//
+// Fired when a new Question is committed to chora_creation.questions —
+// either:
+//   - via POST /api/atoms/{atom_id}/questions (manual path)
+//   - via POST /api/atoms/{atom_id}/question-jobs/{job_id}/accept (AI path,
+//     after the author reviews + accepts the candidate)
+//
+// Consumers: chora-consumption (refresh atom-projection cache so the next
+// learner GET /api/atoms/{atom_id} surfaces the new mcq_payload /
+// essay_payload), chora-sharing (atom-card update), Observability + O+
+// (per-author authoring volume metric).
+// -----------------------------------------------------------------------------
+message QuestionAuthored {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 identifier of the newly authored Question.
+  string question_id = 2;
+
+  // UUIDv7 of the parent LearningAtom.
+  string atom_id = 3;
+
+  // Type of the question (drives downstream learner-projection shape).
+  QuestionType question_type = 4;
+
+  // Provenance — manual / AI-assist / community.
+  QuestionSourceType source_type = 5;
+
+  // GCID (UUIDv7) of the author who created the question.
+  // Duplicates envelope.gcid for filter-friendly subscribers.
+  string author_gcid = 6;
+
+  // Revision number of the corresponding question_revisions row that
+  // captures this authoring action. Monotonic per question_id; starts at 1.
+  int32 revision_number = 7;
+
+  // Revision_id (UUIDv7) of the corresponding question_revisions row.
+  string revision_id = 8;
+
+  // Optional — the job_id that produced this question via the AI path.
+  // Empty for manual authoring.
+  string source_job_id = 9;
+
+  // When the question was authored in the producer's domain database
+  // (chora_creation.questions.created_at for new questions; .updated_at for
+  // PATCH-driven re-authoring — only when source_type=MANUAL+revision>1).
+  google.protobuf.Timestamp authored_at = 10;
+}
+
+// -----------------------------------------------------------------------------
+// QuestionGenerationRequestedV2 — chora.creation.question.generation_requested.v2
+// -----------------------------------------------------------------------------
+//
+// ADR-195 WS7 (D7): the .v2 of generation_requested. Drops the fragmented
+// `job_type` discriminant and carries the unified compose model explicitly —
+// {operation:"compose", intent, input_kind}. The agent layer is UNCHANGED
+// (ADR-195 D2): the orchestrator/worker map (intent, input, plan) to the same
+// composer TaskContextQuestion fields it already consumes.
+//
+// Topic: chora.creation.question.generation_requested.v2
+//
+// Wire-compat with v1 during parallel-publish (ADR-195 D7 cutover): every
+// non-discriminant field keeps its v1 tag, so a v1 reader of a v2 payload sees
+// fields 2-13 unchanged (and ignores 14-16), and a v2 reader of a v1 payload
+// sees 2-13 unchanged (14-16 default-empty). Tag 5 is RESERVED (was job_type)
+// so it is never reused.
+//
+// Consumers: chora-creation question-generation worker (intra-domain; the WS4
+// runCompose dispatch reads `intent` directly, falling back to the legacy
+// job_type only on a v1 payload). NO consumer outside chora-creation reads the
+// discriminant.
+message QuestionGenerationRequestedV2 {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 identifier of the compose job row (chora_creation; the row is the
+  // ComposeJob aggregate — ADR-195 D1).
+  string job_id = 2;
+
+  // UUIDv7 of the target LearningAtom.
+  string atom_id = 3;
+
+  // GCID (UUIDv7) of the author who initiated the job.
+  string author_gcid = 4;
+
+  // Tag 5 was `job_type` (the retired QuestionGenerationJobType discriminant).
+  // Reserved so it is never reused; its information is now carried by
+  // `intent` + `input_kind` (ADR-195 D1/D7).
+  reserved 5;
+  reserved "job_type";
+
+  // For new_question + model_answer_fill: the target QuestionType. For a
+  // mixed-type plan the per-candidate type rides in settings_json's type_plan.
+  QuestionType question_type = 6;
+
+  // For model_answer_fill: the existing question_id being filled (FK to
+  // questions.question_id). Empty for new_question + image_regen.
+  string target_question_id = 7;
+
+  // Source-files input: GCS URI of the (first) uploaded source material. The
+  // canonical multi-file list rides in settings_json.source_files; this mirrors
+  // entry 0 for back-compat. Empty for prompt / by-hand input.
+  string source_blob_uri = 8;
+
+  // MIME type of source_blob_uri. Empty when source_blob_uri is empty.
+  string source_mime_type = 9;
+
+  // mana_action_pricing key the up-front debit was booked under.
+  string mana_action_code = 10;
+
+  // Units already debited at job creation time.
+  int32 mana_charged = 11;
+
+  // Settings JSON (echoed from the API request — requested_count, type_plan,
+  // difficulty, rubric, source_files[], image opt-ins, ...). JSON-encoded to
+  // keep the proto schema additive.
+  string settings_json = 12;
+
+  // When the job was requested at the producer's domain database.
+  google.protobuf.Timestamp requested_at = 13;
+
+  // -- ADR-195 WS7 compose model (replaces the retired job_type discriminant) --
+
+  // Operation discriminant. Always "compose" — the single unified authoring
+  // operation (ADR-195 D1). A genuine non-authoring operation, if one ever
+  // appears, takes a new value (YAGNI now).
+  string operation = 14;
+
+  // The compose Intent (the domain discriminant, ADR-195 D1). One of:
+  //   "new_question"      — mint N question atoms from the seed.
+  //   "model_answer_fill" — fill an existing question's model answer.
+  //   "image_regen"       — re-render ONE image of a parent candidate in place.
+  string intent = 15;
+
+  // The compose Input kind (the generation seed classification, ADR-195 D1).
+  // One of: "prompt" (pure-LLM) | "source_files" (RAG / grounding) | "by_hand"
+  // (author-inline, no LLM). Folded from Input via precedence
+  // by_hand > source_files > prompt.
+  string input_kind = 16;
+}
+
+// -----------------------------------------------------------------------------
+// QuestionGenerationCompletedV2 — chora.creation.question.generation_completed.v2
+// -----------------------------------------------------------------------------
+//
+// ADR-195 WS7 (D7): the .v2 of generation_completed. Drops `job_type` and
+// carries {operation:"compose", intent, input_kind}. Same wire-compat /
+// reserved-tag discipline as QuestionGenerationRequestedV2.
+//
+// Topic: chora.creation.question.generation_completed.v2
+//
+// Consumers: chora-observability + chora-governance + chora-notifications
+// consume this GENERICALLY (job latency / cost / accountability / notify) —
+// none branch on the discriminant, so the v1→v2 repoint is back-compat by
+// construction.
+message QuestionGenerationCompletedV2 {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 identifier of the compose job row.
+  string job_id = 2;
+
+  // UUIDv7 of the target LearningAtom.
+  string atom_id = 3;
+
+  // GCID (UUIDv7) of the author who initiated the job.
+  string author_gcid = 4;
+
+  // Tag 5 was `job_type` (retired — ADR-195 D1/D7). Reserved; the compose model
+  // rides on operation/intent/input_kind below.
+  reserved 5;
+  reserved "job_type";
+
+  // Terminal status — typically SUCCEEDED, FAILED, or CANCELLED.
+  QuestionGenerationJobStatus status = 6;
+
+  // Number of candidate questions produced by the worker (0 on failure).
+  int32 candidate_count = 7;
+
+  // On FAILED: short error category. Empty on SUCCEEDED.
+  string failure_category = 8;
+
+  // On FAILED: human-readable redacted error message (safe to surface in UI).
+  string failure_message = 9;
+
+  // Units refunded to the author's mana balance on FAILED. 0 on SUCCEEDED.
+  int32 mana_refunded = 10;
+
+  // When the worker transitioned the row to its terminal status.
+  google.protobuf.Timestamp completed_at = 11;
+
+  // -- ADR-195 WS7 compose model (replaces the retired job_type discriminant) --
+
+  // Operation discriminant. Always "compose" (ADR-195 D1).
+  string operation = 12;
+
+  // The compose Intent: "new_question" | "model_answer_fill" | "image_regen".
+  string intent = 13;
+
+  // The compose Input kind: "prompt" | "source_files" | "by_hand".
+  string input_kind = 14;
+}

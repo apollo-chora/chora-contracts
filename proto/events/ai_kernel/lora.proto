@@ -1,0 +1,122 @@
+// =============================================================================
+// chora.ai_kernel.v1 — LoRA adapter lifecycle events
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 5
+//   (Self-hosted Gemma 4 with per-tenant LoRA — 3-target deploy: Vertex AI
+//    Endpoints + Cloud Run + GPU + Autopilot GPU)
+// + .claude/skills/gemma-lora-tenant/SKILL.md
+//
+// Owning domain : AI Kernel (chora_ai_kernel database)
+// Owning team   : Team 3 (Platform)
+// Topic prefix  : chora.ai_kernel.lora.*
+//
+// LoRA adapters provide per-tenant fine-tuning over the shared Gemma 4 base.
+// Lifecycle: trained -> deployed -> retired. M15 milestone deliverable.
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.ai_kernel.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/ai_kernel/v1;aikernelv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// LoraDeploymentTarget — 3-target deploy strategy.
+// -----------------------------------------------------------------------------
+enum LoraDeploymentTarget {
+  LORA_DEPLOYMENT_TARGET_UNSPECIFIED = 0;
+  LORA_DEPLOYMENT_TARGET_VERTEX_ENDPOINT = 1;  // Vertex AI Endpoints (managed)
+  LORA_DEPLOYMENT_TARGET_CLOUD_RUN_GPU = 2;     // Cloud Run + GPU (scale-to-zero)
+  LORA_DEPLOYMENT_TARGET_AUTOPILOT_GPU = 3;     // GKE Autopilot + GPU (steady)
+}
+
+// -----------------------------------------------------------------------------
+// LoraAdapterTrained — chora.ai_kernel.lora.adapter_trained.v1
+// -----------------------------------------------------------------------------
+//
+// Published when LoRA training completes (Vertex AI Custom Training job
+// terminates successfully). Carries eval metrics for go/no-go review
+// before deployment.
+message LoraAdapterTrained {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — LoraAdapter aggregate identifier.
+  string adapter_id = 2;
+
+  // Tenant scope.
+  string tenant_id = 3;
+
+  // Base model identifier (e.g., "gemma-4-9b").
+  string base_model_id = 4;
+
+  // GCS URI for the training dataset (read-only at training time).
+  string training_dataset_uri = 5;
+
+  // Aggregate eval score on the held-out validation set (0.0–1.0).
+  float eval_score = 6;
+
+  // GCS URI for the trained adapter weights.
+  string weights_uri = 7;
+
+  // Adapter version (semver-ish, e.g., "1.0.0").
+  string version = 8;
+
+  google.protobuf.Timestamp trained_at = 9;
+}
+
+// -----------------------------------------------------------------------------
+// LoraAdapterDeployed — chora.ai_kernel.lora.adapter_deployed.v1
+// -----------------------------------------------------------------------------
+//
+// Published when an adapter is deployed to one of the 3 targets. Multiple
+// deployments per adapter are valid (e.g., dev on Cloud Run + GPU,
+// production on Vertex Endpoint).
+message LoraAdapterDeployed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string adapter_id = 2;
+  string tenant_id = 3;
+  string base_model_id = 4;
+  string version = 5;
+
+  LoraDeploymentTarget deployment_target = 6;
+
+  // Concrete deployment identifier (e.g., Vertex Endpoint resource name,
+  // Cloud Run revision name, GKE Deployment name).
+  string deployment_resource_name = 7;
+
+  // GCID of the operator who promoted the deployment.
+  string deployed_by_gcid = 8;
+
+  google.protobuf.Timestamp deployed_at = 9;
+}
+
+// -----------------------------------------------------------------------------
+// LoraAdapterRetired — chora.ai_kernel.lora.adapter_retired.v1
+// -----------------------------------------------------------------------------
+//
+// Published when an adapter is retired (replaced by a newer version, or
+// tenant downgraded out of the LoRA add-on). Soft-delete; weights remain
+// in GCS for audit until crypto-shred policy expiry.
+message LoraAdapterRetired {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string adapter_id = 2;
+  string tenant_id = 3;
+  string base_model_id = 4;
+  string version = 5;
+
+  // Optional successor adapter ID (UUIDv7).
+  string successor_adapter_id = 6;
+
+  string retired_by_gcid = 7;
+  string reason = 8;
+
+  google.protobuf.Timestamp retired_at = 9;
+}

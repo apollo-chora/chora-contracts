@@ -1,0 +1,79 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Content Consumption — GoalProgressUpdated
+  version: 1.0.0
+  description: |
+    Published when an active learner-owned Goal's mastered-concept share CHANGES
+    but has NOT yet reached 100% (the 100% crossing emits GoalGraduated instead).
+    Drives the A+ today-bar Goal %-ring's live movement (CHO-1921) + optional
+    progress nudges.
+
+    - Domain: Content Consumption (`chora_consumption` DB)
+    - Aggregate root: `goal` (learner-owned, ADR-204 §2)
+    - Topic: `chora.consumption.goal.progress_updated.v1`
+    - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
+    - Source proto: `proto/events/consumption/goal.proto`
+       message `chora.consumption.v1.GoalProgressUpdated`
+
+    Idempotent via the envelope idempotency_key (goal_id + mastered_concepts +
+    occurred_at) — a redelivered weakness.grown that re-derives the same count
+    does not re-fire. Embeds the mandatory `chora.common.v1.EventEnvelope` as
+    field 1.
+  contact:
+    name: Team 1 (Content) + Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+    description: Google Cloud Pub/Sub (chora-489812 platform host)
+
+channels:
+  goalProgressUpdated:
+    address: chora.consumption.goal.progress_updated.v1
+    description: Single-event topic for GoalProgressUpdated.
+    messages:
+      goalProgressUpdated:
+        $ref: '#/components/messages/GoalProgressUpdated'
+
+operations:
+  publishGoalProgressUpdated:
+    action: send
+    channel:
+      $ref: '#/channels/goalProgressUpdated'
+    summary: Publish a GoalProgressUpdated event
+    description: |
+      Emitted by chora-consumption from the goal-graduation subscriber when an
+      active Goal's mastered-concept count moves but stays below 100%.
+    messages:
+      - $ref: '#/channels/goalProgressUpdated/messages/goalProgressUpdated'
+
+  consumeGoalProgressUpdated:
+    action: receive
+    channel:
+      $ref: '#/channels/goalProgressUpdated'
+    summary: Subscribe to GoalProgressUpdated events
+    description: |
+      Primary consumers (loosely-coupled, attach later):
+      - Consumption (Companion) — companion nudge / encouragement
+      - Observability — engagement evidence
+      The A+ FE reads the %-ring from the goals read-model directly.
+    messages:
+      - $ref: '#/channels/goalProgressUpdated/messages/goalProgressUpdated'
+
+components:
+  messages:
+    GoalProgressUpdated:
+      name: GoalProgressUpdated
+      title: Goal Progress Updated (mastered share moved)
+      summary: A learner-owned Goal's verified-progress share changed (below 100%)
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/consumption/goal.proto#/chora.consumption.v1.GoalProgressUpdated'

@@ -1,0 +1,61 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Delivery — ApplicationRejected
+  version: 1.0.0
+  description: |
+    Reviewer rejected the application (terminal). Distinct from Withdrawn
+    (applicant terminal).
+
+    - Domain: Content Delivery (`chora_delivery` DB)
+    - Topic: `chora.delivery.application.rejected.v1`
+    - Source proto: `proto/events/delivery/application.proto`
+       message `chora.delivery.v1.ApplicationRejected`
+  contact:
+    name: Chora Delivery Team (Team 2)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  applicationRejected:
+    address: chora.delivery.application.rejected.v1
+    messages:
+      applicationRejected:
+        $ref: '#/components/messages/ApplicationRejected'
+
+operations:
+  publishApplicationRejected:
+    action: send
+    channel:
+      $ref: '#/channels/applicationRejected'
+    messages:
+      - $ref: '#/channels/applicationRejected/messages/applicationRejected'
+
+  consumeApplicationRejected:
+    action: receive
+    channel:
+      $ref: '#/channels/applicationRejected'
+    description: |
+      Consumers:
+        - chora-notifications (rejection-letter email)
+        - chora-observability (rejection-rate KPI)
+    messages:
+      - $ref: '#/channels/applicationRejected/messages/applicationRejected'
+
+components:
+  messages:
+    ApplicationRejected:
+      name: ApplicationRejected
+      title: Course Application rejected by reviewer
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/delivery/application.proto#/chora.delivery.v1.ApplicationRejected'

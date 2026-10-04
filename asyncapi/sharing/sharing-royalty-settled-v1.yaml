@@ -1,0 +1,65 @@
+asyncapi: "3.0.0"
+info:
+  title: "Chora Content Sharing — royalty.settled.v1"
+  version: "1.0.0"
+  description: |
+    Published when a royalty payment is settled — a grantee's usage of a
+    licensed atom triggers a non-cash credit to the owner. Carries the
+    settlement ID, grant ID, owner GCID, grantee tenant, atom ID, amount,
+    currency (mana/coins/reputation/usd), usage context, and the source
+    event that triggered the settlement.
+
+    Owning team   : Team 1 (Content)
+    Owning domain : Content Sharing (chora_sharing database)
+    Surface       : C+ Connect+
+  contact:
+    name: "Chora Platform Team — Content Track"
+  license:
+    name: "Proprietary"
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  production:
+    host: "pubsub.googleapis.com"
+    protocol: googlepubsub
+    description: "Google Cloud Pub/Sub (production)"
+  emulator:
+    host: "localhost:8085"
+    protocol: googlepubsub
+    description: "Cloud Pub/Sub Emulator (local dev)"
+
+channels:
+  royaltySettled:
+    address: "chora.sharing.royalty.settled.v1"
+    messages:
+      royaltySettled:
+        $ref: "#/components/messages/RoyaltySettled"
+
+operations:
+  publishRoyaltySettled:
+    action: send
+    channel:
+      $ref: "#/channels/royaltySettled"
+    summary: "Publish a royalty settled event"
+    description: |
+      Producer: chora-sharing service (royalty settlement worker).
+      Consumers: Consumption (author non-cash credit balance update),
+                 Governance (financial audit),
+                 Observability (royalty pipeline metrics).
+    messages:
+      - $ref: "#/channels/royaltySettled/messages/royaltySettled"
+
+components:
+  messages:
+    RoyaltySettled:
+      name: "RoyaltySettled"
+      title: "Royalty Settled"
+      summary: "A royalty payment was settled to an atom owner"
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf;version=3
+      payload:
+        schemaFormat: "application/vnd.google.protobuf;version=3"
+        schema:
+          protoFile: "proto/events-flat/sharing/royalty/settled.proto"
+          messageName: "chora.sharing.v1.RoyaltySettled"

@@ -1,0 +1,243 @@
+// =============================================================================
+// Chora Agent Executor Service (gRPC)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 2 D5
+//   + .claude/skills/agent-executor-go/SKILL.md
+//   + memory project_chora_data_plane.md, feedback_ai_go_first.md
+//
+// Go agent executor — receives crew/agent invocations from the Python
+// LangGraph orchestrator and runs them. Stateless function-of-input design.
+// Cloud Run scale-to-zero per agent (one Cloud Run service per executor agent).
+//
+// Per BLANKET migration (Tier 2 D5): all 24 runtime AI agents migrate to this
+// hybrid pattern at M14 — Python orchestrator drives the StateGraph, Go
+// executor runs each node's actual work (model calls, tool calls, validators).
+//
+// **6-AGENT CONTENT GATE** (per Phyllis MVP §5.7 + audit-aikernel §3 + ADR
+// content gate model):
+//   1. validator         — input sanity + LearningAtom contract validation
+//   2. classifier        — topic / difficulty / locale labelling
+//   3. web_researcher    — fact-grounding via web search adapter
+//   4. q_and_a_generator — MCQ / short-answer body generation
+//   5. evaluator         — quality + correctness scoring
+//   6. reporter          — Three-Audience explainability stamps + IMDA D2 evidence
+//
+// Each gate agent is a SEPARATE Cloud Run service (one per agent_role) using
+// THIS gRPC contract. The orchestrator (Python LangGraph) calls each agent
+// in sequence as graph nodes. ExecuteAgentRequest.agent_role is the
+// dispatch dimension (e.g., "creation-validator", "creation-classifier",
+// "creation-web-researcher", "creation-q-and-a-generator",
+// "creation-evaluator", "creation-reporter").
+//
+// Executor handles:
+//   - tool calls (browser, search, RAG retrieval, domain-service reads)
+//   - gRPC out to Model Broker Router → Gateway for LLM invocations
+//   - gRPC out to Guardrail Service for runtime evaluation
+//   - OTLP span emission with OpenInference attributes
+//   - idempotent retry-safe handlers (orchestrator may retry on pod loss)
+//
+// Two RPC shapes:
+//   - ExecuteAgent: synchronous unary (single agent step)
+//   - StreamAgentExecution: server-stream of ExecutionEvents for long-running
+//     agents (browser interactions, multi-tool reasoning)
+//
+// mTLS via Cloud Service Mesh; SPIFFE identity in mesh; W3C trace context in
+// gRPC metadata propagated from the orchestrator.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.services.agent_executor.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/agent_executor/v1;agent_executorv1";
+
+import "google/protobuf/timestamp.proto";
+
+// -----------------------------------------------------------------------------
+// Service
+// -----------------------------------------------------------------------------
+
+service AgentExecutor {
+  // Synchronous unary execution of a single agent step. Returns the full
+  // result in one response. Idempotent on execution_id (UUIDv7).
+  rpc ExecuteAgent(ExecuteAgentRequest) returns (ExecuteAgentResponse);
+
+  // Server-streaming execution for long-running agents. Emits ExecutionEvent
+  // messages (tool calls, model chunks, guardrail hits, intermediate thoughts).
+  // Final event has is_final=true and carries the full ExecuteAgentResponse.
+  rpc StreamAgentExecution(ExecuteAgentRequest) returns (stream ExecutionEvent);
+}
+
+// -----------------------------------------------------------------------------
+// Shared enums
+// -----------------------------------------------------------------------------
+
+// Final state of an agent execution. Mirrors the orchestrator's perspective.
+enum ExecutionFinalState {
+  EXECUTION_FINAL_STATE_UNSPECIFIED = 0;
+  EXECUTION_FINAL_STATE_SUCCESS = 1;     // agent produced output
+  EXECUTION_FINAL_STATE_FAILED = 2;      // agent failed (transport / logic)
+  EXECUTION_FINAL_STATE_BLOCKED = 3;     // guardrail blocked (input or output)
+  EXECUTION_FINAL_STATE_ESCALATED = 4;   // requires HITL — orchestrator interrupt
+}
+
+// Mirrors GuardrailTier across services. Duplicated locally per cross-service
+// no-import convention.
+enum GuardrailTier {
+  GUARDRAIL_TIER_UNSPECIFIED = 0;
+  GUARDRAIL_TIER_REGEX = 1;
+  GUARDRAIL_TIER_DLP = 2;
+  GUARDRAIL_TIER_MODEL_ARMOR = 3;
+  GUARDRAIL_TIER_OUTPUT_VALIDATOR = 4;
+}
+
+// Mirrors EvaluationResult from guardrail_service.proto.
+enum GuardrailResult {
+  GUARDRAIL_RESULT_UNSPECIFIED = 0;
+  GUARDRAIL_RESULT_PASS = 1;
+  GUARDRAIL_RESULT_BLOCK = 2;
+  GUARDRAIL_RESULT_REDACT = 3;
+  GUARDRAIL_RESULT_FLAG = 4;
+}
+
+// Kind of streaming execution event.
+enum ExecutionEventKind {
+  EXECUTION_EVENT_KIND_UNSPECIFIED = 0;
+  EXECUTION_EVENT_KIND_TOOL_CALL_STARTED = 1;
+  EXECUTION_EVENT_KIND_TOOL_CALL_COMPLETED = 2;
+  EXECUTION_EVENT_KIND_MODEL_CHUNK_EMITTED = 3;
+  EXECUTION_EVENT_KIND_GUARDRAIL_HIT = 4;
+  EXECUTION_EVENT_KIND_INTERMEDIATE_THOUGHT = 5;
+}
+
+// -----------------------------------------------------------------------------
+// Common message types
+// -----------------------------------------------------------------------------
+
+message ContextMessage {
+  // Chat role: typically "system", "user", "assistant", "tool".
+  string role = 1;
+
+  // Message content.
+  string content = 2;
+}
+
+message ToolInvocation {
+  // Canonical tool name (e.g., "rag.retrieve", "web.search", "domain.atom_lookup").
+  string tool_name = 1;
+
+  // Tool arguments as JSON-stringified payload.
+  string args = 2;
+
+  // Tool result as JSON-stringified payload.
+  string result = 3;
+
+  // Latency observed by the executor for the tool call.
+  int32 latency_ms = 4;
+}
+
+message GuardrailDecision {
+  // Which tier ran (REGEX / DLP / MODEL_ARMOR / OUTPUT_VALIDATOR).
+  GuardrailTier tier = 1;
+
+  // What the tier returned.
+  GuardrailResult result = 2;
+
+  // Optional violation type (mirrors EvaluateResponse.violation_type).
+  string violation_type = 3;
+}
+
+// -----------------------------------------------------------------------------
+// ExecuteAgent RPC
+// -----------------------------------------------------------------------------
+
+message ExecuteAgentRequest {
+  // UUIDv7. Idempotency key for this execution. The Go executor dedups on it
+  // for any state-mutating side effect (per agent-executor-go discipline).
+  string execution_id = 1;
+
+  // Tenant scope. Required.
+  string tenant_id = 2;
+
+  // Agent identity (AGID — distinct from user GCID).
+  string agid = 3;
+
+  // Agent role identifier (e.g., "creation-validator", "consumption-hint-author").
+  string agent_role = 4;
+
+  // Versioned prompt template ID (from config / Secret Manager). Executor
+  // resolves to the actual prompt body — caller does NOT pass prompt strings.
+  string prompt_template_id = 5;
+
+  // Input payload — typically JSON-stringified domain input (atom draft id,
+  // session id, search query, etc.).
+  string input_payload = 6;
+
+  // Conversation / context window for multi-turn agents. Optional.
+  repeated ContextMessage context_window = 7;
+
+  // Available tool names the executor may invoke during this step. The
+  // executor enforces this allowlist; tools not listed are refused.
+  repeated string available_tools = 8;
+}
+
+message ExecuteAgentResponse {
+  // Echo of ExecuteAgentRequest.execution_id.
+  string execution_id = 1;
+
+  // Output payload — typically JSON-stringified result (validation verdict,
+  // generated text, classification label, retrieval hits, etc.).
+  string output_payload = 2;
+
+  // All tool invocations performed during this execution (for observability
+  // + the orchestrator's checkpoint).
+  repeated ToolInvocation tools_invoked = 3;
+
+  // Cumulative LLM tokens consumed (sum across all Gateway calls in this step).
+  int64 tokens_consumed_total = 4;
+
+  // Cumulative cost in USD micros (1e-6).
+  int64 cost_micros_total = 5;
+
+  // All guardrail decisions taken during this execution.
+  repeated GuardrailDecision guardrail_decisions = 6;
+
+  // Final state of this agent step.
+  ExecutionFinalState final_state = 7;
+
+  // Completion timestamp (executor clock).
+  google.protobuf.Timestamp completed_at = 8;
+
+  // When final_state != SUCCESS, human-readable explanation.
+  string error_message = 9;
+}
+
+// -----------------------------------------------------------------------------
+// StreamAgentExecution RPC
+// -----------------------------------------------------------------------------
+
+message ExecutionEvent {
+  // Echo of ExecuteAgentRequest.execution_id.
+  string execution_id = 1;
+
+  // What kind of event this is.
+  ExecutionEventKind event_kind = 2;
+
+  // Event payload — kind-specific JSON-stringified body.
+  // For TOOL_CALL_*: ToolInvocation-shaped JSON.
+  // For MODEL_CHUNK_EMITTED: {chunk_index, delta_content}.
+  // For GUARDRAIL_HIT: GuardrailDecision-shaped JSON.
+  // For INTERMEDIATE_THOUGHT: free-text reasoning trace.
+  string payload = 3;
+
+  // Event timestamp (executor clock) — useful for ordered replay in UIs.
+  google.protobuf.Timestamp emitted_at = 4;
+
+  // True only on the FINAL event of the stream. When true, final_response is set.
+  bool is_final = 5;
+
+  // Set ONLY on the final event. Carries the complete ExecuteAgentResponse so
+  // the orchestrator can checkpoint with full accounting at stream end.
+  ExecuteAgentResponse final_response = 6;
+}

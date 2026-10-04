@@ -1,0 +1,76 @@
+# Chora-LMS Protobuf module config — buf v2 schema
+#
+# Source-of-truth: chora-contracts/proto/README.md
+# Run `buf lint` and `buf breaking` against main in CI per AP-01.
+
+version: v2
+
+modules:
+  - path: proto
+    name: buf.build/chora/contracts
+    # proto/events-flat/ is a generated artifact — self-contained per-aggregate
+    # protos for GCP Pub/Sub Schema Registry consumption (Path C, locked
+    # 2026-05-10). It duplicates packages from proto/events/ by design, so
+    # exclude it from the buf module to avoid duplicate-symbol errors during
+    # `buf lint` / `buf build` / codegen. Schema Registry reads the files
+    # directly via google_pubsub_schema.aggregate.definition.
+    excludes:
+      - proto/events-flat
+
+  # proto-frozen/ — FROZEN WIRE for event generations still live in Pub/Sub whose
+  # current-generation source was renamed or deleted (ruling 44). A SEPARATE
+  # module, not a subdirectory of proto/, because a frozen file can legitimately
+  # redeclare a helper message that the rename never touched: proto-frozen/
+  # consumption/ritual.proto and proto/events/consumption/ritual.proto both
+  # declare RitualStepStamp, and one module cannot hold both
+  # ("RitualStepStamp declared multiple times"). Being its own module also keeps
+  # it out of `buf generate`, which targets the proto module explicitly.
+  - path: proto-frozen
+
+deps: []
+
+lint:
+  use:
+    - STANDARD
+  except:
+    # We use UUIDv7 strings instead of well-known proto types (deliberate;
+    # makes events portable across proto-light languages and avoids
+    # runtime adapter overhead).
+    - PACKAGE_VERSION_SUFFIX
+    # By-purpose layout per proto/README.md: proto/{common,events,services}/.
+    # Imports resolve via filesystem path (verified via `buf build` exit 0);
+    # only chora/common/v1/envelope.proto + chora/consumption/v1/knowledge_graph.proto
+    # are imported by package-path style and live at canonical paths.
+    # Other files use by-purpose layout, which conflicts with these
+    # buf STANDARD rules. Bulk relocation to package-path layout is a
+    # follow-up cleanup item, not S1-blocking.
+    - PACKAGE_DIRECTORY_MATCH
+    - PACKAGE_SAME_DIRECTORY
+    - DIRECTORY_SAME_PACKAGE
+  ignore_only:
+    # Service contracts don't carry the EventEnvelope; that's only for events.
+    SERVICE_SUFFIX:
+      - proto/services
+    # RPC request/response naming + uniqueness are real cleanup items but
+    # not S1-blocking (codegen works; `buf build` exit 0). Many service
+    # protos reuse Request/Response across stream + sync RPCs by design.
+    # Track as M11.9b proto cleanup; revisit during S3 AI Kernel rework.
+    RPC_REQUEST_RESPONSE_UNIQUE:
+      - proto/services
+    RPC_REQUEST_STANDARD_NAME:
+      - proto/services
+    RPC_RESPONSE_STANDARD_NAME:
+      - proto/services
+  enum_zero_value_suffix: _UNSPECIFIED
+  rpc_allow_same_request_response: false
+  rpc_allow_google_protobuf_empty_requests: false
+  rpc_allow_google_protobuf_empty_responses: false
+  service_suffix: ""
+
+breaking:
+  use:
+    - WIRE_JSON
+  except:
+    # Field number reuse explicitly forbidden by proto3 — no exemptions.
+    []
+  ignore_unstable_packages: false

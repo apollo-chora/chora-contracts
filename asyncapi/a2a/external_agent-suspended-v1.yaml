@@ -1,0 +1,65 @@
+asyncapi: "3.0.0"
+info:
+  title: "Chora Agent-to-Agent — external_agent.suspended.v1"
+  version: "1.0.0"
+  description: |
+    Published when an external agent is temporarily suspended (reversible).
+    In SUSPENDED state, all invocations are rejected at the A2A Gateway;
+    the AGID + key remain on file. Suspension has no automatic TTL —
+    explicit reinstatement event TBD v2.
+
+    Owning team   : Team 3 (Platform)
+    Owning domain : Agent-to-Agent (chora_a2a database)
+    Reference     : ADR-132 §3
+  contact:
+    name: "Chora Platform Team — Platform Track"
+  license:
+    name: "Proprietary"
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  production:
+    host: "pubsub.googleapis.com"
+    protocol: googlepubsub
+    description: "Google Cloud Pub/Sub (production)"
+  emulator:
+    host: "localhost:8085"
+    protocol: googlepubsub
+    description: "Cloud Pub/Sub Emulator (local dev)"
+
+channels:
+  externalAgentSuspended:
+    address: "chora.a2a.external_agent.suspended.v1"
+    messages:
+      externalAgentSuspended:
+        $ref: "#/components/messages/ExternalAgentSuspended"
+
+operations:
+  publishExternalAgentSuspended:
+    action: send
+    channel:
+      $ref: "#/channels/externalAgentSuspended"
+    summary: "Publish an external agent suspension event"
+    description: |
+      Producer: chora-a2a-gateway (platform_ops or automated rule).
+      Consumers: A2A Gateway routing tables (deny-list update),
+                 O+ partner registry,
+                 Audit log,
+                 Notifications (notify partner contact).
+    messages:
+      - $ref: "#/channels/externalAgentSuspended/messages/externalAgentSuspended"
+
+components:
+  messages:
+    ExternalAgentSuspended:
+      name: "ExternalAgentSuspended"
+      title: "External Agent Suspended"
+      summary: "An external agent has been temporarily suspended"
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf;version=3
+      payload:
+        schemaFormat: "application/vnd.google.protobuf;version=3"
+        schema:
+          protoFile: "proto/events/a2a/external_agent.proto"
+          messageName: "chora.a2a.v1.ExternalAgentSuspended"

@@ -1,0 +1,86 @@
+// =============================================================================
+// chora.creation.v1 — AtomRevision domain events (append-only content)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 2 D8
+// + .claude/rules/ddd-enforcement.md (Aggregate Invariant #4: AtomRevision
+//   is APPEND-ONLY — never UPDATE or DELETE content in place)
+//
+// AtomRevision is a child entity of the LearningAtom aggregate root.
+// Content (atom-type-specific JSONB) and validation rules are IMMUTABLE
+// once published. The revision_number is monotonically increasing within a
+// given atom; consumers requiring version-stable reads should pin against
+// (atom_id, revision_id).
+//
+// Only the publish transition emits an event — drafts remain internal to
+// the Creation domain until an author explicitly publishes a revision.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.creation.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/creation/v1;creationv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// ValidationRuleType — strategy for evaluating a learner's answer.
+// Mirrors the GraphQL ValidationRuleType enum in graphql/creation.graphql
+// and the answer-validation rule kinds wired in the Creation domain service.
+enum ValidationRuleType {
+  VALIDATION_RULE_TYPE_UNSPECIFIED = 0;
+  VALIDATION_RULE_TYPE_EXACT_MATCH = 1;
+  VALIDATION_RULE_TYPE_REGEX = 2;
+  VALIDATION_RULE_TYPE_RANGE = 3;
+  VALIDATION_RULE_TYPE_KEYWORD = 4;
+  VALIDATION_RULE_TYPE_MANUAL = 5;
+  VALIDATION_RULE_TYPE_LLM_GRADED = 6;
+}
+
+// -----------------------------------------------------------------------------
+// AtomRevisionPublished — chora.creation.revision.published.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a new AtomRevision transitions DRAFT -> PUBLISHED. Carries
+// the (atom_id, revision_id, revision_number) triple plus a content hash so
+// that downstream consumers (Consumption / Sharing / Delivery) can verify
+// integrity without re-reading the full content payload across the cross-DB
+// boundary (which is FORBIDDEN per ddd-enforcement HARD RULE).
+//
+// Consumers:
+//   - Content Consumption  -> invalidate cached atom render, refresh KG
+//   - Content Sharing      -> re-screen atom for PvP duel suitability
+//   - Content Delivery     -> notify Course/Booking owners of revision change
+//   - AI Kernel             -> 6-agent content gate runs on revision content
+message AtomRevisionPublished {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 identifier of the newly published AtomRevision.
+  string revision_id = 2;
+
+  // UUIDv7 identifier of the parent LearningAtom (cross-aggregate FK is
+  // permitted within the same domain database; cross-domain references
+  // are UUID-only without FK constraint).
+  string atom_id = 3;
+
+  // Monotonically increasing revision number within the parent atom (1..N).
+  // First publish = 1; subsequent publishes increment by 1.
+  int32 revision_number = 4;
+
+  // Hex-encoded SHA-256 of the canonical content JSONB. Lets consumers
+  // dedupe / detect drift without round-tripping the full payload.
+  string content_hash = 5;
+
+  // The dominant validation-rule type for this revision (atoms with
+  // multiple sub-rules emit the most-restrictive type; manual/LLM
+  // override deterministic types when present).
+  ValidationRuleType validation_rule_type = 6;
+
+  // GCID of the author who published this revision (may differ from the
+  // atom's original author_gcid if collaborative editing is enabled).
+  string published_by_gcid = 7;
+
+  // When the revision was published in the producer's domain database.
+  google.protobuf.Timestamp published_at = 8;
+}

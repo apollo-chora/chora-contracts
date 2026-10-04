@@ -1,0 +1,1028 @@
+openapi: 3.2.0
+info:
+  title: "Chora Content Delivery — Course Authoring + Review API (CJ#2)"
+  version: "1.1.0"
+  description: |
+    Author-facing REST API for the **Course** aggregate in the Content
+    Delivery domain (Customer Journey #2). A Course is the primary delivery
+    aggregate authored by instructors, reviewed by training admins, and
+    published to learners on the public catalogue (/a/catalog).
+
+    **State FSM** (per CJ#2 spec):
+
+      DRAFT            → AWAITING_REVIEW  (instructor publishes via /publish)
+      AWAITING_REVIEW  → PUBLISHED        (training_admin releases via /release)
+      AWAITING_REVIEW  → DRAFT            (training_admin rejects via /reject)
+      PUBLISHED        → ARCHIVED         (admin archives — out of scope v1)
+
+    **Surface ownership** (CLAUDE.md §2):
+      - A+ surface hosts the authoring UI (/a/courses/new)
+      - R+ surface (Rhythm+) hosts the review queue (/r/courses/review)
+      - Learners browse /a/catalog (existing pages); enrol via existing
+        `POST /api/courses/{id}/enrol` flow once PUBLISHED.
+
+    **RBAC** (per CJ#2 directive row at docs/m13/e2e-fe-coord-directive-
+    2026-05-16.md §3):
+      - `create` / `update` / `publish`: caller is the author OR holds the
+        `instructor` typed role in `x-mesh-user-roles` header.
+      - `release` / `reject` / list `AWAITING_REVIEW`: caller holds the
+        `training-admin` typed role.
+
+    **RLS** (chora_delivery.courses):
+      - tenant_isolation policy filters every read/write by current_setting
+        ('chora.tenant_id').
+      - PUBLISHED rows are visible to all roles in-tenant.
+      - DRAFT + AWAITING_REVIEW + ARCHIVED rows are visible only to the
+        author OR to callers holding the `training-admin` role.
+
+    **Pub/Sub event** — `chora.delivery.course.released.v1` is emitted on
+    the AWAITING_REVIEW → PUBLISHED state transition. Subscribers:
+    chora-consumption (catalog cache invalidation), chora-observability
+    (governance dashboard timeline).
+
+    AP-01: This contract exists BEFORE implementation. Source-of-truth:
+    `docs/TODO-DEVELOPMENT.md` "Customer Journey #2" section + directive
+    row at `docs/m13/e2e-fe-coord-directive-2026-05-16.md` §3.
+
+  contact:
+    name: "Chora Platform Team — Delivery Track"
+  license:
+    name: "Proprietary"
+
+servers:
+  - url: "https://api.chora.site/delivery/v1"
+    description: "Production"
+  - url: "https://api.staging.chora.site/delivery/v1"
+    description: "Staging"
+  - url: "http://localhost:8082/delivery/v1"
+    description: "Local dev"
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: courses
+    description: |
+      Course aggregate CRUD + state-FSM transitions. Owned by Content
+      Delivery (`chora_delivery.courses`).
+
+paths:
+  # ---------------------------------------------------------------------------
+  # POST /api/v1/courses — instructor creates DRAFT shell
+  # ---------------------------------------------------------------------------
+  /api/v1/courses:
+    post:
+      tags: [courses]
+      operationId: createCourse
+      summary: "Create a DRAFT course shell (instructor)"
+      description: |
+        Instructor scaffolds a Course shell with title + description +
+        learning objectives + prerequisites + test-set references. State
+        is set to DRAFT; author_gcid is bound to the caller's GCID.
+
+        RBAC: caller must hold `instructor` role (or `admin`).
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCourseRequest"
+            examples:
+              minimal:
+                summary: "Minimal DRAFT shell with one test-set"
+                value:
+                  title: "Algorithmic Thinking 101"
+                  description: "Intro to algorithmic problem solving."
+                  learning_objectives: ["LO1: solve simple recursion"]
+                  prerequisites: []
+                  test_set_ids: ["019e2f93-d586-71b5-8c3d-e2b0d0d50208"]
+      responses:
+        "201":
+          description: "Course created (DRAFT)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Course"
+        "400":
+          description: "Validation failed (missing title / unknown test_set_id)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: "Caller lacks instructor role."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    get:
+      tags: [courses]
+      operationId: listCourses
+      summary: "List courses by state (R+ admin queue for AWAITING_REVIEW)"
+      description: |
+        Returns the caller-tenant-scoped courses in the given state. The
+        primary use-case is the R+ training-admin review queue for state
+        `AWAITING_REVIEW` (RBAC enforced: only `training-admin` role can
+        list AWAITING_REVIEW + DRAFT + ARCHIVED). Cursor paginated.
+
+        State filter semantics:
+          - `state=AWAITING_REVIEW` — only training-admin (403 otherwise).
+          - `state=DRAFT` — author OR training-admin.
+          - `state=PUBLISHED` — any in-tenant caller.
+          - `state=ARCHIVED` — only training-admin.
+      parameters:
+        - name: state
+          in: query
+          required: true
+          description: "Lifecycle filter — required for the R+ review queue."
+          schema:
+            $ref: "#/components/schemas/CourseState"
+        - name: cursor
+          in: query
+          required: false
+          description: "Opaque cursor; omit for first page."
+          schema:
+            type: string
+        - name: page_size
+          in: query
+          required: false
+          description: "Items per page (default 20, max 100)."
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        "200":
+          description: "Cursor-paginated list."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CourseList"
+        "403":
+          description: "Caller lacks role for the requested state filter."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ---------------------------------------------------------------------------
+  # PATCH/GET /api/v1/courses/{id}
+  # ---------------------------------------------------------------------------
+  /api/v1/courses/{course_id}:
+    parameters:
+      - $ref: "#/components/parameters/CourseIdPath"
+    get:
+      tags: [courses]
+      operationId: getCourse
+      summary: "Fetch a Course by id"
+      description: |
+        Returns the Course aggregate. Visibility constraints:
+          - PUBLISHED rows are visible to any in-tenant caller.
+          - DRAFT / AWAITING_REVIEW / ARCHIVED are visible only to the
+            author OR a caller holding `training-admin`.
+      responses:
+        "200":
+          description: "Course fetched."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Course"
+        "404":
+          description: "Course not found / not visible to caller."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    patch:
+      tags: [courses]
+      operationId: updateCourse
+      summary: "Update DRAFT content (instructor)"
+      description: |
+        Updates title / description / learning_objectives / prerequisites /
+        test_set_ids on a DRAFT course. Rejects with 409 if course is
+        not in DRAFT state. RBAC: caller is author OR has `instructor` role.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateCourseRequest"
+      responses:
+        "200":
+          description: "Course updated."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Course"
+        "403":
+          description: "Caller is not author and lacks instructor role."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: "Course not found."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: "Course is not in DRAFT state."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ---------------------------------------------------------------------------
+  # POST /api/v1/courses/{id}/publish — DRAFT -> AWAITING_REVIEW
+  # ---------------------------------------------------------------------------
+  /api/v1/courses/{course_id}/publish:
+    parameters:
+      - $ref: "#/components/parameters/CourseIdPath"
+    post:
+      tags: [courses]
+      operationId: publishCourse
+      summary: "Publish DRAFT to AWAITING_REVIEW (instructor)"
+      description: |
+        Transitions DRAFT → AWAITING_REVIEW for R+ training-admin review.
+        Validates: title non-empty, ≥1 test_set_id, ≥1 learning_objective.
+        RBAC: caller must be the author OR hold `instructor` role.
+      responses:
+        "200":
+          description: "Course published to AWAITING_REVIEW."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Course"
+        "400":
+          description: "Validation failed (no test-sets / no objectives)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: "Caller is not author and lacks instructor role."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: "Course not found."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: "Course is not in DRAFT state."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ---------------------------------------------------------------------------
+  # POST /api/v1/courses/{id}/release — AWAITING_REVIEW -> PUBLISHED
+  # ---------------------------------------------------------------------------
+  /api/v1/courses/{course_id}/release:
+    parameters:
+      - $ref: "#/components/parameters/CourseIdPath"
+    post:
+      tags: [courses]
+      operationId: releaseCourse
+      summary: "Release AWAITING_REVIEW to PUBLISHED (training-admin)"
+      description: |
+        Training-admin sets commercial fields (price / SkillsFuture / open
+        date / instructor roster) and transitions AWAITING_REVIEW →
+        PUBLISHED. Sets `published_at = now()`. Emits
+        `chora.delivery.course.released.v1` Pub/Sub event.
+
+        RBAC: caller must hold `training-admin` role.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReleaseCourseRequest"
+      responses:
+        "200":
+          description: "Course released to PUBLISHED."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Course"
+        "400":
+          description: "Validation failed (negative price / empty instructor roster)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: "Caller lacks training-admin role."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: "Course not found."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: "Course is not in AWAITING_REVIEW state."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ---------------------------------------------------------------------------
+  # POST /api/v1/courses/{id}/reject — AWAITING_REVIEW -> DRAFT
+  # ---------------------------------------------------------------------------
+  /api/v1/courses/{course_id}/reject:
+    parameters:
+      - $ref: "#/components/parameters/CourseIdPath"
+    post:
+      tags: [courses]
+      operationId: rejectCourse
+      summary: "Reject AWAITING_REVIEW back to DRAFT (training-admin)"
+      description: |
+        Training-admin rejects the submission with `review_notes`. Sets
+        review_notes on the row and transitions AWAITING_REVIEW → DRAFT
+        for the instructor to revise.
+
+        RBAC: caller must hold `training-admin` role.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RejectCourseRequest"
+      responses:
+        "200":
+          description: "Course rejected back to DRAFT."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Course"
+        "400":
+          description: "Validation failed (empty review_notes)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: "Caller lacks training-admin role."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: "Course not found."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: "Course is not in AWAITING_REVIEW state."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ---------------------------------------------------------------------------
+  # Course content curriculum (CHO-1612) — heterogeneous ordered items.
+  # A Course COLLECTS content items (atom/video/youtube/document/
+  # live_classroom/assessment); it never owns atoms. Every mutation emits
+  # chora.delivery.course.content_composed.v1 with the full ordered list.
+  # ---------------------------------------------------------------------------
+  /api/v1/courses/{course_id}/content:
+    parameters:
+      - $ref: "#/components/parameters/CourseIdPath"
+    get:
+      tags: [courses]
+      operationId: listCourseContent
+      summary: "List the ordered curriculum items for a course"
+      responses:
+        "200":
+          description: "Ordered content items."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CourseContent"
+        "404":
+          description: "Course content not found."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    post:
+      tags: [courses]
+      operationId: addCourseContentItem
+      summary: "Append a typed content item to the course curriculum"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddCourseContentItemRequest"
+      responses:
+        "201":
+          description: "Item appended; returns the full ordered curriculum."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CourseContent"
+        "400":
+          description: "Invalid kind / ref shape / title / duplicate / cap exceeded."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/courses/{course_id}/content/reorder:
+    parameters:
+      - $ref: "#/components/parameters/CourseIdPath"
+    post:
+      tags: [courses]
+      operationId: reorderCourseContent
+      summary: "Reorder the curriculum (explicit full permutation of item ids)"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReorderCourseContentRequest"
+      responses:
+        "200":
+          description: "Reordered; returns the full ordered curriculum."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CourseContent"
+        "400":
+          description: "Reorder list is not an exact permutation of current items."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/courses/{course_id}/content/{item_id}:
+    parameters:
+      - $ref: "#/components/parameters/CourseIdPath"
+      - name: item_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      tags: [courses]
+      operationId: removeCourseContentItem
+      summary: "Remove a content item (positions compact)"
+      responses:
+        "200":
+          description: "Removed; returns the full ordered curriculum."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CourseContent"
+        "404":
+          description: "Item not found in this course."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ---------------------------------------------------------------------------
+  # POST /api/v1/courses/{id}/content/upload-url — mint a V4 signed PUT URL
+  # for a course-content media upload (video / PDF / image). The FE PUTs the
+  # bytes DIRECTLY to GCS via the returned upload_url (the BFF never proxies
+  # the binary), then attaches the returned gs:// object_ref as a content item
+  # via POST /content with kind=video|document. Mirrors the atom-media pattern
+  # (ADR-156). Bucket + signer are wired from env COURSE_MEDIA_BUCKET on
+  # chora-delivery; 503 when unset (fail-loud, no stub).
+  # ---------------------------------------------------------------------------
+  /api/v1/courses/{course_id}/content/upload-url:
+    parameters:
+      - $ref: "#/components/parameters/CourseIdPath"
+    post:
+      tags: [courses]
+      operationId: mintCourseContentUploadUrl
+      summary: "Mint a V4 signed PUT URL for a course-content media upload (instructor)"
+      description: |
+        Mints a single-use V4 signed URL the FE PUTs a video / PDF / image to.
+        Flow: (1) call this endpoint with the file's mime + size_bytes;
+        (2) PUT the raw bytes to the returned `upload_url` with the same
+        Content-Type; (3) POST /content with `kind` ∈ {video, document} and
+        `ref` set to the returned `object_ref` (a canonical `gs://` URI).
+        The learner read-path resolves `gs://` refs to fresh signed GET URLs.
+
+        RBAC: caller is the course author OR holds the `instructor` role.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MintContentUploadUrlRequest"
+      responses:
+        "200":
+          description: "Signed upload URL minted."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentUploadUrl"
+        "400":
+          description: "Invalid body (missing mime / non-positive size_bytes)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: "Caller is not author and lacks instructor role."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: "Course not found / not visible to caller."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: "size_bytes exceeds the per-tenant content-media cap."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "415":
+          description: "mime not in the supported course-media enum."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: "Course-media signer not wired (COURSE_MEDIA_BUCKET unset)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ---------------------------------------------------------------------------
+  # GET /v1/me/courses/{course_id}/content/media-urls (ADR-185) — learner-scoped,
+  # ENROLMENT-GATED signed-GET resolution for the course's uploaded media.
+  #
+  # The learner curriculum read (/api/v1/me/courses/{id}/content) is a
+  # chora-consumption projection that returns gs:// refs RAW — consumption
+  # cannot sign chora-delivery's bucket (cross-DB forbidden). chora-delivery (the
+  # bucket+GSA owner) exposes this endpoint; it signs ONLY its own bucket and
+  # gates on the caller's enrolment. The BFF (chora-gateway MeCourseContent) fans
+  # this out in parallel with the projection read and swaps gs://→signed `ref`.
+  # BFF-internal: the FE never calls this directly.
+  # ---------------------------------------------------------------------------
+  /v1/me/courses/{course_id}/content/media-urls:
+    parameters:
+      - $ref: "#/components/parameters/CourseIdPath"
+    get:
+      tags: [courses]
+      operationId: resolveMyCourseMediaUrls
+      summary: "Resolve a course's uploaded-media gs:// refs to signed GET URLs (enrolled learner)"
+      description: |
+        Returns a map of content `item_id` → fresh short-lived V4 signed GET URL
+        for every video/document item whose `ref` is a `gs://` URI. Identity is
+        the lowercase `gcid` + `X-Tenant-Id` headers (stamped by the mesh/BFF).
+        Accepts no caller-supplied refs — the handler reads its own course-content
+        aggregate, so nothing is spoofable. Items with non-`gs://` refs are
+        omitted from the map (the BFF leaves their `ref` untouched).
+      responses:
+        "200":
+          description: "Resolved signed-GET map (empty when the course has no gs:// media)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CourseMediaUrls"
+        "401":
+          description: "gcid header missing."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: "Caller is not enrolled in this course."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: "Course-media signer not wired (COURSE_MEDIA_BUCKET unset)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    CourseIdPath:
+      name: course_id
+      in: path
+      required: true
+      description: "UUIDv7 of the Course aggregate."
+      schema:
+        type: string
+        format: uuid
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: "Client-supplied idempotency key (UUIDv7 recommended)."
+      schema:
+        type: string
+        maxLength: 64
+
+  schemas:
+    # -- Course content curriculum (CHO-1612) --
+
+    ContentKind:
+      type: string
+      description: "Type of a course content item."
+      enum: [atom, video, youtube, document, live_classroom, assessment]
+
+    CourseContentItem:
+      type: object
+      required: [item_id, kind, ref, title, position]
+      properties:
+        item_id: { type: string, format: uuid }
+        kind: { $ref: "#/components/schemas/ContentKind" }
+        ref:
+          type: string
+          description: |
+            UUID for atom/assessment/live_classroom; for video/youtube/document
+            an http(s) URL OR a `gs://` URI minted by
+            POST .../content/upload-url. On the learner read-path a `gs://`
+            ref is resolved to a fresh signed GET URL.
+        title: { type: string, maxLength: 200 }
+        position: { type: integer, minimum: 0 }
+        object_ref:
+          type: string
+          description: |
+            Present only when a `gs://` ref was resolved to a signed GET URL
+            (read-paths): the durable `gs://` URI, while `ref` carries the
+            ephemeral signed URL. Set by the instructor `contentDTO` and by the
+            BFF learner merge (ADR-185). Never persisted.
+
+    CourseContent:
+      type: object
+      required: [course_id, items]
+      properties:
+        course_id: { type: string, format: uuid }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/CourseContentItem" }
+
+    AddCourseContentItemRequest:
+      type: object
+      required: [kind, ref, title]
+      properties:
+        kind: { $ref: "#/components/schemas/ContentKind" }
+        ref: { type: string }
+        title: { type: string, maxLength: 200 }
+
+    ReorderCourseContentRequest:
+      type: object
+      required: [ordered_item_ids]
+      properties:
+        ordered_item_ids:
+          type: array
+          description: "Exact permutation of the current item ids in the new order."
+          items: { type: string, format: uuid }
+
+    # -- Course-content media upload (signed-PUT mint, mirrors ADR-156) --
+
+    ContentUploadMime:
+      type: string
+      description: "Supported MIME types for an uploaded course-content media file."
+      enum:
+        - video/mp4
+        - video/webm
+        - video/quicktime
+        - application/pdf
+        - image/jpeg
+        - image/png
+        - image/webp
+
+    MintContentUploadUrlRequest:
+      type: object
+      required: [mime, size_bytes]
+      properties:
+        mime:
+          $ref: "#/components/schemas/ContentUploadMime"
+        size_bytes:
+          type: integer
+          format: int64
+          minimum: 1
+          description: "Declared upload size in bytes; rejected with 413 over the cap."
+        filename:
+          type: string
+          maxLength: 255
+          description: "Optional original filename (used only for the object-name hint)."
+
+    ContentUploadUrl:
+      type: object
+      required: [upload_url, object_ref, expires_at, max_size_bytes]
+      properties:
+        upload_url:
+          type: string
+          description: "V4 signed URL; the FE PUTs the raw bytes here with the same Content-Type."
+        object_ref:
+          type: string
+          description: "Canonical gs:// URI to store as the content item `ref` after the PUT succeeds."
+        expires_at:
+          type: string
+          format: date-time
+          description: "ISO-8601 UTC expiry of the signed URL."
+        max_size_bytes:
+          type: integer
+          format: int64
+          description: "Per-tenant course-media size cap in bytes."
+
+    # -- Learner-media signed-GET resolution (ADR-185) --
+
+    CourseMediaUrls:
+      type: object
+      required: [resolved]
+      properties:
+        resolved:
+          type: object
+          description: |
+            Map of content `item_id` → fresh signed GET URL. Only video/document
+            items with a `gs://` ref appear; items with non-`gs://` refs or whose
+            signing failed are omitted (the BFF leaves their `ref` untouched).
+          additionalProperties:
+            type: string
+            description: "V4 signed GET URL the FE plays/downloads directly."
+        expires_at:
+          type: string
+          format: date-time
+          description: "Approximate ISO-8601 UTC expiry hint for the signed URLs (refetch after)."
+
+    # -- Course certification definition (consumed by the issuance chain) --
+
+    CourseCertType:
+      type: string
+      description: "Kind of certificate a completed course awards."
+      enum: [COMPLETION, COMPETENCY, ACCREDITED, MICRO_CREDENTIAL]
+
+    CourseCertification:
+      type: object
+      description: |
+        Certificate the course awards on completion. Defined at authoring time
+        and CONSUMED by the issuance chain (the learner must meet
+        `passing_score_pct` and, when `require_all_content`, complete every
+        content item). Absent / `enabled=false` ⇒ the course awards no cert.
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
+          default: false
+          description: "Whether the course awards a certificate."
+        cert_type:
+          $ref: "#/components/schemas/CourseCertType"
+        passing_score_pct:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: "Minimum assessment score (percent) required to earn the cert."
+        require_all_content:
+          type: boolean
+          default: true
+          description: "Whether the learner must complete every content item to earn the cert."
+
+    # -- Lifecycle --
+
+    CourseState:
+      type: string
+      description: |
+        Course lifecycle state.
+
+        Transitions:
+          DRAFT            → AWAITING_REVIEW   via /publish (instructor)
+          AWAITING_REVIEW  → PUBLISHED         via /release (training-admin)
+          AWAITING_REVIEW  → DRAFT             via /reject  (training-admin)
+          PUBLISHED        → ARCHIVED          out-of-scope v1
+      enum: [DRAFT, AWAITING_REVIEW, PUBLISHED, ARCHIVED]
+
+    # -- Aggregate --
+
+    Course:
+      type: object
+      description: "Course aggregate root."
+      required:
+        - id
+        - tenant_id
+        - title
+        - state
+        - author_gcid
+        - test_set_ids
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: "UUIDv7 of the Course."
+        tenant_id:
+          type: string
+          format: uuid
+        title:
+          type: string
+          minLength: 1
+          maxLength: 256
+        description:
+          type: string
+          maxLength: 4096
+        state:
+          $ref: "#/components/schemas/CourseState"
+        author_gcid:
+          type: string
+          format: uuid
+          description: "GCID of the authoring instructor."
+        learning_objectives:
+          type: array
+          items:
+            type: string
+            maxLength: 512
+        prerequisites:
+          type: array
+          items:
+            type: string
+            maxLength: 512
+        test_set_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+        instructor_gcids:
+          type: array
+          description: "Roster of instructors set at release time."
+          items:
+            type: string
+            format: uuid
+        price_sgd_cents:
+          type: integer
+          format: int64
+          minimum: 0
+          description: "Course price in SGD cents (set at release)."
+        sf_eligible:
+          type: boolean
+          description: "SkillsFuture Singapore funding eligible."
+          default: false
+        scheduled_open_at:
+          type: string
+          format: date-time
+          description: "When enrolment opens (set at release; optional)."
+        review_notes:
+          type: string
+          description: "Set by training-admin on /reject."
+        published_at:
+          type: string
+          format: date-time
+          description: "When /release transitioned to PUBLISHED."
+        certification:
+          $ref: "#/components/schemas/CourseCertification"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    CreateCourseRequest:
+      type: object
+      required:
+        - title
+        - test_set_ids
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 256
+        description:
+          type: string
+          maxLength: 4096
+        learning_objectives:
+          type: array
+          items:
+            type: string
+            maxLength: 512
+        prerequisites:
+          type: array
+          items:
+            type: string
+            maxLength: 512
+        test_set_ids:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            format: uuid
+        certification:
+          $ref: "#/components/schemas/CourseCertification"
+
+    UpdateCourseRequest:
+      type: object
+      description: "Partial update of DRAFT content. All fields optional."
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 256
+        description:
+          type: string
+          maxLength: 4096
+        learning_objectives:
+          type: array
+          items:
+            type: string
+            maxLength: 512
+        prerequisites:
+          type: array
+          items:
+            type: string
+            maxLength: 512
+        test_set_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+        certification:
+          $ref: "#/components/schemas/CourseCertification"
+
+    ReleaseCourseRequest:
+      type: object
+      required:
+        - price_sgd_cents
+        - sf_eligible
+        - instructor_gcids
+      properties:
+        price_sgd_cents:
+          type: integer
+          format: int64
+          minimum: 0
+          description: "Price in SGD cents."
+        sf_eligible:
+          type: boolean
+          description: "SkillsFuture Singapore funding eligible."
+        instructor_gcids:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            format: uuid
+          description: "Roster of authorised instructors."
+        scheduled_open_at:
+          type: string
+          format: date-time
+          description: "When enrolment opens (optional, default = now)."
+
+    RejectCourseRequest:
+      type: object
+      required:
+        - review_notes
+      properties:
+        review_notes:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          description: "Reviewer feedback on why the course was rejected."
+
+    CourseList:
+      type: object
+      required:
+        - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Course"
+        next_cursor:
+          type: string
+          description: "Opaque cursor for the next page; absent on last page."
+
+    ErrorResponse:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          description: "HTTP status text."
+        message:
+          type: string
+          description: "Human-readable error explanation."

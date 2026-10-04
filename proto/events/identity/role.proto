@@ -1,0 +1,139 @@
+// =============================================================================
+// chora.identity.v1 — CourseRole projection events
+// =============================================================================
+//
+// Source-of-truth:
+//   - docs/m13/phyllis-mvp-2026-05-08.md §6 (per-course role projection)
+//   - docs/m13/audit-identity-fillgaps.md §3.2 + CHO-NEW-5 (subscriber on
+//     chora.delivery.enrollment.created.v1 projects CourseRole)
+//   - docs/architecture-review-inputs-2026-05-07.md Tier 1 D1
+//
+// Owning domain : Identity (chora_identity database)
+// Owning team   : Team 3 (Platform)
+// Topic prefix  : chora.identity.role.*
+// Surface       : A+ /me/roles + R+ class roster admin
+//
+// Phyllis Comic Ch4 P3 dual-card invariant: same GCID, different role per
+// course context. The CourseRole projection materialises that invariant —
+// chora-identity subscribes to `chora.delivery.enrollment.created.v1` +
+// `chora.delivery.course.created.v1` and emits `chora.identity.role.granted.v1`
+// when a learner / instructor role is materialised.
+//
+// Critical for Phyllis MVP Step 6 (Phyllis enrolls in Mr. Chen's CSM-Prep
+// course; GET /me/roles?course_id=CSM-Prep returns role=learner; same GCID
+// gets role=instructor for her own CSPO-Fundamentals course).
+//
+// Distinct from chora.identity.tenancy_membership.* (which is tenant-level
+// role) — this proto is COURSE-level role.
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.identity.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/identity/v1;identityv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// CourseRole — role a GCID holds within a single course context.
+// -----------------------------------------------------------------------------
+//
+// Aligns with chora.identity.v1.TenantMembershipRole but is COURSE-scoped.
+// A single GCID may hold DIFFERENT CourseRoles in DIFFERENT courses simultaneously
+// (e.g., Phyllis = instructor in CSPO + learner in CSM-Prep).
+enum CourseRole {
+  COURSE_ROLE_UNSPECIFIED = 0;
+  COURSE_ROLE_LEARNER = 1;          // Default — enrolment grants this
+  COURSE_ROLE_INSTRUCTOR = 2;       // Course owner / lead instructor
+  COURSE_ROLE_TEACHING_ASSISTANT = 3; // Co-teach / TA delegate
+  COURSE_ROLE_OBSERVER = 4;         // Read-only audit / compliance reviewer
+}
+
+// -----------------------------------------------------------------------------
+// RoleGrantSource — what triggered the role projection.
+// -----------------------------------------------------------------------------
+//
+// Idempotency dimension — the same (gcid, course_id, role) tuple may be
+// projected from multiple sources (e.g., enrolment subscriber AND admin
+// override). Carrying the source aids auditor reconstruction.
+enum RoleGrantSource {
+  ROLE_GRANT_SOURCE_UNSPECIFIED = 0;
+  ROLE_GRANT_SOURCE_ENROLMENT = 1;          // chora.delivery.enrollment.created.v1
+  ROLE_GRANT_SOURCE_COURSE_CREATION = 2;    // chora.delivery.course.created.v1 (instructor)
+  ROLE_GRANT_SOURCE_ADMIN_OVERRIDE = 3;     // H+ admin manually granted
+  ROLE_GRANT_SOURCE_APPLICATION_ACCEPTED = 4; // chora.delivery.application.accepted.v1 (cf. application.proto)
+}
+
+// -----------------------------------------------------------------------------
+// RoleGranted — chora.identity.role.granted.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a CourseRole projection is established (subscriber to
+// upstream Delivery events, or via direct admin override). Idempotent on
+// (gcid, course_id, role) — replays produce the same row.
+//
+// Consumers:
+//   - chora-bff-gateway (cache /me/roles?course_id=X response)
+//   - chora-observability (audit log entry — IMDA D2 Transparency evidence)
+//   - chora-creation (instructor edit-permission gating cache)
+message RoleGranted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — CourseRole projection record identifier.
+  string role_assignment_id = 2;
+
+  // GCID receiving the role (UUIDv7).
+  string gcid = 3;
+
+  // Tenant scope — same as envelope.tenant_id (carried for redundancy).
+  string tenant_id = 4;
+
+  // Cross-domain reference to chora_delivery.courses.course_id (UUID, no FK).
+  string course_id = 5;
+
+  CourseRole role = 6;
+
+  // What triggered the projection (audit dimension).
+  RoleGrantSource source = 7;
+
+  // Reference to the upstream event that drove this projection (e.g., the
+  // chora.delivery.enrollment.created.v1 event_id). Empty for admin overrides.
+  string source_event_id = 8;
+
+  // GCID of the actor who initiated the upstream event (for ENROLMENT,
+  // typically equals `gcid` — self-enrolment; for ADMIN_OVERRIDE, the admin's
+  // GCID).
+  string granted_by_gcid = 9;
+
+  google.protobuf.Timestamp granted_at = 10;
+}
+
+// -----------------------------------------------------------------------------
+// RoleRevoked — chora.identity.role.revoked.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a CourseRole is revoked (un-enrolment, admin removal,
+// course closure cascade). Soft-delete only — the underlying assignment
+// record is preserved with a revoked_at timestamp.
+message RoleRevoked {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string role_assignment_id = 2;
+  string gcid = 3;
+  string tenant_id = 4;
+  string course_id = 5;
+
+  // The role that WAS held (snapshot for audit).
+  CourseRole prior_role = 6;
+
+  // Free-form reason (e.g., "unenrolled", "admin_removed", "course_closed").
+  string reason = 7;
+
+  string revoked_by_gcid = 8;
+
+  google.protobuf.Timestamp revoked_at = 9;
+}

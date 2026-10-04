@@ -1,0 +1,81 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Sharing - post moderation (request + result)
+  version: 1.0.0
+  description: |
+    ADR-254 D1/D4 (R1): post bodies are moderated by the content_moderation agent
+    through the kennel (moderate lane), never by an HTTP call from chora-sharing. A new
+    post is persisted as pending_moderation (hidden from everyone but its author) with
+    the request in the same transaction; the result publishes or rejects it. JSON-wire;
+    envelope.idempotency_key = post_id. Source proto:
+    `proto/events/sharing/post_moderation.proto`.
+  contact:
+    name: Chora Content Team (Team 1)
+  license:
+    name: Proprietary
+
+defaultContentType: application/json
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  postModerationRequested:
+    address: chora.sharing.post_moderation.requested.v1
+    messages:
+      postModerationRequested:
+        $ref: '#/components/messages/PostModerationRequested'
+  postModerationCompleted:
+    address: chora.sharing.post_moderation.completed.v1
+    messages:
+      postModerationCompleted:
+        $ref: '#/components/messages/PostModerationCompleted'
+
+operations:
+  publishPostModerationRequested:
+    action: send
+    channel:
+      $ref: '#/channels/postModerationRequested'
+    description: chora-sharing outbox (CHORA_OUTBOX_DISPATCH_PUBSUB=1), same transaction as the pending post.
+    messages:
+      - $ref: '#/channels/postModerationRequested/messages/postModerationRequested'
+  consumePostModerationRequested:
+    action: receive
+    channel:
+      $ref: '#/channels/postModerationRequested'
+    description: the kennel generic workflow (subscription chora-ai-kernel-orchestrator.sharing-post-moderation-requested).
+    messages:
+      - $ref: '#/channels/postModerationRequested/messages/postModerationRequested'
+  publishPostModerationCompleted:
+    action: send
+    channel:
+      $ref: '#/channels/postModerationCompleted'
+    description: the kennel; status OK | FAILED | REJECTED; verdict approved | rejected.
+    messages:
+      - $ref: '#/channels/postModerationCompleted/messages/postModerationCompleted'
+  consumePostModerationCompleted:
+    action: receive
+    channel:
+      $ref: '#/channels/postModerationCompleted'
+    description: chora-sharing (subscription chora-sharing.post-moderation-completed) flips the post to published or rejected.
+    messages:
+      - $ref: '#/channels/postModerationCompleted/messages/postModerationCompleted'
+
+components:
+  messages:
+    PostModerationRequested:
+      name: PostModerationRequested
+      contentType: application/json
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/sharing/post_moderation.proto#/chora.sharing.v1.PostModerationRequested'
+    PostModerationCompleted:
+      name: PostModerationCompleted
+      contentType: application/json
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/sharing/post_moderation.proto#/chora.sharing.v1.PostModerationCompleted'

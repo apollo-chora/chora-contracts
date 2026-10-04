@@ -1,0 +1,107 @@
+// =============================================================================
+// chora.delivery.v1 — Work-Based Learning (WBL) placement events
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 2 D7+D8
+// + .claude/rules/ddd-enforcement.md
+// + .claude/skills/domain-content-delivery/SKILL.md.
+//
+// Owning domain  : Content Delivery (chora_delivery database)
+// Owning team    : Team 2 (Delivery)
+// Topic prefix   : chora.delivery.wbl.*
+//
+// Work-Based Learning placements pair a learner with a host organisation
+// + mentor for on-the-job learning hours that count toward certification.
+//
+// Per ADR-129/130/131 collapse mandate, this proto absorbs what was
+// previously the standalone `chora.wbl.*` topics.
+//
+// Cross-domain references (no FK):
+//   - learner_gcid, mentor_gcid : Identity (UUID, no FK)
+//   - host_org_id               : Tenancy (UUID, no FK; tenants may host)
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.delivery.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/delivery/v1;deliveryv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// WblPlacementCreated — chora.delivery.wbl.placement_created.v1
+// -----------------------------------------------------------------------------
+//
+// Published when a WBL placement is provisioned (learner + host + mentor
+// assigned). Drives Notifications (intro emails) + workspace setup.
+message WblPlacementCreated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 identifier of the WBL placement.
+  string placement_id = 2;
+
+  // GCID of the placed learner.
+  string learner_gcid = 3;
+
+  // UUID of the host organisation (Tenancy).
+  string host_org_id = 4;
+
+  // GCID of the assigned mentor at the host.
+  string mentor_gcid = 5;
+
+  // Planned placement window.
+  google.protobuf.Timestamp scheduled_start = 6;
+  google.protobuf.Timestamp scheduled_end = 7;
+
+  google.protobuf.Timestamp created_at = 8;
+}
+
+// -----------------------------------------------------------------------------
+// WblPlacementStarted — chora.delivery.wbl.placement_started.v1
+// -----------------------------------------------------------------------------
+//
+// Published on placement start. Marks the beginning of hours accrual.
+message WblPlacementStarted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string placement_id = 2;
+
+  string learner_gcid = 3;
+
+  string host_org_id = 4;
+
+  string mentor_gcid = 5;
+
+  google.protobuf.Timestamp scheduled_start = 6;
+  google.protobuf.Timestamp scheduled_end = 7;
+
+  google.protobuf.Timestamp started_at = 8;
+}
+
+// -----------------------------------------------------------------------------
+// WblPlacementCompleted — chora.delivery.wbl.placement_completed.v1
+// -----------------------------------------------------------------------------
+//
+// Published on placement completion. hours_completed feeds the
+// Certification + Consumption path-progress flows.
+message WblPlacementCompleted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string placement_id = 2;
+
+  string learner_gcid = 3;
+
+  string host_org_id = 4;
+
+  string mentor_gcid = 5;
+
+  google.protobuf.Timestamp scheduled_start = 6;
+  google.protobuf.Timestamp scheduled_end = 7;
+
+  // Total verified on-the-job hours (decimal precision; e.g., 37.5).
+  float hours_completed = 8;
+
+  google.protobuf.Timestamp completed_at = 9;
+}

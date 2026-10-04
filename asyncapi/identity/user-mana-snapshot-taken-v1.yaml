@@ -1,0 +1,63 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Identity — UserManaSnapshotTaken
+  version: 1.0.0
+  description: |
+    Published periodically (or at lifecycle boundaries) to capture a
+    point-in-time wallet snapshot for analytics, billing reconciliation,
+    and federated closure saga audit. Does NOT mutate the ledger.
+
+    - Domain: Identity (`chora_identity` DB)
+    - Topic: `chora.identity.user_mana.snapshot_taken.v1`
+    - Source proto: `proto/events/identity/user_mana.proto`
+       message `chora.identity.v1.UserManaSnapshotTaken`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  userManaSnapshotTaken:
+    address: chora.identity.user_mana.snapshot_taken.v1
+    messages:
+      userManaSnapshotTaken:
+        $ref: '#/components/messages/UserManaSnapshotTaken'
+
+operations:
+  publishUserManaSnapshotTaken:
+    action: send
+    channel:
+      $ref: '#/channels/userManaSnapshotTaken'
+    messages:
+      - $ref: '#/channels/userManaSnapshotTaken/messages/userManaSnapshotTaken'
+
+  consumeUserManaSnapshotTaken:
+    action: receive
+    channel:
+      $ref: '#/channels/userManaSnapshotTaken'
+    description: |
+      Consumers: BigQuery streaming (mana_balance_history fact table),
+      Observability (per-tier balance distributions), Closure
+      Orchestrator (saga step evidence at lifecycle boundaries).
+    messages:
+      - $ref: '#/channels/userManaSnapshotTaken/messages/userManaSnapshotTaken'
+
+components:
+  messages:
+    UserManaSnapshotTaken:
+      name: UserManaSnapshotTaken
+      title: User Mana Snapshot Taken
+      summary: Point-in-time wallet snapshot for analytics + audit
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/identity/user_mana.proto#/chora.identity.v1.UserManaSnapshotTaken'

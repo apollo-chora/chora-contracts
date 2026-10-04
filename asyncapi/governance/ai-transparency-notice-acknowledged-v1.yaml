@@ -1,0 +1,63 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Governance — AiTransparencyNoticeAcknowledged
+  version: 1.0.0
+  description: |
+    Published when a learner acknowledges the AI Transparency Notice (ADR-225).
+    A NOTICE acknowledgement — NOT a consent grant (see ADR-117 for consent).
+    IMDA D2 Transparency evidence (ISO/IEC 25059:2023 "User Controllability —
+    consent UI presence").
+
+    - Domain: Governance (`chora_governance` DB)
+    - Topic: `chora.governance.ai_transparency_notice.acknowledged.v1`
+    - Source proto: `proto/events/governance/ai_transparency.proto`
+       message `chora.governance.v1.AiTransparencyNoticeAcknowledged`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  aiTransparencyNoticeAcknowledged:
+    address: chora.governance.ai_transparency_notice.acknowledged.v1
+    messages:
+      aiTransparencyNoticeAcknowledged:
+        $ref: '#/components/messages/AiTransparencyNoticeAcknowledged'
+
+operations:
+  publishAiTransparencyNoticeAcknowledged:
+    action: send
+    channel:
+      $ref: '#/channels/aiTransparencyNoticeAcknowledged'
+    messages:
+      - $ref: '#/channels/aiTransparencyNoticeAcknowledged/messages/aiTransparencyNoticeAcknowledged'
+
+  consumeAiTransparencyNoticeAcknowledged:
+    action: receive
+    channel:
+      $ref: '#/channels/aiTransparencyNoticeAcknowledged'
+    description: |
+      Consumers: O+ IMDA dashboard (D2 Transparency — acknowledgement coverage),
+      governance audit.
+    messages:
+      - $ref: '#/channels/aiTransparencyNoticeAcknowledged/messages/aiTransparencyNoticeAcknowledged'
+
+components:
+  messages:
+    AiTransparencyNoticeAcknowledged:
+      name: AiTransparencyNoticeAcknowledged
+      title: AI Transparency Notice Acknowledged
+      summary: A learner acknowledged the AI Transparency Notice
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/governance/ai_transparency.proto#/chora.governance.v1.AiTransparencyNoticeAcknowledged'

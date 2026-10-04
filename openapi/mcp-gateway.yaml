@@ -1,0 +1,347 @@
+openapi: "3.2.0"
+info:
+  title: Chora MCP Gateway API
+  version: "0.1.0"
+  description: |
+    Model Context Protocol (MCP) Gateway exposing Chora capabilities to
+    external AI agents (e.g., Claude Desktop, ChatGPT plugins, custom
+    LLM-driven copilots).
+
+    This contract is served via GCP API Gateway (in parallel with the A2A
+    Gateway per ADR-132). The MCP Gateway is the **MCP-as-a-Service**
+    deliverable referenced by CHO-27 and `domain-a2a` skill (MCP Gateway
+    add-on).
+
+    Identity model:
+      - External callers authenticate with a per-partner API key issued
+        and managed by chora-a2a-gateway/partners. The MCP Gateway
+        delegates API key validation by AGID lookup.
+      - All inbound MCP calls are tied to the partner's AGID (UUIDv7).
+        AGID is DISTINCT from GCID; agents CANNOT hold TenantMembership
+        (CLAUDE.md §1, .claude/rules/ddd-enforcement.md §10).
+
+    Protocol:
+      - MCP JSON-RPC 2.0 over HTTP+JSON.
+      - Two endpoints: `tools/list` (discovery) and `tools/call`
+        (invocation).
+      - Tool result payloads include a `citations` array per IMDA D4
+        Transparency dimension.
+
+    Tools exposed (skeleton):
+      - `atom_search`           — search published learning atoms
+      - `course_catalog`        — list public Course/Class catalogue
+      - `companion_nudge`        — emit a Companion nudge to a learner
+      - `governance_check`      — invoke the Governance Gatekeeper screen
+      - `learning_path_query`   — fetch a learner's path progress
+
+    Each partner is granted an explicit allow-list of tool names (the MCP
+    add-on's `allowed_tools`); the Gateway permits a tool iff its name is
+    in that list. `requiredScope` on each tool is informational metadata
+    only, not the authorization key.
+
+    Telemetry:
+      - W3C `traceparent` propagated end-to-end (Tier 3 D13).
+      - All calls emit `chora.a2a.mcp_invocation.recorded.v1` events
+        carrying the standard event envelope (event_id UUIDv7,
+        idempotency_key, tenant_id, gcid, traceparent, etc.).
+
+    AP-01: This contract exists BEFORE implementation.
+
+  contact:
+    name: Chora Platform Team — Platform Track
+  license:
+    name: Proprietary
+
+servers:
+  - url: https://mcp.chora.site
+    description: Production (GCP API Gateway)
+  - url: http://localhost:8096
+    description: Local development
+
+security:
+  - apiKeyAuth: []
+
+tags:
+  - name: MCP
+    description: Model Context Protocol JSON-RPC endpoints
+  - name: Health
+    description: Service health
+
+paths:
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Service health check
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /readyz:
+    get:
+      operationId: readinessCheck
+      summary: Readiness probe (no auth)
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: Service is ready
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /mcp/tools/list:
+    post:
+      operationId: mcpToolsList
+      summary: List available MCP tools (JSON-RPC 2.0)
+      description: |
+        Returns the catalogue of tools the calling partner is allowed to
+        invoke. Tools are filtered against the partner's allowed-tool list.
+      tags: [MCP]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JsonRpcRequest"
+      responses:
+        "200":
+          description: JSON-RPC response (success or error)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JsonRpcToolsListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /mcp/tools/call:
+    post:
+      operationId: mcpToolsCall
+      summary: Invoke an MCP tool (JSON-RPC 2.0)
+      description: |
+        Executes a tool invocation. The Gateway:
+          1. Authenticates the partner via API key (AGID lookup).
+          2. Checks the requested tool name against the partner's allow-list.
+          3. Routes to the upstream service (env-var URL).
+          4. Wraps the result in an MCP `content` array with
+             accompanying `citations` per IMDA D4 transparency.
+          5. Emits chora.a2a.mcp_invocation.recorded.v1 to Pub/Sub.
+      tags: [MCP]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JsonRpcRequest"
+      responses:
+        "200":
+          description: JSON-RPC response (success or error)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JsonRpcToolsCallResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+components:
+  securitySchemes:
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: |
+        Per-partner API key issued by chora-a2a-gateway/partners. The
+        Gateway resolves the key to an AGID before authorisation.
+
+  responses:
+    Unauthorized:
+      description: API key missing or invalid
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Forbidden:
+      description: Authenticated, but the tool is not in the partner's allow-list
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    RateLimited:
+      description: Per-AGID rate limit exceeded
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status, service]
+      properties:
+        status:
+          type: string
+        service:
+          type: string
+
+    ErrorResponse:
+      type: object
+      required: [error, code]
+      properties:
+        error:
+          type: string
+        code:
+          type: string
+          description: |
+            UPPER_SNAKE_CASE: MISSING_API_KEY, INVALID_API_KEY,
+            UNKNOWN_TOOL, TOOL_NOT_ALLOWED, RATE_LIMITED, UPSTREAM_ERROR.
+
+    JsonRpcRequest:
+      type: object
+      required: [jsonrpc, id, method]
+      properties:
+        jsonrpc:
+          type: string
+          enum: ["2.0"]
+        id:
+          oneOf:
+            - type: string
+            - type: integer
+        method:
+          type: string
+          description: Either "tools/list" or "tools/call".
+        params:
+          type: object
+          additionalProperties: true
+          description: |
+            For tools/call: { "name": "<tool>", "arguments": {...} }.
+            For tools/list: ignored.
+
+    McpToolDefinition:
+      type: object
+      required: [name, description, inputSchema, requiredScope]
+      properties:
+        name:
+          type: string
+          enum:
+            - atom_search
+            - course_catalog
+            - companion_nudge
+            - governance_check
+            - learning_path_query
+        description:
+          type: string
+        inputSchema:
+          type: object
+          description: JSON Schema describing the arguments object.
+        requiredScope:
+          type: string
+          description: Capability tier (informational metadata only; access is
+            gated by the partner's tool-name allow-list, not this field).
+
+    McpContentBlock:
+      type: object
+      required: [type, text]
+      properties:
+        type:
+          type: string
+          enum: [text]
+        text:
+          type: string
+
+    Citation:
+      type: object
+      required: [source, ref]
+      properties:
+        source:
+          type: string
+          description: |
+            Upstream domain that produced the data (e.g.,
+            "chora.creation", "chora.delivery", "chora.consumption").
+        ref:
+          type: string
+          description: Identifier within the source (atom_id, course_id, etc.).
+        confidence:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          nullable: true
+
+    McpToolResult:
+      type: object
+      required: [content, citations]
+      properties:
+        content:
+          type: array
+          items:
+            $ref: "#/components/schemas/McpContentBlock"
+        citations:
+          type: array
+          items:
+            $ref: "#/components/schemas/Citation"
+        isError:
+          type: boolean
+          default: false
+
+    JsonRpcError:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: integer
+        message:
+          type: string
+        data:
+          type: object
+          nullable: true
+          additionalProperties: true
+
+    JsonRpcToolsListResponse:
+      type: object
+      required: [jsonrpc, id]
+      properties:
+        jsonrpc:
+          type: string
+          enum: ["2.0"]
+        id:
+          oneOf:
+            - type: string
+            - type: integer
+        result:
+          type: object
+          required: [tools]
+          properties:
+            tools:
+              type: array
+              items:
+                $ref: "#/components/schemas/McpToolDefinition"
+        error:
+          $ref: "#/components/schemas/JsonRpcError"
+
+    JsonRpcToolsCallResponse:
+      type: object
+      required: [jsonrpc, id]
+      properties:
+        jsonrpc:
+          type: string
+          enum: ["2.0"]
+        id:
+          oneOf:
+            - type: string
+            - type: integer
+        result:
+          $ref: "#/components/schemas/McpToolResult"
+        error:
+          $ref: "#/components/schemas/JsonRpcError"

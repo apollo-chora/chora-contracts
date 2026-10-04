@@ -1,0 +1,63 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Delivery — ApplicationAccepted
+  version: 1.0.0
+  description: |
+    Applicant accepted the offer (OfferMade -> Accepted). Triggers Stripe
+    PaymentIntent creation + concurrent chora.identity.role.granted.v1
+    learner role projection.
+
+    - Domain: Content Delivery (`chora_delivery` DB)
+    - Topic: `chora.delivery.application.accepted.v1`
+    - Source proto: `proto/events/delivery/application.proto`
+       message `chora.delivery.v1.ApplicationAccepted`
+  contact:
+    name: Chora Delivery Team (Team 2)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  applicationAccepted:
+    address: chora.delivery.application.accepted.v1
+    messages:
+      applicationAccepted:
+        $ref: '#/components/messages/ApplicationAccepted'
+
+operations:
+  publishApplicationAccepted:
+    action: send
+    channel:
+      $ref: '#/channels/applicationAccepted'
+    messages:
+      - $ref: '#/channels/applicationAccepted/messages/applicationAccepted'
+
+  consumeApplicationAccepted:
+    action: receive
+    channel:
+      $ref: '#/channels/applicationAccepted'
+    description: |
+      Consumers:
+        - chora-tenancy (create Stripe PaymentIntent)
+        - chora-identity (project CourseRole=learner via RoleGrantSource.APPLICATION_ACCEPTED)
+        - chora-notifications (acceptance confirmation email)
+    messages:
+      - $ref: '#/channels/applicationAccepted/messages/applicationAccepted'
+
+components:
+  messages:
+    ApplicationAccepted:
+      name: ApplicationAccepted
+      title: Course Application offer accepted
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/delivery/application.proto#/chora.delivery.v1.ApplicationAccepted'

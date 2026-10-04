@@ -1,0 +1,68 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Identity — UserSubscriptionCreated
+  version: 1.0.0
+  description: |
+    Published when a per-user Companion subscription is purchased
+    (Stripe Subscription created + first payment confirmed). Triggers a
+    UserManaCredited event for the onboarding bonus + first monthly drip.
+
+    Per-user subscriptions are DISTINCT from tenant-level subscriptions
+    (chora.tenancy.subscription.*). Mana persists across cancellation
+    per ADR-142 prepaid-credit semantics.
+
+    - Domain: Identity (`chora_identity` DB)
+    - Topic: `chora.identity.user_subscription.created.v1`
+    - Source proto: `proto/events/identity/user_subscription.proto`
+       message `chora.identity.v1.UserSubscriptionCreated`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  userSubscriptionCreated:
+    address: chora.identity.user_subscription.created.v1
+    messages:
+      userSubscriptionCreated:
+        $ref: '#/components/messages/UserSubscriptionCreated'
+
+operations:
+  publishUserSubscriptionCreated:
+    action: send
+    channel:
+      $ref: '#/channels/userSubscriptionCreated'
+    messages:
+      - $ref: '#/channels/userSubscriptionCreated/messages/userSubscriptionCreated'
+
+  consumeUserSubscriptionCreated:
+    action: receive
+    channel:
+      $ref: '#/channels/userSubscriptionCreated'
+    description: |
+      Consumers: Identity (downstream UserManaCredited emission for
+      onboarding bonus + first drip), Notifications (welcome email),
+      Observability (per-user MRR / tier-mix dashboards),
+      Tenancy (cross-link if instructor tier change).
+    messages:
+      - $ref: '#/channels/userSubscriptionCreated/messages/userSubscriptionCreated'
+
+components:
+  messages:
+    UserSubscriptionCreated:
+      name: UserSubscriptionCreated
+      title: User Subscription Created
+      summary: A per-user Companion subscription has been established
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/identity/user_subscription.proto#/chora.identity.v1.UserSubscriptionCreated'

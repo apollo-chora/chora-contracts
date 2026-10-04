@@ -1,0 +1,190 @@
+// =============================================================================
+// FROZEN WIRE. DO NOT EDIT, DO NOT RENAME, DO NOT ADD FIELDS.
+// =============================================================================
+//
+// This tree holds the SOURCE protos for event generations whose topics are
+// still declared in Terraform and still LIVE in Pub/Sub, but whose current-
+// generation source has been renamed or deleted. It exists so those flat protos
+// stay GENERATED rather than hand-preserved.
+//
+// WHY (ruling 44, 2026-09-04). protoflatten derives its output from the source
+// tree; Terraform derives its file() inputs from the declared topic list. When
+// the ADR-254 Companion rename moved these messages to companion_egg.proto, the flattener stopped emitting these flat protos while Terraform
+// went on resolving them. Because the wrapper wipes the flat tree before
+// regenerating, running the generator DELETED live wire and the dev root module
+// could not plan at all (39 file() errors, hand-restored by 27d187ffb). Freezing
+// the source here makes the old generation reproducible instead of fragile.
+//
+// ⚠ These messages are FLATTEN-INPUT ONLY. `buf generate` excludes this tree, so
+// no Go or Python bindings are produced from it: gen/ describes the CURRENT
+// generation only, and nothing in the repo consumes these types (verified).
+//
+// ⚠ A field name here is frozen wire, not vocabulary. The registry treats a
+// field NAME at a fixed tag as part of the frozen wire and REFUSES a same-tag
+// rename (ADR-254 line 139, ADR-246 D2). Domain vocabulary is Companion; these
+// names are what the live schemas carry.
+//
+// Retirement is a deliberate act, not a side effect: when a topic is retired
+// from Terraform AND its live schema is gone, delete the entry here too.
+//
+// Source: chora-contracts/proto/events/tenancy/familiar_egg.proto at 4658bd2a0^
+// =============================================================================
+
+// =============================================================================
+// Chora Tenancy — Familiar Egg purchase events (Stripe-driven)
+// =============================================================================
+//
+// Aggregate root: FamiliarEggPurchase (1:1 with a Stripe Checkout session).
+// Owning domain : Tenancy + Billing (chora_tenancy DB).
+// Topic prefix  : chora.tenancy.familiar_egg.*
+//
+// These events describe the BILLING + PURCHASE lifecycle of Familiar eggs
+// per ADR-149. The corresponding FamiliarEggPurchased event in the
+// consumption domain (chora.consumption.familiar.egg_purchased.v1) is
+// emitted by chora-consumption AFTER it has provisioned the Stage-0
+// familiar_instances row in response to FamiliarEggPaymentSucceeded.
+//
+// Free-egg paths (trial + subscription_inclusion + tenant_grant) DO NOT
+// flow through these events — they go straight to
+// chora.consumption.familiar.egg_purchased.v1 with source != "purchase".
+//
+// Breed is rolled at HATCH (not purchase) per ADR-149 §Breed lootbox. These
+// events therefore do NOT carry breed/species.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.tenancy.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/tenancy/v1;tenancyv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// FamiliarEggCheckoutStarted — emitted when chora-tenancy creates a Stripe
+// Checkout session for an egg purchase. The user has NOT yet paid.
+//
+// Topic: chora.tenancy.familiar_egg.checkout_started.v1
+// Consumers: Observability (funnel telemetry), Governance (audit trail for
+//            IMDA D1 accountability).
+//
+// DEPRECATED: superseded by chora.payments.familiar_egg_purchase.checkout_started.v1 per ADR-164. Drain by 2026-06-30.
+message FamiliarEggCheckoutStarted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // FamiliarEggPurchase aggregate id (UUIDv7) — same id flows through the
+  // payment_succeeded + chora.consumption.familiar.egg_purchased events.
+  string purchase_id = 2;
+
+  // Purchaser GCID (the learner who initiated checkout).
+  string purchaser_gcid = 3;
+
+  // The tenant context the egg is purchased into. May differ from the
+  // purchaser's home tenant if they're cross-tenant browsing.
+  string target_tenant_id = 4;
+
+  // Egg SKU from the tenant's catalog.
+  string egg_sku = 5;
+
+  // Stripe correlation handles.
+  string stripe_session_id = 6;
+  string stripe_checkout_url = 7;
+
+  // Pricing snapshot.
+  int64  amount_cents = 8;
+  string currency = 9;            // ISO 4217
+
+  // Pre-bound focal-atom suggestion from the egg SKU (may be empty).
+  string suggested_focal_atom_id = 10;
+
+  google.protobuf.Timestamp checkout_started_at = 11;
+}
+
+// FamiliarEggPaymentSucceeded — emitted on Stripe's checkout.session.completed
+// webhook. chora-consumption subscribes to this and provisions the Stage-0
+// Familiar instance, then emits chora.consumption.familiar.egg_purchased.v1.
+//
+// Topic: chora.tenancy.familiar_egg.payment_succeeded.v1
+// Consumers: Consumption (provisions familiar_instances row), Observability
+//            (revenue ledger), Notifications (receipt email), Governance.
+//
+// DEPRECATED: superseded by chora.payments.familiar_egg_purchase.payment_captured.v1 per ADR-164. Drain by 2026-06-30.
+message FamiliarEggPaymentSucceeded {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string purchase_id = 2;
+  string purchaser_gcid = 3;
+  string target_tenant_id = 4;
+  string egg_sku = 5;
+
+  string stripe_session_id = 6;
+  string stripe_payment_intent_id = 7;
+  string stripe_charge_id = 8;
+
+  int64  amount_cents_paid = 9;
+  int64  amount_cents_refunded = 10;  // 0 unless partial refund post-success
+  string currency = 11;
+
+  string suggested_focal_atom_id = 12;
+
+  google.protobuf.Timestamp paid_at = 13;
+}
+
+// FamiliarEggPaymentFailed — emitted when Stripe reports a payment failure
+// (checkout.session.async_payment_failed or charge.failed for offline
+// methods). Cleanup signal — chora-consumption should NOT provision a
+// Familiar instance for this purchase.
+//
+// Topic: chora.tenancy.familiar_egg.payment_failed.v1
+// Consumers: Observability, Notifications (failure email), Governance.
+//
+// DEPRECATED: superseded by chora.payments.familiar_egg_purchase.payment_failed.v1 per ADR-164. Drain by 2026-06-30.
+message FamiliarEggPaymentFailed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string purchase_id = 2;
+  string purchaser_gcid = 3;
+  string egg_sku = 4;
+
+  string stripe_session_id = 5;
+  string stripe_failure_code = 6;     // Stripe-defined reason
+  string stripe_failure_message = 7;  // human-readable
+
+  google.protobuf.Timestamp failed_at = 8;
+}
+
+// FamiliarEggRefunded — emitted on a Stripe refund (full or partial) of an
+// egg purchase. May be triggered by:
+//   - hard-expiry of unhatched egg (ADR-149 §60d auto-refund-credit)
+//   - support-initiated refund
+//   - tenant policy refund (e.g., "trial mistakenly billed")
+//
+// Topic: chora.tenancy.familiar_egg.refunded.v1
+// Consumers: Consumption (must mark the Familiar instance as voided + free
+//            up the slot in FamiliarRoster), Observability, Notifications.
+//
+// DEPRECATED: superseded by chora.payments.familiar_egg_purchase.refunded.v1 per ADR-164. Drain by 2026-06-30.
+message FamiliarEggRefunded {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  string purchase_id = 2;
+  string purchaser_gcid = 3;
+  string egg_sku = 4;
+
+  string stripe_charge_id = 5;
+  string stripe_refund_id = 6;
+
+  int64  amount_cents_refunded = 7;
+  string currency = 8;
+
+  // Refund reason. One of:
+  //   hard_expiry_unhatched | support_initiated | tenant_policy |
+  //   customer_request | duplicate_charge | fraud
+  string reason = 9;
+
+  // True if the refund yields a mana_credit instead of a real money refund
+  // (per ADR-149 §"Unhatched egg expiry" — 50% credit on hard-expiry path).
+  bool   credit_only = 10;
+
+  google.protobuf.Timestamp refunded_at = 11;
+}

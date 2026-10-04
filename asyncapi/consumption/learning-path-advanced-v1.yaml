@@ -1,0 +1,94 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Content Consumption — LearningPathAdvanced
+  version: 1.0.0
+  description: |
+    Published when a learner's correctly-graded AtomicSession completion
+    advances their LearningPath cursor (Straight-Up linear cert mode).
+
+    Triggered by `SessionCompletionHandler.publishAdvanced` immediately
+    after `LearningPath.Advance(atom_id)` returns Advanced=true. NOT
+    emitted on out-of-order or already-passed atom replays (idempotent).
+
+    - Domain: Content Consumption (`chora_consumption` DB)
+    - Aggregate root: `LearningPath`
+    - Topic: `chora.consumption.learning_path.advanced.v1`
+    - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
+
+    Embeds the mandatory `chora.common.v1.EventEnvelope` as field 1.
+  contact:
+    name: Chora Platform Team (Team 3) + Team 1 (Content)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+    description: Google Cloud Pub/Sub (chora-489812 platform host)
+
+channels:
+  learningPathAdvanced:
+    address: chora.consumption.learning_path.advanced.v1
+    description: |
+      Carries LearningPathAdvanced Protobuf payload.
+
+      Downstream consumers:
+        - chora-observability  : audit + IMDA D1 accountability evidence
+        - chora-sharing        : optional XP award on per-step completion
+        - chora-notifications  : real-time progress nudges
+    messages:
+      learningPathAdvanced:
+        $ref: '#/components/messages/LearningPathAdvanced'
+
+operations:
+  publishLearningPathAdvanced:
+    action: send
+    channel: { $ref: '#/channels/learningPathAdvanced' }
+    summary: Publish LearningPathAdvanced
+    messages: [ { $ref: '#/channels/learningPathAdvanced/messages/learningPathAdvanced' } ]
+  consumeLearningPathAdvanced:
+    action: receive
+    channel: { $ref: '#/channels/learningPathAdvanced' }
+    summary: Consume LearningPathAdvanced
+    messages: [ { $ref: '#/channels/learningPathAdvanced/messages/learningPathAdvanced' } ]
+
+components:
+  messages:
+    LearningPathAdvanced:
+      name: LearningPathAdvanced
+      title: Learning Path Advanced
+      summary: A LearningPath cursor advanced past one atom.
+      contentType: application/vnd.google.protobuf
+      payload:
+        type: object
+        description: Mirrors chora.consumption.v1.LearningPathAdvanced
+        properties:
+          envelope: { $ref: '#/components/schemas/EventEnvelope' }
+          path_id: { type: string, format: uuid }
+          course_id: { type: string, format: uuid }
+          learner_gcid: { type: string }
+          atom_id: { type: string, format: uuid }
+          current_index: { type: integer }
+          total_atoms: { type: integer }
+          progress_percent: { type: number, format: float }
+  schemas:
+    EventEnvelope:
+      type: object
+      required: [event_id, idempotency_key, tenant_id, occurred_at, published_at, traceparent, source_project, source_service, schema_version]
+      properties:
+        event_id: { type: string, format: uuid }
+        idempotency_key: { type: string }
+        tenant_id: { type: string }
+        gcid: { type: string }
+        occurred_at: { type: string, format: date-time }
+        published_at: { type: string, format: date-time }
+        traceparent: { type: string }
+        tracestate: { type: string }
+        source_project: { type: string }
+        source_service: { type: string }
+        schema_version: { type: integer }
+        correlation_id: { type: string }
+        causation_id: { type: string }

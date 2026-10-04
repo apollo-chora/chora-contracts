@@ -1,0 +1,61 @@
+asyncapi: 3.0.0
+info:
+  title: Chora AI Kernel — LoraAdapterRetired
+  version: 1.0.0
+  description: |
+    Published when an adapter is retired. Soft-delete; weights remain in
+    GCS for audit until crypto-shred policy expiry.
+
+    - Domain: AI Kernel (`chora_ai_kernel` DB)
+    - Topic: `chora.ai_kernel.lora.adapter_retired.v1`
+    - Source proto: `proto/events/ai_kernel/lora.proto`
+       message `chora.ai_kernel.v1.LoraAdapterRetired`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  loraAdapterRetired:
+    address: chora.ai_kernel.lora.adapter_retired.v1
+    messages:
+      loraAdapterRetired:
+        $ref: '#/components/messages/LoraAdapterRetired'
+
+operations:
+  publishLoraAdapterRetired:
+    action: send
+    channel:
+      $ref: '#/channels/loraAdapterRetired'
+    messages:
+      - $ref: '#/channels/loraAdapterRetired/messages/loraAdapterRetired'
+
+  consumeLoraAdapterRetired:
+    action: receive
+    channel:
+      $ref: '#/channels/loraAdapterRetired'
+    description: |
+      Consumers: Model Gateway (route purge), O+ ModelOps view,
+      MLflow registry sync.
+    messages:
+      - $ref: '#/channels/loraAdapterRetired/messages/loraAdapterRetired'
+
+components:
+  messages:
+    LoraAdapterRetired:
+      name: LoraAdapterRetired
+      title: LoRA Adapter Retired
+      summary: A LoRA adapter has been retired
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/ai_kernel/lora.proto#/chora.ai_kernel.v1.LoraAdapterRetired'

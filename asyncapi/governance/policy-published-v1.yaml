@@ -1,0 +1,61 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Governance — PolicyPublished
+  version: 1.0.0
+  description: |
+    Published when a new policy is published (DRAFT -> PUBLISHED).
+
+    - Domain: Governance (`chora_governance` DB)
+    - Topic: `chora.governance.policy.published.v1`
+    - Source proto: `proto/events/governance/policy.proto`
+       message `chora.governance.v1.PolicyPublished`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  policyPublished:
+    address: chora.governance.policy.published.v1
+    messages:
+      policyPublished:
+        $ref: '#/components/messages/PolicyPublished'
+
+operations:
+  publishPolicyPublished:
+    action: send
+    channel:
+      $ref: '#/channels/policyPublished'
+    messages:
+      - $ref: '#/channels/policyPublished/messages/policyPublished'
+
+  consumePolicyPublished:
+    action: receive
+    channel:
+      $ref: '#/channels/policyPublished'
+    description: |
+      Consumers: Guardrail Service (refresh per-agent YAML),
+      Content Sharing moderation, Tenancy entitlement engine,
+      Audit log, Notifications (policy update advisory).
+    messages:
+      - $ref: '#/channels/policyPublished/messages/policyPublished'
+
+components:
+  messages:
+    PolicyPublished:
+      name: PolicyPublished
+      title: Policy Published
+      summary: A governance policy has been published
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/governance/policy.proto#/chora.governance.v1.PolicyPublished'

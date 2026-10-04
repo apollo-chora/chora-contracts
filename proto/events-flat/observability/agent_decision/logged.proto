@@ -1,0 +1,74 @@
+// =============================================================================
+// GENERATED — DO NOT EDIT.
+// Source : events/observability/agent_decision.proto message AgentDecisionLogged
+// Tool   : chora-contracts/internal/protoflatten
+// Why    : GCP Pub/Sub Schema Registry rejects (a) schemas with `import`
+//          statements and (b) schemas with more than one top-level message.
+//          This flat copy contains exactly ONE top-level message;
+//          EventEnvelope + Timestamp + transitive deps are nested inside.
+// Path C : see chora-contracts/CHANGELOG.md and m10-data-plane main.tf.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.observability.v1;
+
+message AgentDecisionLogged {
+  // Inlined chora.common.v1.EventEnvelope (nested for self-contained schema).
+  message Envelope {
+    string event_id = 1;
+    string idempotency_key = 2;
+    string tenant_id = 3;
+    string gcid = 4;
+    Timestamp occurred_at = 5;
+    Timestamp published_at = 6;
+    string traceparent = 7;
+    string tracestate = 8;
+    string source_project = 9;
+    string source_service = 10;
+    int32 schema_version = 11;
+    string correlation_id = 12;
+    string causation_id = 13;
+    string chora_imda_dimension = 14;
+    string imda_lifecycle_stage = 15;
+  }
+
+  // Inlined google.protobuf.Timestamp (nested; wire-compatible).
+  message Timestamp {
+    int64 seconds = 1;
+    int32 nanos = 2;
+  }
+
+  // Inlined enum dep: DecisionKind
+  enum DecisionKind {
+    DECISION_KIND_UNSPECIFIED = 0;
+    DECISION_KIND_CLASSIFY = 1;
+    DECISION_KIND_ROUTE = 2;
+    DECISION_KIND_GENERATE = 3;
+    DECISION_KIND_CRITIQUE = 4;
+    DECISION_KIND_REFINE = 5;
+    DECISION_KIND_BLOCK = 6;
+  }
+
+  Envelope envelope = 1;
+  string decision_id = 2;
+  string invocation_id = 3;
+  string agid = 4;
+  string prompt_template_id = 5;
+  string model_id = 6;
+  DecisionKind decision_kind = 7;
+  string input_summary = 8;
+  string output_summary = 9;
+  float confidence = 10;
+  Timestamp decided_at = 11;
+  string crew_name = 12;
+  string crew_id = 13;
+  bool is_resume = 14;
+  bool is_eval_run = 15;
+  string adapter_version = 16;
+  string guardrail_outcome = 17;
+  int64 prompt_tokens = 18;
+  int64 completion_tokens = 19;
+  int64 cached_tokens = 20;
+  map<string, string> attributes = 21;
+}

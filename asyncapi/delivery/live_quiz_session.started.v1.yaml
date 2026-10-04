@@ -1,0 +1,78 @@
+asyncapi: "3.0.0"
+info:
+  title: "chora.delivery.live_quiz_session.started.v1"
+  version: "1.0.0"
+  description: |
+    Published when an instructor transitions a LiveQuizSession ARMED → LIVE
+    (ADR-168). Marks the start of the live classroom room.
+    Companion to `proto/events/delivery/live_quiz_session.proto` message
+    `LiveQuizSessionStarted`.
+  contact: { name: "Chora Platform Team" }
+  license: { name: "Proprietary" }
+
+defaultContentType: application/x-protobuf
+
+servers:
+  local: { host: "localhost:8085", protocol: googlepubsub, description: "Pub/Sub Emulator" }
+  production: { host: "pubsub.googleapis.com", protocol: googlepubsub, description: "Google Cloud Pub/Sub" }
+
+channels:
+  liveQuizSessionStarted:
+    address: chora.delivery.live_quiz_session.started.v1
+    description: |
+      Carries LiveQuizSessionStarted Protobuf payload.
+
+      Downstream consumers:
+        - chora-observability : open per-session dashboard
+        - chora-notifications : notify enrolled learners the room is live
+    messages:
+      liveQuizSessionStarted:
+        $ref: "#/components/messages/LiveQuizSessionStarted"
+
+operations:
+  publishLiveQuizSessionStarted:
+    action: send
+    channel: { $ref: "#/channels/liveQuizSessionStarted" }
+    summary: "Publish LiveQuizSessionStarted"
+    messages: [ { $ref: "#/channels/liveQuizSessionStarted/messages/liveQuizSessionStarted" } ]
+  consumeLiveQuizSessionStarted:
+    action: receive
+    channel: { $ref: "#/channels/liveQuizSessionStarted" }
+    summary: "Consume LiveQuizSessionStarted"
+    messages: [ { $ref: "#/channels/liveQuizSessionStarted/messages/liveQuizSessionStarted" } ]
+
+components:
+  messages:
+    LiveQuizSessionStarted:
+      name: LiveQuizSessionStarted
+      title: "Live Quiz Session Started"
+      summary: "An instructor opened a live classroom quiz session (ARMED → LIVE)."
+      contentType: application/x-protobuf
+      payload:
+        type: object
+        description: "Mirrors chora.delivery.v1.LiveQuizSessionStarted."
+        properties:
+          envelope: { $ref: "#/components/schemas/EventEnvelope" }
+          session_id: { type: string, format: uuid }
+          live_quiz_id: { type: string, format: uuid }
+          instructor_gcid: { type: string }
+          started_at: { type: string, format: date-time }
+  schemas:
+    EventEnvelope:
+      type: object
+      description: "Mirrors chora.common.v1.EventEnvelope."
+      required: [event_id, idempotency_key, tenant_id, occurred_at, published_at, traceparent, source_project, source_service, schema_version]
+      properties:
+        event_id: { type: string, format: uuid }
+        idempotency_key: { type: string }
+        tenant_id: { type: string }
+        gcid: { type: string }
+        occurred_at: { type: string, format: date-time }
+        published_at: { type: string, format: date-time }
+        traceparent: { type: string }
+        tracestate: { type: string }
+        source_project: { type: string }
+        source_service: { type: string }
+        schema_version: { type: integer }
+        correlation_id: { type: string }
+        causation_id: { type: string }

@@ -1,0 +1,61 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Payments — ApplicationPaymentPaymentFailed
+  version: 1.0.0
+  description: |
+    Stripe payment failed — chora-delivery transitions the Application
+    back to Accepted (or PaymentFailed) and emits a downstream
+    notification event.
+
+    - Domain: Payments (`chora_payments` DB)
+    - Topic: `chora.payments.application_payment.payment_failed.v1`
+    - Source proto: `proto/events/payments/application_payment.proto`
+       message `chora.payments.v1.ApplicationPaymentPaymentFailed`
+    - Aggregate: ApplicationPayment
+    - Per ADR-164 (chora-payments service + 13th DB).
+    - IMDA: envelope.chora_imda_dimension = "accountability"
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  applicationPaymentPaymentFailed:
+    address: chora.payments.application_payment.payment_failed.v1
+    messages:
+      applicationPaymentPaymentFailed:
+        $ref: '#/components/messages/ApplicationPaymentPaymentFailed'
+
+operations:
+  publishApplicationPaymentPaymentFailed:
+    action: send
+    channel:
+      $ref: '#/channels/applicationPaymentPaymentFailed'
+    messages:
+      - $ref: '#/channels/applicationPaymentPaymentFailed/messages/applicationPaymentPaymentFailed'
+
+  consumeApplicationPaymentPaymentFailed:
+    action: receive
+    channel:
+      $ref: '#/channels/applicationPaymentPaymentFailed'
+    messages:
+      - $ref: '#/channels/applicationPaymentPaymentFailed/messages/applicationPaymentPaymentFailed'
+
+components:
+  messages:
+    ApplicationPaymentPaymentFailed:
+      name: ApplicationPaymentPaymentFailed
+      title: Stripe reported a payment failure for a course application
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/payments/application_payment.proto#/chora.payments.v1.ApplicationPaymentPaymentFailed'

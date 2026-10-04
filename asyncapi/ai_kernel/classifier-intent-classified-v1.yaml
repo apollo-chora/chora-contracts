@@ -1,0 +1,48 @@
+asyncapi: 3.0.0
+info:
+  title: Chora AI Kernel — IntentClassified
+  version: 1.0.0
+  description: |
+    Published by chora-model-broker-classifier on every /classifier/intent
+    call. Carries the classification verdict for downstream training data
+    and observability.
+
+    - Domain: AI Kernel (`chora_ai_kernel` DB)
+    - Topic: `chora.ai_kernel.classifier.intent_classified.v1`
+    - Producer: chora-model-broker-classifier
+    - Consumers: Observability (precision/recall metrics),
+      M15 Gemma classifier training pipeline.
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  intentClassified:
+    address: chora.ai_kernel.classifier.intent_classified.v1
+    messages:
+      intentClassified:
+        $ref: '#/components/messages/IntentClassified'
+
+operations:
+  publishIntentClassified:
+    action: send
+    channel:
+      $ref: '#/channels/intentClassified'
+    messages:
+      - $ref: '#/channels/intentClassified/messages/intentClassified'
+
+components:
+  messages:
+    IntentClassified:
+      name: IntentClassified
+      title: Intent Classified
+      summary: A routing request was classified by the Classifier Service
+      contentType: application/vnd.google.protobuf

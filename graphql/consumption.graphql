@@ -1,0 +1,492 @@
+################################################################################
+# Chora Content Consumption — Learner-facing GraphQL schema
+#
+# Replaces legacy `engagement.graphql` + `companion.graphql`.
+#
+# - Domain: Content Consumption (`chora_consumption` DB)
+# - Surface: A+ (A-plus) Reader mode (per skill `domain-content-consumption`)
+# - Audience: Learner — current-user reads via JWT GCID
+# - Owning team: Team 1 (Content)
+#
+# Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 1 D1,
+# Tier 2 D7, Tier 4 D16, Tier 5 D20. Companion proto:
+# proto/events/consumption/*.proto.
+#
+# IMPORTANT (per memory `feedback_companion_vs_agent`):
+#   The `Companion` type below carries DOMAIN attributes only — species, level,
+#   bonded_at, equipped skin, etc. It does NOT expose AI agent details (model,
+#   prompt, embeddings, model identifiers) — those live behind the AI Kernel
+#   adapter and are queried separately via AI Kernel surfaces.
+################################################################################
+
+# ── Scalars ────────────────────────────────────────────────────────────────
+
+scalar UUID        # UUIDv7 (or v4 for legacy)
+scalar DateTime    # RFC3339 / ISO-8601
+
+# ── Enums ─────────────────────────────────────────────────────────────────
+
+"""
+Bimodal delivery mode for a LearningPath.
+
+- STRAIGHT_UP    — linear certification track (complete atoms 1..N)
+- GRAPH_DISCOVERY — curiosity-driven KnowledgeGraph traversal
+"""
+enum PathMode {
+  STRAIGHT_UP
+  GRAPH_DISCOVERY
+}
+
+"""Lifecycle status of an AtomicSession."""
+enum SessionStatus {
+  STARTED
+  COMPLETED
+  ABANDONED
+}
+
+"""How a learner's answer was validated against an atom's answer rule."""
+enum ValidationRuleType {
+  EXACT_MATCH
+  REGEX
+  RANGE
+  KEYWORD
+  MANUAL
+  LLM_GRADED
+}
+
+"""RPG companion species (game mechanic only)."""
+enum CompanionSpecies {
+  OWL
+  FOX
+  CAT
+  DRAGON
+  PHOENIX
+  TURTLE
+  WOLF
+  RAVEN
+}
+
+"""Typed relationships between KnowledgeGraph nodes (Discovery mode)."""
+enum KnowledgeGraphEdgeType {
+  PREREQUISITE_OF
+  EXTENDS
+  ANALOGY_OF
+  CONTRASTS_WITH
+  APPLIED_IN
+}
+
+# ── Types ─────────────────────────────────────────────────────────────────
+
+"""
+A LearningPath — collection over LearningAtom UUID references.
+
+Per ddd-aggregate invariant #1: collections QUERY atoms, never own them.
+Atom payloads are projected via the AtomProjection cache (event-driven
+from `chora.creation.atom.published.v1`) — never via cross-DB JOIN.
+"""
+type LearningPath {
+  id: ID!
+  title: String!
+  description: String
+  mode: PathMode!
+
+  "Atoms referenced by this path (UUIDs only — content lives in chora_creation)."
+  atomIds: [UUID!]!
+
+  "Total step count (== atomIds.length for STRAIGHT_UP)."
+  totalSteps: Int!
+
+  "Current learner's progress on this path (0.0–1.0)."
+  completionPercentage: Float
+
+  "Step the current learner has reached (1-based; 0 if not started)."
+  currentStep: Int
+
+  enrolledAt: DateTime
+  completedAt: DateTime
+}
+
+"""
+An AtomicSession — one learner × one atom × one playback attempt.
+"""
+type AtomicSession {
+  id: ID!
+  atomId: UUID!
+  atomRevisionId: UUID!
+  pathId: UUID
+  status: SessionStatus!
+
+  "Score in [0.0, 1.0]; null until validated."
+  score: Float
+
+  answerCorrect: Boolean
+  validationRuleType: ValidationRuleType
+
+  durationMs: Int
+
+  startedAt: DateTime!
+  completedAt: DateTime
+
+  "All recorded interactions within this session, in chronological order."
+  interactions: [AtomInteraction!]!
+}
+
+"""Single learner interaction within an AtomicSession."""
+type AtomInteraction {
+  id: ID!
+  sessionId: UUID!
+  atomId: UUID!
+
+  "Free-form learner response payload (typed at application layer per atom_type)."
+  response: String!
+
+  timeSpentMs: Int!
+  occurredAt: DateTime!
+}
+
+"""
+RPG companion DOMAIN ENTITY for the current learner.
+
+CRITICAL: This is the in-game entity (game mechanics only). The AI agent
+behind Companion responses is a SEPARATE adapter concern in AI Kernel —
+do not query it from here. Per memory `feedback_companion_vs_agent`.
+"""
+type Companion {
+  id: ID!
+  ownerGcid: UUID!
+  species: CompanionSpecies!
+  level: Int!
+
+  "Currently equipped DigitalSkin (earned, never purchasable)."
+  equippedSkin: DigitalSkin
+
+  bondedAt: DateTime!
+  retiredAt: DateTime
+}
+
+"""
+A DigitalSkin — earned visual reward for a Companion.
+
+Per CLAUDE.md domain vocabulary: NEVER purchasable.
+"""
+type DigitalSkin {
+  id: ID!
+  name: String!
+  description: String
+
+  "Asset URL for rendering the skin (signed, short-lived)."
+  assetUrl: String!
+}
+
+"""
+The AI-curated daily session for the current learner.
+
+Composes Ebbinghaus spaced-repetition reviews + Recommender suggestions
+into a single bounded session.
+"""
+type DailyDose {
+  id: ID!
+
+  "Atoms (in suggested order) that make up today's dose."
+  atomIds: [UUID!]!
+
+  "Total estimated minutes for the dose."
+  estimatedMinutes: Int!
+
+  "Optional path context (when learner is mid-path)."
+  pathId: UUID
+
+  generatedAt: DateTime!
+  expiresAt: DateTime!
+}
+
+"""
+Edge in the KnowledgeGraph for Discovery / curiosity-driven mode.
+"""
+type KnowledgeGraphEdge {
+  id: ID!
+  sourceNodeId: UUID!
+  targetNodeId: UUID!
+  edgeType: KnowledgeGraphEdgeType!
+
+  "Optional edge weight (recommender-trained; nullable until trained)."
+  weight: Float
+
+  "Cumulative depth from the discovery seed (for paginated traversals)."
+  traversalDepth: Int!
+}
+
+# ── Query Root ─────────────────────────────────────────────────────────────
+
+type Query {
+  """Fetch a LearningPath by ID (subject to RLS — must be in caller's tenant)."""
+  path(id: ID!): LearningPath
+
+  """All LearningPaths the current learner is enrolled in (JWT GCID)."""
+  myPaths: [LearningPath!]!
+
+  """All currently-active (STARTED) AtomicSessions for the current learner."""
+  myActiveSessions: [AtomicSession!]!
+
+  """Fetch a single AtomicSession by ID (must be the caller's session)."""
+  session(id: ID!): AtomicSession
+
+  """The current learner's Companion (single Companion per learner, current rules)."""
+  myCompanion: Companion
+
+  """Today's AI-curated DailyDose for the current learner."""
+  dailyDose: DailyDose!
+
+  """
+  Discovery feed — KnowledgeGraph edges around an optional seed atom.
+
+  - `seedAtomId`: starting node (defaults to learner's recent curiosity hot-spot).
+  - `depth`: max recursive CTE depth (1–5; default 2).
+  """
+  discoveryFeed(seedAtomId: ID, depth: Int = 2): [KnowledgeGraphEdge!]!
+
+  # ── Per-User Knowledge Graph (Hexagonal Exploration Fog) per ADR-143 ────
+
+  """All active + archived knowledge map clusters owned by the current learner."""
+  myMapClusters(status: KnowledgeGraphMapClusterStatus): [KnowledgeGraphMapCluster!]!
+
+  """Get a single map cluster by ID (RLS-scoped to caller)."""
+  mapCluster(id: ID!): KnowledgeGraphMapCluster
+
+  """
+  Hexagon (focal + 6 neighbors) for a given exploration + focal atom.
+
+  Returns the cached HexagonLayout when fresh; triggers synchronous fog
+  regeneration via the chora-fog-orchestrator when stale or missing.
+
+  - `explorationId`: target exploration (RLS-scoped to caller).
+  - `atomId`: focal atom (must be in exploration's trail history; defaults
+    to exploration.currentFocalAtomId when omitted).
+  - `forceRegenerate`: bypass cache (admin/owner only).
+  """
+  hexagonForFocal(explorationId: ID!, atomId: UUID, forceRegenerate: Boolean = false): HexagonLayout!
+}
+
+# ── Per-User Knowledge Graph (Hexagonal Exploration Fog) per ADR-143 ────────
+
+"""Lifecycle status of a per-user knowledge map cluster."""
+enum KnowledgeGraphMapClusterStatus {
+  ACTIVE
+  ARCHIVED
+  MERGED_INTO
+}
+
+"""Lifecycle status of an exploration (seed-rooted journey within a cluster)."""
+enum KnowledgeGraphExplorationStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+"""Why a hexagon fog cache row was invalidated."""
+enum FogInvalidationReason {
+  ATOM_PUBLISHED
+  ATOM_REVISION_UPDATED
+  USER_RETENTION_SHIFTED
+  MANUAL_ADMIN
+  NEVER_GENERATED
+}
+
+"""
+Type of relationship from a focal atom to a hexagon neighbor.
+
+Superset of KnowledgeGraphEdgeType plus CURIOSITY_JUMP for fog-only
+neighbors the LLM proposed without any pre-existing authoring edge.
+"""
+enum KnowledgeGraphNeighborRelation {
+  PREREQUISITE_OF
+  EXTENDS
+  ANALOGY_OF
+  CONTRASTS_WITH
+  APPLIED_IN
+  CURIOSITY_JUMP
+}
+
+"""
+A per-user knowledge map cluster — the disconnected map abstraction that
+the Join action merges. Each cluster is seeded by a single topic and
+contains one or more explorations (multiple after a merge).
+
+Per ADR-143; cap on active count is per-tenant (`max_concurrent_kg_clusters_per_user`).
+"""
+type KnowledgeGraphMapCluster {
+  id: ID!
+  userGcid: UUID!
+  displayName: String!
+  seedTopic: String!
+  seedAtomId: UUID!
+
+  status: KnowledgeGraphMapClusterStatus!
+
+  "Set when status=MERGED_INTO; points to the surviving cluster."
+  mergedIntoClusterId: ID
+  "The atom_id that triggered the merge (junction point)."
+  mergedViaAtomId: UUID
+
+  "Materialised distinct focal count across all explorations in this cluster."
+  nodeCount: Int!
+
+  "All explorations within this cluster (active + archived)."
+  explorations: [KnowledgeGraphExploration!]!
+
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+"""A seed-rooted journey within a cluster. Multiple per cluster after merge."""
+type KnowledgeGraphExploration {
+  id: ID!
+  clusterId: ID!
+  userGcid: UUID!
+
+  "Original seed atom for this exploration."
+  startedAtAtomId: UUID!
+
+  "Updated on click-to-graduate."
+  currentFocalAtomId: UUID!
+
+  status: KnowledgeGraphExplorationStatus!
+
+  "Append-only path history (chronological)."
+  trail: [TrailHop!]!
+
+  "Hexagon (focal + 6 neighbors) at the current focal."
+  currentHexagon: HexagonLayout!
+
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+"""A single click-to-graduate hop in an exploration's trail."""
+type TrailHop {
+  id: ID!
+  explorationId: ID!
+  fromFocalAtomId: UUID!
+  toFocalAtomId: UUID!
+  relation: KnowledgeGraphNeighborRelation!
+  stepIndex: Int!
+  traversedAt: DateTime!
+}
+
+"""
+A hexagon — one focal atom + exactly 6 LLM-generated neighbors.
+
+Hybrid persistence: cached in `kg_hexagon_nodes`; invalidated on
+`atom_published` / `atom_revision_updated` / `user_retention_shifted` events
+(per ADR-143). Sweeper force-regens after `kg_fog_invalidation_grace_seconds`.
+"""
+type HexagonLayout {
+  id: ID!
+  explorationId: ID!
+  clusterId: ID!
+  focalAtomId: UUID!
+
+  "Always exactly 6 neighbors (in stable position order: N, NE, SE, S, SW, NW)."
+  neighbors: [HexagonNeighbor!]!
+
+  "Junction opportunities computed during this fog generation."
+  junctionOpportunities: [JunctionOpportunity!]!
+
+  "Echo of the orchestrator request_id."
+  generatedByRunId: UUID!
+  "Echo of Model Broker decision."
+  generatedByModelId: String!
+
+  generatedAt: DateTime!
+  "Null when fresh; non-null = stale (regen on next fetch unless forced)."
+  invalidatedAt: DateTime
+  invalidationReason: FogInvalidationReason
+  "Convenience: invalidatedAt IS NULL"
+  isCacheFresh: Boolean!
+}
+
+"""One of 6 LLM-generated neighbors around a focal atom."""
+type HexagonNeighbor {
+  atomId: UUID!
+  relation: KnowledgeGraphNeighborRelation!
+  "LLM confidence in [0.0, 1.0]; surfaced to user as 3-dot calibration."
+  confidence: Float!
+  "Short LLM-generated teaser shown before user commits to traverse."
+  fogLabel: String!
+  "True when this neighbor is a focal in another active cluster of the user."
+  isJunction: Boolean!
+}
+
+"""
+A junction opportunity — overlap between two of the user's active clusters.
+
+Transient (computed via index probe; never persisted). Surfaced via the
+junctionDetected Subscription push or as a synchronous field on a hexagon
+fetch.
+"""
+type JunctionOpportunity {
+  viaAtomId: UUID!
+  currentClusterId: ID!
+  otherClusterId: ID!
+  currentClusterDisplayName: String!
+  otherClusterDisplayName: String!
+}
+
+# ── Mutations ──────────────────────────────────────────────────────────────
+
+type Mutation {
+  """
+  Create a new MapCluster seeded by a topic.
+
+  Returns 409 Conflict-equivalent (GraphQL error code `CLUSTER_CAP_REACHED`)
+  when caller is at `max_concurrent_kg_clusters_per_user`. Server resolves
+  seedTopic → seedAtomId via Meilisearch + LLM fallback.
+  """
+  createMapCluster(seedTopic: String!, displayName: String, seedAtomId: UUID): KnowledgeGraphMapCluster!
+
+  """
+  Merge two clusters via a junction atom (user-consented join).
+
+  The smaller cluster (by node_count) is marked MERGED_INTO; the larger
+  absorbs it. Surviving cluster's display_name defaults to
+  `"{seed_topic_a} + {seed_topic_b}"`. Trail histories preserved.
+  """
+  mergeMapClusters(clusterId: ID!, targetClusterId: ID!, viaAtomId: UUID!): KnowledgeGraphMapCluster!
+
+  """Archive a MapCluster (status → ARCHIVED). Read-only thereafter."""
+  archiveMapCluster(id: ID!): KnowledgeGraphMapCluster!
+
+  """
+  Click-to-graduate: move the exploration's focal node to one of the
+  current 6 neighbors. Atomically appends a TrailHop and triggers fog
+  generation for the new focal. Returns the new HexagonLayout.
+  """
+  moveFocalNode(explorationId: ID!, targetAtomId: UUID!): HexagonLayout!
+}
+
+# ── Subscriptions (FIRST Subscription type on consumption.graphql) ─────────
+
+"""
+Realtime push for the per-user Knowledge Graph feature.
+
+Backed by chora-realtime WebSocket service. Resolver guard MUST verify
+`userGcid == JWT.subject` to prevent cross-user push.
+
+Per ADR-143; if the chora-realtime gateway does not yet support
+consumption.graphql subscriptions, ship behind feature-flag
+`addOnGuard('kg_realtime')` and degrade to client-side polling at 5s.
+"""
+type Subscription {
+  """
+  Pushed when fog generation discovers a candidate neighbor atom_id that
+  is also a focal in another of the caller's active clusters.
+
+  Caller filters by `userGcid` (must match JWT subject).
+  """
+  junctionDetected(userGcid: UUID!): JunctionOpportunity!
+
+  """
+  Pushed when the sweeper force-regenerates an invalidated hexagon for an
+  active exploration of the caller. Allows UI to refresh without polling.
+  """
+  hexagonRegenerated(explorationId: ID!): HexagonLayout!
+}

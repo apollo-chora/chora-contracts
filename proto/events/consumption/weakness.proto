@@ -1,0 +1,536 @@
+// =============================================================================
+// Chora Content Consumption — Learner Weakness ("Growth Edge") events
+// =============================================================================
+//
+// The Growth-Edge layer persists a per-GCID model of where a learner is shaky,
+// fed by TWO sources (source-tagged + merged in chora_consumption):
+//   - explicit : the learner uploads a "weakness document" (a marked-up past
+//                test PDF/image with right/wrong answers marked, or free-form
+//                notes / a scribble). A multimodal analyser (an ai-kernel agent)
+//                visually reads it, infers per-item correctness, maps each item
+//                to the concept it tests, and extracts the weak concepts.
+//   - derived  : performance signals already in chora_consumption
+//                (topic_accuracy + Ebbinghaus topic_retention decay) and
+//                classroom live-quiz wrong answers (chora.delivery.live_quiz
+//                .answered.v1). NOT modelled here — those are intra-consumption
+//                projections + a cross-domain subscriber.
+//
+// LEARNER-FACING TERM is "Growth Edge" (curiosity-first; the Companion / KG paint
+// / Daily Dose surface these as frontiers to explore, mastered ones as "grown").
+// The internal / instructor / auditor term is "weakness" (3-audience
+// explainability). The data is neutral; the framing is per-surface.
+//
+// Domain placement: per the topic-domain-follows-the-affected-aggregate-root
+// convention (see creation/ai_assist.proto header), BOTH events live in the
+// `consumption` domain because the affected aggregate is LearnerWeakness in
+// chora_consumption — even though weakness.analyzed.v1 is EMITTED by the
+// ai-kernel weakness-analyser agent (the emitter does not determine the topic
+// domain, exactly as the ai_kernel_orchestrator emits chora.creation.ai_assist.*).
+//
+// Aggregate root : learner_weakness (chora_consumption; per-GCID Growth Edges)
+// Owning domain  : Content Consumption (chora_consumption)
+// Owning team    : Team 1 (Content)
+// Topic prefix   : chora.consumption.weakness_doc.* + chora.consumption.weakness.*
+// Surface        : A+ (Growth Edges view / Daily Dose / Companion / KG paint)
+//
+// Subscribers:
+//   - chora-ai-kernel-orchestrator (weakness-analyser crew) — subscribes to
+//     weakness_doc.uploaded.v1; runs the multimodal analysis; emits
+//     weakness.analyzed.v1.
+//   - chora-consumption — subscribes to weakness.analyzed.v1; upserts the
+//     LearnerWeakness aggregate (embedding dedup + nearest-topic resolve).
+//   - chora-observability — D1 accountability + cost evidence on analyzed.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.consumption.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/consumption/v1;consumptionv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// WeaknessContextKind — bounded "what kind of work was this" picker (ADR-205 D2).
+// -----------------------------------------------------------------------------
+//
+// WS-1 additive. Part of StructuredClues — the injection-SAFE replacement for
+// the free-text context_hint (field 8). A bounded enum (NOT free text) so the
+// learner's steering is DATA the diagnose prompt reads, never instruction it
+// obeys. Zero value is UNSPECIFIED so an unset clue is unambiguous (never
+// silently "exam"). Extend additively (never renumber).
+enum WeaknessContextKind {
+  WEAKNESS_CONTEXT_KIND_UNSPECIFIED = 0;
+  WEAKNESS_CONTEXT_KIND_EXAM        = 1; // a sat exam / past paper
+  WEAKNESS_CONTEXT_KIND_ASSIGNMENT  = 2; // graded coursework / homework
+  WEAKNESS_CONTEXT_KIND_QUIZ        = 3; // a short class quiz
+  WEAKNESS_CONTEXT_KIND_PRACTICE    = 4; // self-driven practice / drills
+  WEAKNESS_CONTEXT_KIND_SELF_STUDY  = 5; // notes / revision from self-study
+}
+
+// -----------------------------------------------------------------------------
+// StructuredClues — bounded, screened learner steering (ADR-205 D2; WS-1).
+// -----------------------------------------------------------------------------
+//
+// The graduated analyser (ADR-205) takes learner steering as STRUCTURED DATA,
+// never as instruction folded into the prompt. This message supersedes the
+// free-text context_hint (field 8, retained for back-compat) as the safe path:
+// the diagnose node consumes these fields as grounding hints, and the single
+// optional free-text `note` is run through Model Armor SanitizeUserPrompt
+// before use (WS-3). Nothing here alters the system prompt, output schema, or
+// the locked safety preamble.
+message StructuredClues {
+  // Coarse subject (reuse the atom `subject` taxonomy), e.g. "physical-geography".
+  string subject = 1;
+
+  // Learner-flagged weak topic slugs (e.g. ["riverine-flood-causes"]). The
+  // diagnose node treats these as priors, not as the answer — the analyser
+  // still infers edges from the document itself.
+  repeated string weak_topic_keys = 2;
+
+  // Learner self-rating of how shaky they feel, 1..5 (1 = very shaky,
+  // 5 = fairly confident). 0 = unset. Read as a prior on `strength`, never
+  // as the final value.
+  int32 self_confidence = 3;
+
+  // What kind of work this upload was (steers framing only).
+  WeaknessContextKind context_kind = 4;
+
+  // OPTIONAL short free-text note (≤512 chars). Model-Armor-screened (WS-3)
+  // before the diagnose node sees it; treated as DATA. Empty by default.
+  string note = 5;
+}
+
+// -----------------------------------------------------------------------------
+// OutputSelection — which Companion-fronted outputs the learner wants (WS-1).
+// -----------------------------------------------------------------------------
+//
+// ADR-205 D5: outputs are learner-selected. Each true flag is one generate
+// action; the metered ones (practice_test, study_aids) reserve+burn mana per
+// ADR-178 action codes at HITL resume (WS-4/WS-7). focused_dose + the core
+// edges/KG overlay stay free. On the upload event this is the learner's
+// PRE-SELECTION / default; the authoritative selection is the bounded HITL
+// resume payload (WS-8). Reused by the HTTP resume DTO so the wire shape is
+// identical end-to-end.
+// ⚠ `familiar_coaching` (tag 2) is a WIRE-FROZEN NAME (ADR-254 line 139,
+// ADR-246 D2): this message is inlined into the BINARY-bound v1 schemas
+// chora-consumption-weakness-analyzed-v1 and the weakness_doc upload event, and
+// the registry REFUSES a same-tag rename at commit. Domain vocabulary remains
+// Companion; the adapter maps the wire name onto it.
+message OutputSelection {
+  bool focused_dose      = 1; // scope the daily dose to these edges (free, core)
+  bool familiar_coaching = 2; // write the diagnosis into Companion RAG memory (ADR-173)
+  bool practice_test     = 3; // critic-gated qgen test scoped to the edges (metered)
+  bool study_aids        = 4; // advice / glossary / cheat-sheet (metered)
+}
+
+// -----------------------------------------------------------------------------
+// WeaknessDocUploaded — chora.consumption.weakness_doc.uploaded.v1
+// -----------------------------------------------------------------------------
+//
+// Emitted by chora-consumption AFTER a learner uploads a weakness document and
+// the blob is stored, but BEFORE analysis. Triggers the ai-kernel weakness-
+// analyser crew. The raw blob is transient — once analysed it is cold-archived
+// / discarded (the persisted Growth Edge is descriptive metadata, never the doc).
+//
+// Topic: chora.consumption.weakness_doc.uploaded.v1
+// Consumers: chora-ai-kernel-orchestrator (weakness-analyser crew).
+message WeaknessDocUploaded {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — the upload aggregate id; correlates with WeaknessAnalyzed.upload_id.
+  string upload_id = 2;
+
+  // Tenant context (also in envelope.tenant_id; duplicated for tenant-sharded
+  // subscriber filters).
+  string tenant_id = 3;
+
+  // The learner whose Growth Edges this populates. Same as envelope.gcid.
+  string learner_gcid = 4;
+
+  // GCS URI of the uploaded blob (gs://...). The analyser downloads it and
+  // streams the bytes to chora-model-gateway as a multimodal inlineData part.
+  string source_blob_uri = 5;
+
+  // MIME of the blob. Drives the multimodal part type. Examples:
+  //   "application/pdf" | "image/png" | "image/jpeg" | "text/plain" | "text/markdown"
+  string source_mime_type = 6;
+
+  // How to interpret the document — steers the analyser prompt. One of:
+  //   "marked_test"     — a graded past test; infer per-item right/wrong from the
+  //                       marks, map each item to its concept, surface wrong ones.
+  //   "notes"           — free-form notes the learner wrote about what they find hard.
+  //   "scribble"        — a hand-drawn / scribbled image to interpret.
+  //   "source_material" — a grounding textbook / reference (ADR-205 D8). TRANSIENT:
+  //                       the analyser distils it into a scope-profile to ground
+  //                       diagnosis + outputs; never persisted, never reproduced
+  //                       verbatim into generated atoms. Gated by a one-tap
+  //                       upload-rights consent (WS-5).
+  string upload_kind = 7;
+
+  // DEPRECATED for steering — SUPERSEDED by structured_clues (field 10) per
+  // ADR-205 D2. Retained for back-compat with the pre-graduation single-shot
+  // crew; new publishers SHOULD send structured_clues instead. Free-text folded
+  // into the prompt is an injection surface, so the graduated crew (WS-2/WS-3)
+  // ignores this field when structured_clues is present. Optional; ≤2 KiB.
+  string context_hint = 8;
+
+  google.protobuf.Timestamp uploaded_at = 9;
+
+  // ----- ADR-205 graduation additions (WS-1; additive, backward-compatible) ---
+
+  // Bounded, screened learner steering — the injection-safe replacement for
+  // context_hint. Optional (nil = no clues). See StructuredClues.
+  StructuredClues structured_clues = 10;
+
+  // The learner's pre-selected outputs (refined at the bounded HITL review,
+  // WS-8). Optional (nil = analyser defaults to core edges + dose only).
+  OutputSelection requested_outputs = 11;
+
+  // Mana reservation made at the upload door (reserve-on-accept, ADR-205 D6 /
+  // ADR-178). The crew settles it on success and REFUNDS it on any fail-loud
+  // node (idempotency key = gcid+tenant+upload_id). Empty when the upload is in
+  // the free tier (e.g. graded-assessment-derived edges never set this).
+  string reservation_id = 12;
+}
+
+// -----------------------------------------------------------------------------
+// ExtractedGrowthEdge — one weak concept the analyser surfaced (sub-message).
+// -----------------------------------------------------------------------------
+//
+// The analyser distils the document into N of these. chora-consumption upserts
+// each into the LearnerWeakness aggregate: it embeds concept_label, cosine-dedups
+// against existing rows (≥0.9 → merge into the row's descriptor; else a new
+// sibling row), and resolves the optional topic_id by nearest TopicNode.
+message ExtractedGrowthEdge {
+  // Human / Companion-facing natural phrase (e.g. "causes of riverine flooding").
+  string concept_label = 1;
+
+  // Normalised slug derived from concept_label (e.g. "riverine-flood-causes").
+  // chora-consumption may re-normalise; this is the analyser's best effort.
+  string concept_key = 2;
+
+  // Coarse bucket for rollup (reuse the atom `subject` taxonomy where possible),
+  // e.g. "physical-geography". Optional.
+  string category = 3;
+
+  // Flexible cross-cutting labels (reuse atom tags), e.g. ["flooding","causation"].
+  repeated string tags = 4;
+
+  // 0..1 — analyser confidence this is a genuine weak concept. Low-confidence
+  // edges (below the consumption threshold) are dropped, not persisted.
+  float confidence = 5;
+
+  // 0..1 — how shaky (1 = very weak). For marked tests, derived from the share
+  // of related items answered wrong; for notes/scribbles, the analyser's estimate.
+  float strength = 6;
+
+  // Distilled descriptive metadata (JSON) persisted into the LearnerWeakness
+  // descriptor — NEVER the raw doc. Stable keys:
+  //   "summary"            — one-line description of the gap
+  //   "misconceptions"     — []string of specific misconceptions observed
+  //   "sample_wrong"       — [{prompt, chosen, why_wrong}] redacted exemplars
+  //   "suggested_angles"   — []string of qgen drill angles
+  //   "per_item_correctness" — [{item, correct}] for marked-test provenance
+  string descriptor_json = 7;
+}
+
+// -----------------------------------------------------------------------------
+// WeaknessAnalyzed — chora.consumption.weakness.analyzed.v1
+// -----------------------------------------------------------------------------
+//
+// Emitted by the ai-kernel weakness-analyser crew on SUCCESSFUL multimodal
+// analysis of an uploaded document. chora-consumption consumes it and upserts
+// the extracted Growth Edges (source = "explicit") into the LearnerWeakness
+// aggregate. An empty edges list is valid (nothing weak detected / unreadable).
+//
+// Topic: chora.consumption.weakness.analyzed.v1
+// Consumers: chora-consumption (upsert LearnerWeakness), chora-observability
+//            (D1 accountability + token-cost evidence).
+message WeaknessAnalyzed {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — matches WeaknessDocUploaded.upload_id.
+  string upload_id = 2;
+
+  string tenant_id = 3;
+  string learner_gcid = 4;
+
+  // The extracted weak concepts (may be empty). chora-consumption embeds +
+  // dedups + topic-resolves each before persisting.
+  repeated ExtractedGrowthEdge edges = 5;
+
+  // Model attribution for D2 IMDA transparency (e.g. "gemini-3-pro-preview").
+  string model_used = 6;
+
+  // Token accounting (canonical ledger is TokenUsageLedger; event-level breakdown).
+  int32 input_token_count = 7;
+  int32 output_token_count = 8;
+
+  google.protobuf.Timestamp analyzed_at = 9;
+
+  // ----- ADR-205 integration seam (CHO-1966; additive, backward-compatible) ---
+
+  // The learner's post-HITL output selection (ADR-205 D5), echoed by the
+  // graduated crew from the bounded HITL resume decisions so chora-consumption
+  // can gate the Companion-RAG memory write on `familiar_coaching` WITHOUT a
+  // cross-DB read (cross-DB forbidden). Reuses the SAME OutputSelection message
+  // as WeaknessDocUploaded.requested_outputs, so the wire shape is identical
+  // end-to-end. Optional: nil on the live single-shot path (and an all-false
+  // selection collapses to absent) → no opt-in → no Companion memory write, the
+  // safe default. Never renumber; the live consumption upsert ignores unknown
+  // fields, so this does not alter the registered schema's existing consumers.
+  OutputSelection output_selection = 10;
+}
+
+// -----------------------------------------------------------------------------
+// ProposedGrowthEdge — one analyser-proposed edge awaiting bounded review (WS-2).
+// -----------------------------------------------------------------------------
+//
+// ADR-205 D4: the graduated (LangGraph) crew pauses at a HITL interrupt and
+// proposes edges for the learner to accept / reject / merge BEFORE anything is
+// persisted. Each proposed edge carries an EPHEMERAL proposed_edge_id (stable
+// only within this review run) that the bounded resume decision echoes back. It
+// is NOT a concept_key and NOT a persisted LearnerWeakness id: the orchestrator
+// alone owns the proposed_edge_id → checkpoint candidate-edge mapping (it holds
+// the LangGraph checkpoint), so chora-consumption + the FE treat it opaquely.
+message ProposedGrowthEdge {
+  // Ephemeral id, stable within this review run; echoed in the resume decision.
+  string proposed_edge_id = 1;
+
+  // Human / Companion-facing natural phrase (e.g. "causes of riverine flooding").
+  string concept_label = 2;
+
+  // One-line description of the gap (from the candidate edge descriptor.summary).
+  string summary = 3;
+
+  // qgen drill angles the analyser suggests for this edge (bounded display).
+  repeated string suggested_angles = 4;
+
+  // 0..1 shakiness (1 = very weak, 0 = mastered) — mirrors ExtractedGrowthEdge.strength.
+  float strength = 5;
+
+  // Bounded difficulty steer for downstream drills: "easier" | "standard" | "harder".
+  string suggested_difficulty = 6;
+}
+
+// -----------------------------------------------------------------------------
+// CandidateStruggle — a concept the learner MAY add as a struggle (WS-2).
+// -----------------------------------------------------------------------------
+//
+// Bounded picker source for the review panel's "add a struggle the analyser
+// missed" affordance (ADR-205 D4 — bounded controls, never free-form). The
+// learner's chosen concept_keys come back in the resume decision's added_struggles.
+message CandidateStruggle {
+  // Normalised slug (e.g. "riverine-flood-causes").
+  string concept_key = 1;
+
+  // Human / Companion-facing label (e.g. "causes of riverine flooding").
+  string concept_label = 2;
+}
+
+// -----------------------------------------------------------------------------
+// AvailableOutput — one selectable Companion-fronted output + its price (WS-2).
+// -----------------------------------------------------------------------------
+//
+// ADR-205 D5 / ADR-178: the panel offers the learner a bounded set of outputs to
+// generate, each with the mana it reserves+burns at resume. focused_dose +
+// companion_coaching are free (core); practice_test + study_aids are metered. The
+// orchestrator resolves mana_price via PricePlanResolver at panel-build time so
+// the learner sees the price BEFORE committing (no surprise burn).
+message AvailableOutput {
+  // Output kind: "focused_dose" | "companion_coaching" | "practice_test" | "study_aids".
+  // Mirrors the OutputSelection bool fields, carried as a string so the panel is
+  // forward-extensible without a proto bump.
+  string kind = 1;
+
+  // Mana this output reserves+burns at resume (PricePlanResolver, ADR-178).
+  // 0 for the free outputs (focused_dose / companion_coaching).
+  int64 mana_price = 2;
+
+  // Whether the FE pre-selects this output (the learner's upload pre-selection or
+  // the analyser default).
+  bool default_selected = 3;
+}
+
+// -----------------------------------------------------------------------------
+// ReviewFamiliar — the Companion fronting the bounded review (sub-message; WS-2).
+// -----------------------------------------------------------------------------
+//
+// ADR-205 D4: the review panel is Companion-fronted (the companion presents the
+// proposed edges). The orchestrator resolves the learner's active Companion so
+// chora-consumption need not cross-DB read it. Optional (nil if unresolved).
+// ⚠ WIRE-FROZEN NAMES (ADR-254 line 139, ADR-246 D2): the live registered
+// schema chora-consumption-weakness-review-pending-v1 carries `ReviewFamiliar`
+// with `familiar_id` at tag 1, and the registry refuses a same-tag rename.
+message ReviewFamiliar {
+  string familiar_id = 1;
+  string name = 2;
+
+  // Species drives the avatar/persona (e.g. "dragon"). Optional.
+  string species = 3;
+}
+
+// -----------------------------------------------------------------------------
+// WeaknessReviewPending — chora.consumption.weakness.review_pending.v1
+// -----------------------------------------------------------------------------
+//
+// Emitted by the ai-kernel weakness-analyser crew when the graduated (LangGraph)
+// flow PAUSES at the bounded HITL interrupt (ADR-205 D4) — after diagnosing
+// candidate edges but BEFORE persisting anything. It carries the full review
+// panel out of the orchestrator's LangGraph checkpoint and across the domain
+// boundary (cross-DB forbidden) so chora-consumption can park the upload in
+// AWAITING_REVIEW and surface the panel to the A+ FE. The learner's bounded
+// decision returns via the /me/growth-edges/uploads/{id}/resume BFF path, which
+// resumes the SAME orchestrator thread (deterministic on {tenant, upload}).
+//
+// This is the missing review-panel bridge (CHO-1973): without it the panel lived
+// only in the orchestrator checkpoint and the FE could not drive the loop. The
+// graph subscriber previously acked + discarded the interrupt payload.
+//
+// Topic: chora.consumption.weakness.review_pending.v1 (same `consumption` domain
+// as weakness.analyzed — topic-domain-follows-the-affected-aggregate-root — even
+// though it is EMITTED by ai-kernel).
+// Consumers: chora-consumption (park AWAITING_REVIEW + store review_payload for
+//            the poll DTO). DARK behind WEAKNESS_CREW_MODE=graph until cutover.
+message WeaknessReviewPending {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — matches WeaknessDocUploaded.upload_id (the deterministic resume
+  // thread key is {tenant_id, upload_id}; there is NO run_id on the wire).
+  string upload_id = 2;
+
+  // Tenant context (also envelope.tenant_id; duplicated for sharded filters).
+  string tenant_id = 3;
+
+  // The learner whose Growth Edges this review will populate (also envelope.gcid).
+  string learner_gcid = 4;
+
+  // The Companion fronting the review (optional; nil if unresolved).
+  // WIRE-FROZEN name + type (see ReviewFamiliar above).
+  ReviewFamiliar familiar = 5;
+
+  // The analyser's proposed edges for accept/reject/merge (may be empty).
+  repeated ProposedGrowthEdge proposed_edges = 6;
+
+  // Bounded "add a struggle the analyser missed" picker source (may be empty).
+  repeated CandidateStruggle candidate_struggles = 7;
+
+  // The selectable Companion-fronted outputs + their mana prices (ADR-205 D5).
+  repeated AvailableOutput available_outputs = 8;
+
+  google.protobuf.Timestamp pending_at = 9;
+}
+
+// -----------------------------------------------------------------------------
+// WeaknessGrown — chora.consumption.weakness.grown.v1
+// -----------------------------------------------------------------------------
+//
+// Emitted by chora-consumption when a Growth Edge (learner_weakness) transitions
+// active→"grown" — its shakiness recovered to <= MasteredStrengthThreshold (~0).
+// This is the Curiosity-REWARD trigger (ADR-196): sub-phase A (CHO-1895) made
+// practice MOVE an edge; this event makes the GROW moment observable + rewardable
+// instead of a silent status flip. Emitted once per real transition (idempotent
+// via the envelope idempotency_key); a re-grow after a fresh weakness re-raised
+// the edge is a new event.
+//
+// Topic: chora.consumption.weakness.grown.v1
+// Consumers (loosely-coupled, attach later — ADR-196 B3, deferred):
+//   - chora-sharing — award the Three-Currency Economy (XP / Coins / Reputation).
+//   - chora-consumption — Companion reaction (the companion celebrates / gains XP).
+//   - chora-observability — engagement / D1 evidence.
+// The A+ FE celebrates the grow by reading status='grown' directly (no subscribe).
+message WeaknessGrown {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // The Growth Edge that reached "grown" (learner_weakness id; UUIDv7).
+  string growth_edge_id = 2;
+
+  // Tenant context (also envelope.tenant_id; duplicated for sharded filters).
+  string tenant_id = 3;
+
+  // The learner who grew the edge (also envelope.gcid).
+  string learner_gcid = 4;
+
+  // Learner-facing concept mastered (e.g. "Single Responsibility Principle").
+  string concept_label = 5;
+
+  // Normalised slug (e.g. "single-responsibility-principle").
+  string concept_key = 6;
+
+  // Final shakiness at grow time (<= MasteredStrengthThreshold, ~0).
+  float final_strength = 7;
+
+  // Which recovery path closed the gap:
+  //   "drill_atom"  — practised a suggested drill atom (CHO-1895).
+  //   "concept_key" — sustained topic mastery / Ebbinghaus auto-recovery.
+  string recovery_source = 8;
+
+  // Cross-cutting labels carried for reward / analytics rollup.
+  repeated string tags = 9;
+
+  google.protobuf.Timestamp grown_at = 10;
+}
+
+// -----------------------------------------------------------------------------
+// GeneratedLearnerOutput - one metered artifact the crew produced (WS-7).
+// -----------------------------------------------------------------------------
+//
+// The artifact rides as JSON rather than a per-kind modelled message: study_aids
+// is prose and practice_test is a critic-gated set whose internal shape is still
+// settling, and this topic is Schema-Registry bound, so modelling each kind here
+// would force a schema revision every time an artifact gains a field. The kind
+// discriminates; chora_consumption stores content_json as JSONB and the A+
+// surface renders per kind.
+message GeneratedLearnerOutput {
+  // "study_aids" | "practice_test" - the metered kinds
+  // (domain/weakness_analyser_crew/panel.py METERED_OUTPUT_KINDS).
+  string kind = 1;
+
+  // The artifact, JSON-encoded. study_aids -> a JSON string (the prose);
+  // practice_test -> a JSON object (the composed set).
+  string content_json = 2;
+
+  // True when the learner spent mana on this kind (ADR-178 action codes).
+  bool metered = 3;
+}
+
+// -----------------------------------------------------------------------------
+// WeaknessOutputsGenerated - chora.consumption.weakness.outputs_generated.v1
+// -----------------------------------------------------------------------------
+//
+// Emitted by the ai-kernel weakness-analyser crew AFTER the detached output
+// generation finishes (orchestrators/weakness_analyser_crew.py
+// _run_detached_generation). Deliberately a SEPARATE event from
+// weakness.analyzed.v1: analysis publishes first so the HITL resume returns
+// without waiting on up to 4 slow LLM generations (ADR-205 defect 3), and the
+// artifacts land whenever they land.
+//
+// Closes the WS-7 delivery gap: before this event the generated artifacts were
+// produced, metered against the learner's mana, and then reached no learner
+// surface at all.
+//
+// An empty outputs list is valid and still fires (every kind screened out or
+// generation soft-failed), so consumption can distinguish "not generated yet"
+// from "generated nothing".
+//
+// Topic: chora.consumption.weakness.outputs_generated.v1
+// Consumers: chora-consumption (projects into growth_edge_outputs; A+ reads).
+message WeaknessOutputsGenerated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // The weakness upload these artifacts belong to (weakness_doc_uploads id).
+  string upload_id = 2;
+
+  // Tenant context (also envelope.tenant_id; duplicated for sharded filters).
+  string tenant_id = 3;
+
+  // The learner who selected + paid for the outputs (also envelope.gcid).
+  string learner_gcid = 4;
+
+  // Zero or more produced artifacts, one per selected metered kind.
+  repeated GeneratedLearnerOutput outputs = 5;
+
+  google.protobuf.Timestamp generated_at = 6;
+}

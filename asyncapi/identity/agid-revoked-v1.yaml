@@ -1,0 +1,61 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Identity — AgidRevoked
+  version: 1.0.0
+  description: |
+    Published when an AGID is revoked. After revocation the AGID may NOT
+    emit further events; the Guardrail Service rejects invocations.
+
+    - Domain: Identity (`chora_identity` DB)
+    - Topic: `chora.identity.agid.revoked.v1`
+    - Source proto: `proto/events/identity/agid.proto`
+       message `chora.identity.v1.AgidRevoked`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  agidRevoked:
+    address: chora.identity.agid.revoked.v1
+    messages:
+      agidRevoked:
+        $ref: '#/components/messages/AgidRevoked'
+
+operations:
+  publishAgidRevoked:
+    action: send
+    channel:
+      $ref: '#/channels/agidRevoked'
+    messages:
+      - $ref: '#/channels/agidRevoked/messages/agidRevoked'
+
+  consumeAgidRevoked:
+    action: receive
+    channel:
+      $ref: '#/channels/agidRevoked'
+    description: |
+      Consumers: AI Kernel (Model Gateway invocation rejection),
+      Guardrail Service, Audit log, A2A Gateway (block external traffic).
+    messages:
+      - $ref: '#/channels/agidRevoked/messages/agidRevoked'
+
+components:
+  messages:
+    AgidRevoked:
+      name: AgidRevoked
+      title: AGID Revoked
+      summary: An Agent Identity has been revoked
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/identity/agid.proto#/chora.identity.v1.AgidRevoked'

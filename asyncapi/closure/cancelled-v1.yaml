@@ -1,0 +1,64 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Closure — Cancelled
+  version: 1.0.0
+  description: |
+    Saga in CLOSING was cancelled (returned to ACTIVE) during the grace window.
+    Cancellation past SUSPENDED is FORBIDDEN.
+
+    Replaces the deprecated `chora.closure_orchestrator.saga.cancelled.v1`.
+
+    - Domain: AI Kernel — Closure Orchestrator (`chora_ai_kernel` DB)
+    - Topic: `chora.closure.cancelled.v1`
+    - Source proto: `proto/events/closure/saga.proto`
+       message `chora.closure.v1.ClosureCancelled`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  closureCancelled:
+    address: chora.closure.cancelled.v1
+    messages:
+      closureCancelled:
+        $ref: '#/components/messages/ClosureCancelled'
+
+operations:
+  publishClosureCancelled:
+    action: send
+    channel:
+      $ref: '#/channels/closureCancelled'
+    messages:
+      - $ref: '#/channels/closureCancelled/messages/closureCancelled'
+
+  consumeClosureCancelled:
+    action: receive
+    channel:
+      $ref: '#/channels/closureCancelled'
+    description: |
+      Consumers:
+        - chora-notifications (cancellation confirmation email)
+        - chora-observability (O+ dashboard)
+        - chora-identity (saga state restore on closure.Saga aggregate)
+    messages:
+      - $ref: '#/channels/closureCancelled/messages/closureCancelled'
+
+components:
+  messages:
+    ClosureCancelled:
+      name: ClosureCancelled
+      title: Federated closure saga cancelled during grace
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/closure/saga.proto#/chora.closure.v1.ClosureCancelled'

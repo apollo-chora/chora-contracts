@@ -1,0 +1,91 @@
+// =============================================================================
+// chora.governance.v1 — Bias-test evidence events (IMDA D4 fairness)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture/adrs/adr-173-*.md (O+ golden evidence
+//   pipeline) + .claude/skills/imda-governance-4-dimensions/SKILL.md (D4
+//   fairness_and_human_oversight) + ADR-141 (canonical dimension labels).
+//
+// Owning domain : Governance (chora_governance database)
+// Owning team   : Team 3 (Platform)
+// Topic prefix  : chora.governance.bias_test.*
+//
+// Purpose: a real deepeval BiasMetric run against the MCQ-AI-Assist crew (the
+// system-under-test) publishes ONE BiasTestCompleted per scored sample. The
+// chora-governance bias subscriber projects each into a `bias_test_runs`
+// evidence row, feeding the O+ D4 rubric items 4.1 (bias_testing) and 4.3
+// (demographic_bias_testing).
+//
+// FAIRNESS-SCORE CONVENTION (deepeval BiasMetric inverts intuition — LOWER raw
+// bias = BETTER). To make the projected `Passed = score >= threshold` exactly
+// reproduce deepeval's own success verdict we publish the TRANSFORMED values:
+//   score     = 1 - raw_bias_score
+//   threshold = 1 - deepeval_native_threshold   (read at runtime; default 0.5)
+// raw_bias_score + reason are carried verbatim for provenance. The harness
+// reports the REAL pass-rate — never tuned to hit a target.
+//
+// CREW SCOPING (auditor transparency): agent_id names the system-under-test —
+// "mcq_ai_assist_crew" (qgen + critic). Bias testing currently covers THIS
+// crew only; other crews are a future-intended plan. O+ must never read a
+// 4.1/4.3 PASS as platform-wide bias attestation.
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.governance.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/governance/v1;governancev1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// BiasTestCompleted — chora.governance.bias_test.completed.v1
+// -----------------------------------------------------------------------------
+//
+// Topic: chora.governance.bias_test.completed.v1
+//
+// Envelope.chora_imda_dimension MUST be "fairness_and_human_oversight";
+// Envelope.imda_lifecycle_stage SHOULD be "pre_deploy".
+message BiasTestCompleted {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // UUIDv7 — identifies this single scored bias sample. Maps to
+  // bias_test_runs.run_id (provenance: harness run/trace -> event_id -> row).
+  string run_id = 2;
+
+  // System-under-test crew identifier. Canonical: "mcq_ai_assist_crew"
+  // (qgen + critic). Names the crew the bias test was based on so auditors
+  // know the scope; other crews are a future-intended plan.
+  string agent_id = 3;
+
+  // Protected attribute group. "demographic" on ALL 4.3-eligible rows
+  // (the resolver counts demographic-attributed rows for 4.3).
+  string protected_attribute = 4;
+
+  // Test type / sub-attribute provenance, e.g. "deepeval_bias_gender",
+  // "deepeval_bias_religion", "deepeval_bias_disability".
+  string test_type = 5;
+
+  // FAIRNESS score = 1 - raw_bias_score (higher = less biased = better).
+  double score = 6;
+
+  // Pass threshold = 1 - deepeval_native_threshold (default 0.5). The
+  // projector derives Passed = score >= threshold, reproducing deepeval's
+  // own success verdict on the raw bias score.
+  double threshold = 7;
+
+  // Raw deepeval BiasMetric score (0..1; lower = less biased). Carried for
+  // provenance — the projected `score` is derived from this.
+  double raw_bias_score = 8;
+
+  // Judge model used by deepeval BiasMetric (e.g. "gemini-2.5-flash").
+  string judge_model = 9;
+
+  // deepeval BiasMetric reason string (verbatim) — provenance + auditability.
+  string reason = 10;
+
+  google.protobuf.Timestamp evaluated_at = 11;
+}

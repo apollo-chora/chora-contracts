@@ -1,0 +1,1122 @@
+openapi: 3.2.0
+info:
+  title: "Chora Content Delivery — Test-Set Authoring API"
+  version: "1.1.0"
+  description: |
+    v1.1.0 (2026-06-10, Lane 1c — CHO-1703 / ADR-180, additive): event-driven
+    batch→test-set assembly. `TestSet` gains nullable `source_job_id` (the
+    chora-creation batch job whose `chora.creation.question_batch.accepted.v1`
+    event assembled it; UNIQUE among non-null — duplicate event delivery
+    no-ops) + `GET /test-sets` gains the `source_job_id` exact-match filter
+    (the batch-authoring FE's post-accept discovery poll → editor deep-link).
+
+
+    Author-facing REST API for the **TestSet** aggregate in the Content
+    Delivery domain. A TestSet is a curated, point-weighted collection of
+    Questions (authored in chora-creation) that can be instantiated as a
+    live Assessment for a Class/Booking via `delivery-assessments.yaml`.
+
+    **Cross-domain composition** (ADR-155 D1):
+      - Questions live in `chora_creation` (authored via creation-questions.yaml).
+        Per chora-contracts CLAUDE.md §3 + ddd-enforcement #1, questions ARE
+        atoms intra-domain — the LearningAtom aggregate root carries the
+        question payload + the `question_type` discriminator.
+      - TestSets live in `chora_delivery` (authored via THIS contract)
+      - Cross-DB queries FORBIDDEN per .claude/rules/ddd-enforcement.md —
+        TestSet stores `question_atom_id` UUIDs without FK; existence is
+        validated at add-time via gRPC `chora_creation.GetQuestion` +
+        (eventually consistent) the `chora.creation.atom.published.v1` event
+        stream.
+      - The test-set captures a **payload snapshot** of each question at
+        Publish time (NOT add-time) via gRPC `chora_creation.SnapshotQuestionByID`
+        into `test_set_questions.payload_snapshot` JSONB, so editing the
+        source atom downstream does not silently change the published
+        test-set composition. DRAFT inclusions have NULL snapshot; the
+        snapshot is captured atomically with the DRAFT → PUBLISHED transition.
+
+    **Surface ownership** (CLAUDE.md §2):
+      - A+ surface hosts the authoring UI (Phyllis's test-set editor)
+      - R+ surface (Rhythm+) handles delivery (live assessment runs) —
+        wired via delivery-assessments.yaml
+
+    **Append-only on publish** (ADR-155 D5; ddd-enforcement aggregate
+    invariant #4): once PUBLISHED, the test-set's question list is immutable.
+    Edits to a published test-set fork a new draft revision (test_set_id is
+    preserved; revision_number monotonic). The PUBLISHED snapshot remains
+    queryable by historical Assessments that instantiated it.
+
+    Owning domain : Content Delivery (`chora_delivery` database)
+    Owning team   : Team 2 (Delivery)
+    Surface       : A+ Creator mode (authoring) + R+ Rhythm+ (downstream)
+    Topic prefix  : chora.delivery.test_set.*
+
+    AP-01: This contract exists BEFORE implementation. Source-of-truth:
+    `docs/architecture/adrs/adr-155-assessment-grading-dispatch.md` +
+    `docs/architecture/qgen-crew-composition-2026-05-12.md` §2.4 (grading
+    dichotomy) + §8.5 (downstream grader crews — locked at this contract).
+
+  contact:
+    name: "Chora Platform Team — Delivery Track"
+  license:
+    name: "Proprietary"
+
+servers:
+  - url: "https://api.chora.site/delivery/v1"
+    description: "Production"
+  - url: "https://api.staging.chora.site/delivery/v1"
+    description: "Staging"
+  - url: "http://localhost:8082/delivery/v1"
+    description: "Local dev"
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: test-sets
+    description: |
+      TestSet CRUD — create, list, read, update metadata, publish, archive.
+      Owned by the Content Delivery domain (`chora_delivery.test_sets`).
+  - name: test-set-questions
+    description: |
+      Per-question item management on a TestSet — add, update points / order /
+      required flag, remove. Add operations validate `question_id` exists in
+      chora_creation via gRPC + snapshot the current QuestionRevision.
+
+paths:
+  # ---------------------------------------------------------------------------
+  # TestSet CRUD
+  # ---------------------------------------------------------------------------
+  /test-sets:
+    get:
+      tags: [test-sets]
+      operationId: listTestSets
+      summary: "List test-sets authored by the caller's tenant (filter+sort+paginate)"
+      description: |
+        Returns the caller-tenant-scoped test-sets. Filter + sort + paginate
+        pattern mirrors `GET /atoms/questions/search` (creation-questions.yaml)
+        for FE reuse — same cursor + page_size enum + sort syntax.
+
+        Filter semantics (AND across families; OR within a family for
+        multi-value params):
+          - `state` — DRAFT / PUBLISHED / ARCHIVED (default = DRAFT + PUBLISHED)
+          - `author_gcid` — caller's tenant authors (instructor scope filter)
+          - `q` — free-text needle on title (case-insensitive substring)
+          - `source_job_id` — exact-match on the creation batch job that
+            assembled the test set (Lane 1c discovery poll)
+
+        Default sort: `created_at:desc`. Default page_size: 20.
+      parameters:
+        - name: source_job_id
+          in: query
+          required: false
+          description: |
+            Lane 1c (CHO-1703 / ADR-180): exact-match filter on
+            `test_sets.source_job_id` — the chora-creation batch
+            question-generation job whose `question_batch.accepted.v1` event
+            assembled this test set. The batch-authoring FE polls
+            `GET /test-sets?source_job_id={job_id}` (2s interval, ≤30s) after
+            accept to discover the assembled DRAFT and deep-link into the
+            editor. At most ONE test set matches (UNIQUE partial index —
+            duplicate event delivery never creates a second set).
+          schema:
+            type: string
+            format: uuid
+        - name: state
+          in: query
+          required: false
+          description: "Multi-value lifecycle filter. Default DRAFT + PUBLISHED."
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+              enum: [DRAFT, PUBLISHED, ARCHIVED]
+        - name: author_gcid
+          in: query
+          required: false
+          description: "Multi-value author GCID filter (UUIDv7)."
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+              format: uuid
+        - name: q
+          in: query
+          required: false
+          description: "Free-text needle (case-insensitive substring against title)."
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 200
+        - name: sort
+          in: query
+          required: false
+          description: |
+            Canonical sort syntax `{field}:{direction}`. Supported fields:
+            `created_at`, `updated_at`, `title`, `published_at`. Default
+            `created_at:desc`.
+          schema:
+            type: string
+            default: "created_at:desc"
+            pattern: '^[a-z_]+:(asc|desc)(,[a-z_]+:(asc|desc))*$'
+        - name: page_size
+          in: query
+          required: false
+          description: "Explicit enum {10, 20, 50, 100}; default 20."
+          schema:
+            type: integer
+            enum: [10, 20, 50, 100]
+            default: 20
+        - name: page_token
+          in: query
+          required: false
+          description: "Opaque cursor; omit for first page."
+          schema:
+            type: string
+            maxLength: 512
+        - name: include_total
+          in: query
+          required: false
+          description: "When true, response includes `total`. See questions/search rationale."
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: "Page of test-sets."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TestSetListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+    post:
+      tags: [test-sets]
+      operationId: createTestSet
+      summary: "Create an empty test-set in DRAFT state"
+      description: |
+        Creates a new TestSet aggregate with `state=DRAFT` and zero questions.
+        The author (caller GCID) is recorded as `author_gcid`. The caller
+        adds questions to it via `POST /test-sets/{test_set_id}/questions`.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTestSetRequest"
+            examples:
+              default:
+                value:
+                  title: "Agile Estimation — Mid-Term"
+                  description: "Mid-term assessment covering Story Points + Planning Poker + Velocity."
+                  learner_facing_name: "Agile Estimation Quiz"
+                  tags: [agile, estimation, mid-term]
+                  default_grading_config:
+                    mcq_dispatch: DETERMINISTIC
+                    oe_dispatch: LLM_EVALUATOR_AGENT
+                    llm_evaluator_model_tier: T1
+                    passing_threshold_percent: 70
+                    per_question_feedback_enabled: true
+      responses:
+        "201":
+          description: "TestSet created."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TestSet"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /test-sets/{test_set_id}:
+    parameters:
+      - $ref: "#/components/parameters/TestSetIdPath"
+    get:
+      tags: [test-sets]
+      operationId: getTestSet
+      summary: "Read a test-set with full question list + per-question config"
+      description: |
+        Returns the test-set with `questions[]` populated. Each
+        `TestSetQuestion` carries the per-question points + order + required
+        flag, plus a `snapshot` of the question at add-time (light projection
+        — same shape as `QuestionSearchResult` for FE consistency).
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TestSetWithQuestions"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    patch:
+      tags: [test-sets]
+      operationId: updateTestSet
+      summary: "Update test-set metadata (DRAFT only)"
+      description: |
+        Partial update of metadata only — title / description /
+        learner_facing_name / tags / default_grading_config. Question list
+        edits use the per-question item operations.
+
+        **State guard**: only allowed while `state=DRAFT`. PATCHing a
+        PUBLISHED test-set returns 409 — caller MUST fork a new draft via
+        `POST /test-sets/{test_set_id}/fork` (forward-reference; not in v1
+        but reserved in this contract). For v1 demo, edit-flow is:
+        un-publish (via /archive) → create new test-set.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateTestSetRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TestSet"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: "Test-set is PUBLISHED — metadata is immutable."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    delete:
+      tags: [test-sets]
+      operationId: deleteTestSet
+      summary: "Soft-delete a DRAFT test-set"
+      description: |
+        Soft-deletes (sets `deleted_at`) a DRAFT test-set. PUBLISHED test-sets
+        MUST go through `/archive` (audit-trail preservation).
+
+        Idempotent — re-deleting an already-deleted test-set returns 204.
+      responses:
+        "204":
+          description: "TestSet soft-deleted."
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: "Test-set is PUBLISHED — use /archive instead."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /test-sets/{test_set_id}/publish:
+    parameters:
+      - $ref: "#/components/parameters/TestSetIdPath"
+    post:
+      tags: [test-sets]
+      operationId: publishTestSet
+      summary: "Transition test-set DRAFT -> PUBLISHED (append-only on questions)"
+      description: |
+        Finalises a test-set for delivery. Validates:
+          - At least 1 question in the set (otherwise 409)
+          - Every question has `points >= 1` (otherwise 422)
+          - `total_points` is the recomputed sum of all `TestSetQuestion.points`
+
+        On success:
+          - `state` flips DRAFT → PUBLISHED
+          - `published_at` is stamped
+          - The question list becomes **IMMUTABLE** (ADR-155 D5;
+            ddd-enforcement #4 — append-only); subsequent POST/PATCH/DELETE on
+            `/questions` returns 409
+          - Emits `chora.delivery.test_set.published.v1`
+          - Caller can now instantiate the test-set as an Assessment via
+            `POST /assessments` (delivery-assessments.yaml)
+
+        **Idempotent re-publish**: calling publish on an already-PUBLISHED
+        test-set returns 200 with the same envelope (no domain mutation, no
+        event re-emission). FE retry-safe.
+      responses:
+        "200":
+          description: |
+            Test-set published. Idempotent re-publish returns the same envelope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TestSet"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            Test-set in incompatible state. `code` is one of:
+              - `DELIVERY_TEST_SET_NO_QUESTIONS` — empty test-set
+              - `DELIVERY_TEST_SET_ARCHIVED` — soft-deleted; cannot publish
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublishTestSetConflictError"
+        "422":
+          description: "Validation failed — e.g., a question has points < 1."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /test-sets/{test_set_id}/archive:
+    parameters:
+      - $ref: "#/components/parameters/TestSetIdPath"
+    post:
+      tags: [test-sets]
+      operationId: archiveTestSet
+      summary: "Soft-archive a test-set (preserves audit trail)"
+      description: |
+        Transitions any state (DRAFT / PUBLISHED) to ARCHIVED. Per
+        ddd-enforcement aggregate invariant #5, this is a soft delete
+        (`deleted_at` set, `state=ARCHIVED`). Historical Assessments that
+        instantiated the PUBLISHED snapshot continue to function — they hold
+        their own immutable copy of the question list.
+
+        Idempotent — re-archiving returns 200 with the same envelope.
+      responses:
+        "200":
+          description: "TestSet archived (or was already archived)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TestSet"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---------------------------------------------------------------------------
+  # Per-question item operations
+  # ---------------------------------------------------------------------------
+  /test-sets/{test_set_id}/questions:
+    parameters:
+      - $ref: "#/components/parameters/TestSetIdPath"
+    post:
+      tags: [test-set-questions]
+      operationId: addQuestionToTestSet
+      summary: "Add a question to the test-set with point assignment"
+      description: |
+        Adds a question authored in `chora_creation` to this `chora_delivery`
+        test-set. Cross-DB validation:
+          1. Validates `question_id` exists + is PUBLISHED via gRPC
+             `chora_creation.GetQuestion` (cross-DB query forbidden — gRPC
+             is the only sanctioned access).
+          2. Snapshots the question payload at publish-time into
+             `chora_delivery.test_set_questions.payload_snapshot` (JSONB,
+             nullable for DRAFT inclusions; populated at TestSet.Publish
+             via the canonical chora_creation gRPC SnapshotQuestionByID
+             per migration `0011_test_set_questions_snapshot.up.sql`).
+             Subsequent edits in chora_creation do NOT mutate the
+             test-set's stored snapshot.
+          3. Assigns `display_order` (defaults to `last + 1` if unspecified).
+          4. Assigns `points` (1-100; required field).
+          5. Sets `required` flag (defaults to true).
+
+        **Same question can be added multiple times** — explicit by design
+        (e.g., a 2-part question or two variations of difficulty). Each
+        inclusion is its own `TestSetQuestion` row with its own UUIDv7 +
+        snapshot. The PUBLISHED revision number is captured per insertion.
+
+        **State guard**: only allowed while test-set is DRAFT. 409 on PUBLISHED.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddTestSetQuestionRequest"
+            examples:
+              default:
+                value:
+                  question_atom_id: "01985e7f-1234-7abc-8def-000000000001"
+                  question_id: "019e2ba6-7353-73f5-b517-dd627e76d450"
+                  question_type: "mcq"
+                  points: 2.0
+                  display_order: 1
+      responses:
+        "201":
+          description: "Question added; test-set total_points + question_count recomputed."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TestSetQuestion"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          description: |
+            Question not found in chora_creation OR test-set not found. Error
+            envelope's `code` discriminates:
+              - `DELIVERY_TEST_SET_NOT_FOUND`
+              - `CREATION_QUESTION_NOT_FOUND` (cross-domain — the question
+                doesn't exist in the caller's tenant)
+              - `CREATION_QUESTION_NOT_PUBLISHED` (exists but in DRAFT — must
+                be PUBLISHED in chora_creation before inclusion)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: |
+            Test-set is PUBLISHED — question list is immutable (ADR-155 D5).
+            `code=DELIVERY_TEST_SET_PUBLISHED_IMMUTABLE`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: "Validation — points out of range (1-100), display_order conflicts, etc."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /test-sets/{test_set_id}/questions/{test_set_question_id}:
+    parameters:
+      - $ref: "#/components/parameters/TestSetIdPath"
+      - $ref: "#/components/parameters/TestSetQuestionIdPath"
+    patch:
+      tags: [test-set-questions]
+      operationId: updateTestSetQuestion
+      summary: "Update points / order / required flag for a single inclusion"
+      description: |
+        Partial update of a `TestSetQuestion` row. The underlying `question_id`
+        + `snapshot` are immutable — to swap to a different question, DELETE
+        + POST a new inclusion.
+
+        **State guard**: only allowed while test-set is DRAFT.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateTestSetQuestionRequest"
+      responses:
+        "200":
+          description: "TestSetQuestion updated; parent total_points recomputed."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TestSetQuestion"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: "Test-set is PUBLISHED — immutable."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: "Validation — points out of range."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    delete:
+      tags: [test-set-questions]
+      operationId: removeTestSetQuestion
+      summary: "Remove a question inclusion from the test-set"
+      description: |
+        Removes the `TestSetQuestion` row (NOT the underlying Question in
+        chora_creation). Soft-delete on the inclusion row — the original
+        Question is untouched. Idempotent.
+
+        **State guard**: only allowed while test-set is DRAFT.
+      responses:
+        "204":
+          description: "Inclusion removed; parent total_points + question_count recomputed."
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: "Test-set is PUBLISHED — immutable."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    TestSetIdPath:
+      name: test_set_id
+      in: path
+      required: true
+      description: "UUIDv7 of the TestSet aggregate."
+      schema:
+        type: string
+        format: uuid
+    TestSetQuestionIdPath:
+      name: test_set_question_id
+      in: path
+      required: true
+      description: "UUIDv7 of the per-inclusion TestSetQuestion row (NOT the underlying question_id)."
+      schema:
+        type: string
+        format: uuid
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: "Client-supplied idempotency key (UUIDv7 recommended)."
+      schema:
+        type: string
+        maxLength: 64
+
+  schemas:
+    # -- Lifecycle --
+
+    TestSetState:
+      type: string
+      description: |
+        TestSet lifecycle state. Transitions:
+          DRAFT     → PUBLISHED  (via /publish; requires ≥1 question + points valid)
+          DRAFT     → ARCHIVED   (via DELETE — soft-delete)
+          PUBLISHED → ARCHIVED   (via /archive — preserves audit trail)
+      enum: [DRAFT, PUBLISHED, ARCHIVED]
+
+    # -- Grading config (shared shape; also referenced by delivery-grading.yaml) --
+
+    GradingConfig:
+      type: object
+      description: |
+        Per-test-set grading dispatch configuration. Captured at test-set
+        creation; can be overridden at Assessment instantiation time
+        (delivery-assessments.yaml) for instructor-specific tuning.
+      required:
+        - mcq_dispatch
+        - oe_dispatch
+        - passing_threshold_percent
+        - per_question_feedback_enabled
+      properties:
+        mcq_dispatch:
+          type: string
+          enum: [DETERMINISTIC]
+          description: |
+            MCQ grading strategy. **DETERMINISTIC** is the only v1 option per
+            qgen-crew-composition-2026-05-12.md §2.4 + §8.5 — non-LLM Go
+            service compares `learner.choice_id` to question revision's
+            `mcq.options[].is_correct`. Zero LLM cost at grading time.
+            Sub-200ms p99.
+        oe_dispatch:
+          type: string
+          enum: [LLM_EVALUATOR_AGENT]
+          description: |
+            OE grading strategy. **LLM_EVALUATOR_AGENT** is the only v1
+            option per qgen-crew-composition §8.5 — chora-delivery accumulates
+            ALL OE submissions in the assessment + sends a SINGLE BATCH to
+            the `oe_grader` reasoning engine (P1 single-agent crew per
+            ADR-155 D3). One LLM call per BATCH, not per learner.
+        llm_evaluator_model_tier:
+          type: string
+          enum: [T1, T2]
+          default: T1
+          description: |
+            Model tier for the OE evaluator agent. T1 (gemini-3.1-pro-preview)
+            is the default for LLM-as-judge per qgen-crew-composition §2.1
+            tier mapping. Tenants MAY override to T2 (gemini-3-flash-preview)
+            for cost optimisation at quality risk.
+        passing_threshold_percent:
+          type: integer
+          minimum: 0
+          maximum: 100
+          default: 70
+          description: "Score percentage required to pass the assessment."
+        per_question_feedback_enabled:
+          type: boolean
+          default: true
+          description: |
+            When true, OE feedback strings are surfaced to learners
+            post-release. When false, only the score is shown (cost-saving
+            mode — `oe_grader` runs without the explainer-generation step).
+        auto_release:
+          type: boolean
+          default: false
+          description: |
+            When true, results are released to learners immediately after
+            grading completes (instructor skips the explicit /release-results
+            step). Default false — instructor reviews before release.
+
+    # -- TestSet aggregate --
+
+    TestSet:
+      type: object
+      description: |
+        TestSet aggregate root — primary aggregate in `chora_delivery.test_sets`.
+        Owns `TestSetQuestion` child entities. Cross-domain reference to
+        `chora_creation.questions` via UUIDv7 without FK (ddd-enforcement
+        aggregate invariant #3).
+      required:
+        - test_set_id
+        - tenant_id
+        - author_gcid
+        - title
+        - state
+        - total_points
+        - question_count
+        - default_grading_config
+        - created_at
+        - updated_at
+      properties:
+        test_set_id:
+          type: string
+          format: uuid
+          description: "UUIDv7 of the TestSet aggregate."
+        tenant_id:
+          type: string
+          format: uuid
+        author_gcid:
+          type: string
+          format: uuid
+          description: "GCID of the test-set author (instructor / admin)."
+        title:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: "Instructor-facing title."
+        description:
+          type: string
+          maxLength: 2000
+          nullable: true
+          description: "Instructor-facing free-form description (≤2000 chars)."
+        learner_facing_name:
+          type: string
+          maxLength: 256
+          nullable: true
+          description: |
+            Optional learner-facing display name (shown on the learner's
+            assessment screen). Falls back to `title` when null.
+        tags:
+          type: array
+          items:
+            type: string
+            minLength: 1
+            maxLength: 64
+          description: "Free-form tags for filtering (e.g., 'mid-term', 'agile')."
+        state:
+          $ref: "#/components/schemas/TestSetState"
+        total_points:
+          type: integer
+          minimum: 0
+          description: |
+            Computed sum of `TestSetQuestion.points` across all non-deleted
+            inclusions. Updated atomically on every add/update/remove.
+        question_count:
+          type: integer
+          minimum: 0
+          description: "Computed count of non-deleted inclusions."
+        source_job_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            Lane 1c (CHO-1703 / ADR-180): UUIDv7 of the chora-creation batch
+            question-generation job this test set was assembled FROM by the
+            `chora.creation.question_batch.accepted.v1` subscriber. Null for
+            hand-authored test sets. UNIQUE among non-null values (partial
+            index) — the subscriber's idempotency key: duplicate event
+            delivery no-ops instead of creating a second set.
+        revision_number:
+          type: integer
+          minimum: 1
+          default: 1
+          description: |
+            Monotonic revision number — bumped if the test-set is forked from
+            a PUBLISHED parent (future feature; v1 always 1).
+        parent_test_set_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            If this test-set was forked from another PUBLISHED test-set, the
+            parent's UUIDv7. Null for original drafts. Reserved for v2.
+        default_grading_config:
+          $ref: "#/components/schemas/GradingConfig"
+        deleted_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        published_at:
+          type: string
+          format: date-time
+          nullable: true
+        archived_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    TestSetWithQuestions:
+      type: object
+      description: "TestSet with embedded question list (for the editor + detail screens)."
+      allOf:
+        - $ref: "#/components/schemas/TestSet"
+        - type: object
+          required: [questions]
+          properties:
+            questions:
+              type: array
+              description: "Ordered by `display_order` ascending; non-deleted only."
+              items:
+                $ref: "#/components/schemas/TestSetQuestion"
+
+    # -- TestSetQuestion (inclusion row) --
+
+    TestSetQuestion:
+      type: object
+      description: |
+        Per-question inclusion row. Owned by `TestSet` (composition; deleting
+        a TestSet soft-deletes its `TestSetQuestion`s). The underlying
+        LearningAtom (questions ARE atoms intra-domain per chora-contracts
+        CLAUDE.md §3 + ddd-enforcement #1) in `chora_creation` is untouched.
+
+        **Snapshot semantics** (ADR-155 D5; ddd-enforcement #4 append-only):
+        `payload_snapshot` is a JSONB column on `test_set_questions` populated
+        at TestSet.Publish time (NOT add-time) via gRPC
+        `chora_creation.SnapshotQuestionByID`. For DRAFT inclusions, the
+        column is NULL — the snapshot is captured atomically with the
+        DRAFT → PUBLISHED state transition. Once captured, the snapshot is
+        immutable for the lifetime of the inclusion row.
+      required:
+        - test_set_question_id
+        - test_set_id
+        - question_atom_id
+        - question_id
+        - question_type
+        - points
+        - display_order
+        - added_at
+      properties:
+        test_set_question_id:
+          type: string
+          format: uuid
+          description: "UUIDv7 of the inclusion row (distinct from the underlying atom-id)."
+        test_set_id:
+          type: string
+          format: uuid
+        question_atom_id:
+          type: string
+          format: uuid
+          description: |
+            Cross-domain reference to `chora_creation.learning_atoms.atom_id`
+            (no FK; cross-DB queries forbidden per ddd-enforcement). The
+            LearningAtom row that carries the question payload.
+        question_id:
+          type: string
+          format: uuid
+          description: |
+            LEG3-D R3 Option B — embedded Question UUID inside the atom's
+            payload (e.g., `mcq_payload.question_id`). Distinct from
+            `question_atom_id`. This is the value
+            `chora.services.creation.v1.Creation/SnapshotQuestionByID`
+            consumes at PublishWithSnapshot time. Stored alongside
+            `question_atom_id` so the snapshot path stays self-contained
+            within chora-delivery (no add-time gRPC to chora-creation).
+        question_type:
+          type: string
+          enum: [mcq, oe]
+          description: |
+            Snapshot of the atom's `question_type` at add-time. Persisted on
+            the inclusion row (`chora_delivery.test_set_questions.question_type`)
+            so the test-set composition is self-describing without a sync
+            gRPC round-trip back to chora_creation.
+        points:
+          type: number
+          minimum: 0.01
+          description: |
+            Points awarded for a correct answer. NUMERIC(10,2) per migration
+            `0009_test_sets.up.sql` — fractional points supported. Domain
+            invariant: `points > 0`.
+        display_order:
+          type: integer
+          minimum: 0
+          description: "Sort order within the test-set (0-indexed; gaps allowed)."
+        payload_snapshot:
+          type: object
+          additionalProperties: true
+          nullable: true
+          description: |
+            JSONB snapshot of the underlying atom's question payload (stem,
+            options, correct_options, scoring_config) captured at
+            TestSet.Publish time. NULL while the test-set is DRAFT. Populated
+            via gRPC `chora_creation.SnapshotQuestionByID` per migration
+            `0011_test_set_questions_snapshot.up.sql`. Used at /submit
+            grading time so cross-DB lookups are not required at runtime.
+        snapshot_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: "Wall-clock at which `payload_snapshot` was captured. NULL until publish."
+        added_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    QuestionSnapshot:
+      type: object
+      description: |
+        Lightweight snapshot of the question at add-time. Shape mirrors
+        `QuestionSearchResult` in creation-questions.yaml for FE consistency.
+        Provides enough metadata for the test-set editor to render the row
+        without round-tripping back to chora_creation. The full Question
+        (including the correct answer keys) is fetched at Assessment grading
+        time via gRPC `chora_creation.GetQuestionRevision`.
+      required:
+        - question_id
+        - atom_id
+        - atom_title
+        - question_type
+        - prompt_preview
+        - revision_number
+      properties:
+        question_id:
+          type: string
+          format: uuid
+        atom_id:
+          type: string
+          format: uuid
+        atom_title:
+          type: string
+          maxLength: 256
+        question_type:
+          type: string
+          enum: [mcq, oe]
+          description: "Phyllis-scope types. Reserved_* types rejected at add-time."
+        prompt_preview:
+          type: string
+          maxLength: 200
+        topic_node_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+        tags:
+          type: array
+          items:
+            type: string
+        difficulty:
+          type: integer
+          minimum: 0
+          maximum: 5
+        cognitive_level:
+          type: string
+          nullable: true
+          enum: [remembering, understanding, applying, analyzing, evaluating, creating]
+        revision_number:
+          type: integer
+
+    # -- Request payloads --
+
+    CreateTestSetRequest:
+      type: object
+      required: [title]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 256
+        description:
+          type: string
+          maxLength: 2000
+        learner_facing_name:
+          type: string
+          maxLength: 256
+        tags:
+          type: array
+          items:
+            type: string
+            minLength: 1
+            maxLength: 64
+        default_grading_config:
+          $ref: "#/components/schemas/GradingConfig"
+
+    UpdateTestSetRequest:
+      type: object
+      description: "Partial update — only fields present are updated."
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 256
+        description:
+          type: string
+          maxLength: 2000
+        learner_facing_name:
+          type: string
+          maxLength: 256
+        tags:
+          type: array
+          items:
+            type: string
+            minLength: 1
+            maxLength: 64
+        default_grading_config:
+          $ref: "#/components/schemas/GradingConfig"
+
+    AddTestSetQuestionRequest:
+      type: object
+      required: [question_atom_id, question_id, question_type, points]
+      description: |
+        Per LEG3-D R3 Option B (user direction 2026-05-16 — see
+        `docs/m13/wave3-leg3d-round3-blocker-2026-05-16.md`): the request
+        carries TWO distinct UUIDs.
+
+        - `question_atom_id` — the LearningAtom row in `chora_creation`
+          (the canonical authoring identifier). chora-delivery references
+          it as the cross-domain link but never resolves it at add-time.
+        - `question_id` — the **embedded** Question UUID inside the atom's
+          payload (e.g., `mcq_payload.question_id` /
+          `oe_payload.question_id`). This is what
+          `chora.services.creation.v1.Creation/SnapshotQuestionByID`
+          consumes at TestSet.Publish() time.
+
+        Both are REQUIRED. The FE picker (`/r/test-sets`) extracts
+        `question_id` from the loaded atom payload before POST. The caller
+        is responsible — chora-delivery does NOT resolve `atom_id ->
+        question_id` at add-question time (that would couple add-question
+        to chora-creation availability; see ADR-implicit dep boundary).
+
+        Per `.claude/rules/ddd-enforcement.md` #1 LearningAtom remains the
+        primary aggregate root in chora_creation; the embedded Question is
+        a Value Object inside the atom payload (NOT a separate aggregate),
+        which is why both UUIDs land here distinctly rather than via a
+        nested object reference.
+      properties:
+        question_atom_id:
+          type: string
+          format: uuid
+          description: |
+            UUIDv7 of the chora_creation LearningAtom that carries the
+            question payload. Must be PUBLISHED.
+        question_id:
+          type: string
+          format: uuid
+          description: |
+            UUIDv7 of the specific Question within the atom's payload
+            (e.g., `mcq_payload.question_id`). REQUIRED — chora-delivery
+            does not resolve this from the atom; the caller (FE picker)
+            extracts it from the atom payload. This is the value
+            chora.services.creation.v1.Creation/SnapshotQuestionByID
+            consumes at PublishWithSnapshot time.
+        question_type:
+          type: string
+          enum: [mcq, oe]
+          description: |
+            Discriminator matching `chora_creation.learning_atoms.question_type`
+            for the referenced atom. FE supplies it from the QuestionSearchResult
+            envelope's `question_type` field to avoid a sync gRPC round-trip
+            at add-time.
+        points:
+          type: number
+          minimum: 0.01
+          description: |
+            NUMERIC(10,2) per migration `0009_test_sets.up.sql` — fractional
+            points supported. Domain invariant: `points > 0`.
+        display_order:
+          type: integer
+          minimum: 0
+          description: "Defaults to (current_max + 1) if omitted."
+
+    UpdateTestSetQuestionRequest:
+      type: object
+      description: "Partial — only fields present are updated. `question_id` + `snapshot` immutable."
+      properties:
+        points:
+          type: integer
+          minimum: 1
+          maximum: 100
+        display_order:
+          type: integer
+          minimum: 0
+        required:
+          type: boolean
+
+    # -- List response --
+
+    TestSetListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/TestSet"
+        next_page_token:
+          type: string
+          nullable: true
+        total:
+          type: integer
+          nullable: true
+          minimum: 0
+
+    # -- Error envelopes --
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:    { type: string }
+            message: { type: string }
+            correlation_id:
+              type: string
+              format: uuid
+            details:
+              type: object
+
+    PublishTestSetConflictError:
+      type: object
+      description: |
+        Discriminated 409 envelope for publishTestSet. `code` is one of:
+          - DELIVERY_TEST_SET_NO_QUESTIONS
+          - DELIVERY_TEST_SET_ARCHIVED
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum:
+            - DELIVERY_TEST_SET_NO_QUESTIONS
+            - DELIVERY_TEST_SET_ARCHIVED
+        message: { type: string }
+        correlation_id:
+          type: string
+          format: uuid
+
+  responses:
+    BadRequest:
+      description: "Malformed request."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unauthorized:
+      description: "Missing or invalid bearer token."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: "Resource not found."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"

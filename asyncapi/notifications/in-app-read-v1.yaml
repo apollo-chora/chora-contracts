@@ -1,0 +1,60 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Notifications — InAppNotificationRead
+  version: 1.0.0
+  description: |
+    Published when the recipient reads / opens the notification.
+
+    - Domain: Notifications (`chora_notifications` DB)
+    - Topic: `chora.notifications.in_app.read.v1`
+    - Source proto: `proto/events/notifications/in_app.proto`
+       message `chora.notifications.v1.InAppNotificationRead`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  inAppRead:
+    address: chora.notifications.in_app.read.v1
+    messages:
+      inAppRead:
+        $ref: '#/components/messages/InAppNotificationRead'
+
+operations:
+  publishInAppRead:
+    action: send
+    channel:
+      $ref: '#/channels/inAppRead'
+    messages:
+      - $ref: '#/channels/inAppRead/messages/inAppRead'
+
+  consumeInAppRead:
+    action: receive
+    channel:
+      $ref: '#/channels/inAppRead'
+    description: |
+      Consumers: All 5 surfaces' counter widgets (via WebSocket bridge),
+      Observability (read-through-rate KPI).
+    messages:
+      - $ref: '#/channels/inAppRead/messages/inAppRead'
+
+components:
+  messages:
+    InAppNotificationRead:
+      name: InAppNotificationRead
+      title: In-App Notification Read
+      summary: A recipient has read an in-app notification
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/notifications/in_app.proto#/chora.notifications.v1.InAppNotificationRead'

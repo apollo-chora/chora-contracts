@@ -1,0 +1,61 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Governance — PolicyUpdated
+  version: 1.0.0
+  description: |
+    Published when a policy revision is published. Carries the previous +
+    new version strings so consumers can diff.
+
+    - Domain: Governance (`chora_governance` DB)
+    - Topic: `chora.governance.policy.updated.v1`
+    - Source proto: `proto/events/governance/policy.proto`
+       message `chora.governance.v1.PolicyUpdated`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  policyUpdated:
+    address: chora.governance.policy.updated.v1
+    messages:
+      policyUpdated:
+        $ref: '#/components/messages/PolicyUpdated'
+
+operations:
+  publishPolicyUpdated:
+    action: send
+    channel:
+      $ref: '#/channels/policyUpdated'
+    messages:
+      - $ref: '#/channels/policyUpdated/messages/policyUpdated'
+
+  consumePolicyUpdated:
+    action: receive
+    channel:
+      $ref: '#/channels/policyUpdated'
+    description: |
+      Consumers: Guardrail Service refresh, Content Sharing moderation,
+      Audit log, Notifications.
+    messages:
+      - $ref: '#/channels/policyUpdated/messages/policyUpdated'
+
+components:
+  messages:
+    PolicyUpdated:
+      name: PolicyUpdated
+      title: Policy Updated
+      summary: A governance policy revision has been published
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/governance/policy.proto#/chora.governance.v1.PolicyUpdated'

@@ -1,0 +1,213 @@
+// =============================================================================
+// chora.ai_kernel.v1 — Agent termination event
+// =============================================================================
+//
+// Source-of-truth:
+//   * `feedback_resilience_priority` — D6 4-pillar contract requires every
+//     agent termination be structured, attributable, and traceable.
+//   * M11.10.W3 foundation audit (2026-05-12) — circuit-break + structured
+//     terminate event are foundational prerequisites for multi-crew chaos
+//     testing. Audit identified 5 of 6 agents missing this primitive;
+//     chora-guardrail's ContentPolicyViolationLog is the reference shape.
+//   * agentic-resilience-d6 skill (Pillar 4 — Cloud Trace emission with
+//     per-tenant attribution); D6.2 (Delivery resilience) for outbox use.
+//   * crew-composition skill (per-crew termination semantics).
+//
+// Owning domain : AI Kernel (chora_ai_kernel database)
+// Owning team   : Team 3 (Platform)
+// Topic prefix  : chora.ai_kernel.agent.*
+// Canonical topic: chora.ai_kernel.agent.terminated.v1
+// DLQ topic     : chora.dlq.ai_kernel.agent.terminated.v1
+//
+// PUBLISHER PATTERN
+//
+//   Every Chora agentic runtime (Python LangGraph orchestrator OR Go ADK
+//   agent OR future runtimes) MUST publish AgentTerminated to the canonical
+//   topic upon any of:
+//     - Normal completion (terminal node reached OR success-typed handoff)
+//     - Circuit-break hit (max_iterations / recursion_limit / timeout)
+//     - Tool failure (tool returned an error the agent couldn't recover from)
+//     - LLM failure (model call rejected / network failed without retry left)
+//     - Guardrail rejection (Model Armor / DLP / regex / output validator
+//       returned a blocking verdict)
+//     - Unhandled exception during runtime
+//
+//   Producer-side D6.2 path:
+//     1. Insert AgentTerminated row into <service>_outbox_events table
+//        atomically with the agent's terminal state write.
+//     2. Outbox dispatcher publishes to chora.ai_kernel.agent.terminated.v1.
+//     3. Subscriber wrapper ACKs only after downstream side effects complete.
+//     4. DLQ awareness: chora.dlq.ai_kernel.agent.terminated.v1 → orchestrator
+//        emits a chora.ai_kernel.crew.run_failed.v1 with replay metadata
+//        (or otherwise alerts operators).
+//
+// EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.ai_kernel.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/ai_kernel/v1;aikernelv1";
+
+import "google/protobuf/timestamp.proto";
+import "chora/common/v1/envelope.proto";
+
+// -----------------------------------------------------------------------------
+// AgentTerminationCode — typed enum for the cause of termination.
+// -----------------------------------------------------------------------------
+//
+// SUCCESS is distinct from all failure modes. The failure modes are
+// mutually exclusive at any given termination boundary; if multiple causes
+// applied, the producer SHOULD pick the MOST PROXIMATE one (the cause that
+// directly triggered the termination, not the root cause).
+// -----------------------------------------------------------------------------
+enum AgentTerminationCode {
+  AGENT_TERMINATION_CODE_UNSPECIFIED = 0;
+
+  // Normal terminal completion — terminal node reached / success handoff.
+  AGENT_TERMINATION_CODE_SUCCESS = 1;
+
+  // Circuit-break primitive fired — agent hit max-iteration limit
+  // (LangGraph recursion_limit OR ADK runner max-iter wrapper OR equivalent).
+  // The agent is healthy but produced no terminal value within budget.
+  AGENT_TERMINATION_CODE_MAX_ITERATIONS = 2;
+
+  // Tool execution returned a non-recoverable error after retries.
+  AGENT_TERMINATION_CODE_TOOL_FAILED = 3;
+
+  // LLM call rejected (4xx, content policy, capacity, etc.) without
+  // retry budget remaining. Includes both upstream model errors and
+  // schema-violation responses the agent can't parse.
+  AGENT_TERMINATION_CODE_LLM_ERROR = 4;
+
+  // Wall-clock or per-step timeout exceeded.
+  AGENT_TERMINATION_CODE_TIMEOUT = 5;
+
+  // Cloud Model Armor / Cloud DLP / regex baseline / output validator
+  // returned a BLOCKED verdict on inbound OR outbound content.
+  // ContentPolicyViolationLog event carries the violation detail; this
+  // event marks the agent termination caused by that block.
+  AGENT_TERMINATION_CODE_GUARDRAIL_REJECTED = 6;
+
+  // Runtime exception during agent loop / state-machine traversal that
+  // wasn't caught + handled by the agent (escaped to runtime).
+  AGENT_TERMINATION_CODE_RUNTIME_ERROR = 7;
+
+  // Pod kill / SIGTERM / SIGKILL / Agent Engine engine deletion mid-run.
+  // The runtime detected its own termination is imminent and emitted this
+  // before exit. Resume on a fresh runtime is via thread_id/session_id
+  // (PostgresSaver checkpoint OR Vertex AI Sessions).
+  AGENT_TERMINATION_CODE_RUNTIME_TERMINATED = 8;
+
+  // Catch-all for failure causes that don't fit the above. Producers
+  // SHOULD prefer specific codes; this one is for genuinely unknown.
+  AGENT_TERMINATION_CODE_UNKNOWN = 9;
+}
+
+// -----------------------------------------------------------------------------
+// AgentExecutionRuntime — what runtime the terminating agent uses.
+// -----------------------------------------------------------------------------
+//
+// Per ADR-145 polyglot pivot (Outcome A): Chora runs LangGraph (Python),
+// ADK (Go primary; Python where co-deployed with LangGraph), and legacy
+// Go executors side-by-side on Vertex AI Agent Engine + Cloud Run.
+// -----------------------------------------------------------------------------
+enum AgentExecutionRuntime {
+  AGENT_EXECUTION_RUNTIME_UNSPECIFIED = 0;
+  AGENT_EXECUTION_RUNTIME_LANGGRAPH_PYTHON = 1;
+  AGENT_EXECUTION_RUNTIME_ADK_GO = 2;
+  AGENT_EXECUTION_RUNTIME_ADK_PYTHON = 3;
+  AGENT_EXECUTION_RUNTIME_GO_EXECUTOR = 4;  // legacy Go Cloud Run agent executors
+}
+
+// -----------------------------------------------------------------------------
+// AgentTerminationContext — runtime snapshot at the termination boundary.
+// -----------------------------------------------------------------------------
+//
+// Used for chaos test forensics + production troubleshooting + Cloud Trace
+// span enrichment. All fields are OPTIONAL — fill what's available.
+// -----------------------------------------------------------------------------
+message AgentTerminationContext {
+  // For LangGraph: the last state-machine node that ran (or was attempting
+  // to run when terminated). For ADK: the last tool name OR the runner's
+  // current step ("model_call" / "tool_call" / "router").
+  string last_state_node = 1;
+
+  // The most recently invoked tool's name (if applicable).
+  string last_tool_name = 2;
+
+  // The error message returned by the last tool / LLM call (if applicable).
+  // Free-text; not a typed payload. Operators consult this for debugging.
+  string last_error_message = 3;
+
+  // Iteration count at termination — for MAX_ITERATIONS this MUST equal
+  // the configured limit. For other codes, indicates progress reached.
+  int32 iteration_count = 4;
+
+  // Partial state snapshot — small map of key→value pairs from the agent's
+  // state at termination. Producers SHOULD redact PII before populating;
+  // this is for forensics + Cloud Trace, NOT a state-restore primitive.
+  // Max ~16 entries; values ≤ 256 chars (truncate if larger).
+  map<string, string> partial_state = 5;
+
+  // Cloud Trace span_id of the current span at termination (16-hex string).
+  // Allows downstream subscribers to correlate this termination with the
+  // exact OTel span that recorded it.
+  string current_span_id = 6;
+}
+
+// -----------------------------------------------------------------------------
+// AgentTerminated — chora.ai_kernel.agent.terminated.v1
+// -----------------------------------------------------------------------------
+//
+// Published when ANY Chora agentic runtime terminates an execution (success
+// OR failure). One event per execution lifecycle — agents do NOT emit
+// multiple AgentTerminated events for the same execution_id.
+//
+// Idempotency: subscribers MUST be idempotent on envelope.idempotency_key.
+// Producers SHOULD use sha256(execution_id || termination_code || terminated_at).
+// -----------------------------------------------------------------------------
+message AgentTerminated {
+  chora.common.v1.EventEnvelope envelope = 1;
+
+  // The terminating agent's identity — typically agent_card.name from the
+  // ADK Agent Card OR the LangGraph orchestrator's service name. NOT an
+  // AGID (which is per-instance); this is the agent role / type name.
+  // Examples: "closure_saga", "ai_kernel_orchestrator", "companion_chat",
+  //           "qgen_p2_generator", "qgen_p2_evaluator".
+  string agent_id = 2;
+
+  // The terminating agent's AGID (per ADR-132) — the per-instance
+  // signing-key-backed identity. May be empty if the agent is system-owned
+  // (e.g., LangGraph orchestrators that aren't published as A2A agents).
+  string agent_agid = 3;
+
+  // The execution identifier — for LangGraph this is thread_id; for ADK
+  // this is session_id; for stateless invocations this is a per-call
+  // UUIDv7. Subscribers correlate this with checkpointer / session state.
+  string execution_id = 4;
+
+  // What runtime the agent uses (informs cross-runtime forensics).
+  AgentExecutionRuntime runtime = 5;
+
+  // The proximate cause of termination.
+  AgentTerminationCode termination_code = 6;
+
+  // Optional crew_id — set when this agent ran as part of a crew per
+  // crew-composition skill. Subscribers can join with CrewComposed/Executed
+  // to reconstruct the full multi-agent trace.
+  string crew_id = 7;
+
+  // Optional Pattern (P1–P8) per crew-composition skill — what crew pattern
+  // this agent participated in. UPPER_SNAKE: "P1_SINGLE_AGENT_REACT",
+  // "P2_SEQUENTIAL_PIPELINE", "P8_LANGGRAPH_STATEFUL_SAGA", etc.
+  string crew_pattern = 8;
+
+  // Runtime snapshot for forensics (last node, last tool, iteration count,
+  // partial state, span_id).
+  AgentTerminationContext context = 9;
+
+  // When the termination occurred (producer clock).
+  google.protobuf.Timestamp terminated_at = 10;
+}

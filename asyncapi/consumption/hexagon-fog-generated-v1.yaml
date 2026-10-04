@@ -1,0 +1,69 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Content Consumption — HexagonFogGenerated
+  version: 1.0.0
+  description: |
+    Published by chora-fog-orchestrator after each successful Model Broker
+    call (per ADR-143). Carries cost + token data for the AI Kernel cost
+    ledger (per ai-cost-tracking skill).
+
+    - Domain: Content Consumption (`chora_consumption` DB)
+    - Aggregate root: `HexagonNode` (kg_hexagon_nodes table)
+    - Topic: `chora.consumption.kg_hexagon_fog.generated.v1`
+    - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
+    - Source proto: `proto/events/consumption/knowledge_graph.proto`
+       message `chora.consumption.v1.HexagonFogGenerated`
+
+    Embeds the mandatory `chora.common.v1.EventEnvelope` as field 1.
+
+    Idempotent on `run_id` (UUIDv7 echo of orchestrator request_id).
+  contact:
+    name: Chora Content Team (Team 1) + Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+    description: Google Cloud Pub/Sub (chora-489812 platform host)
+
+channels:
+  hexagonFogGenerated:
+    address: chora.consumption.kg_hexagon_fog.generated.v1
+    description: Single-event topic for HexagonFogGenerated.
+    messages:
+      hexagonFogGenerated:
+        $ref: '#/components/messages/HexagonFogGenerated'
+
+operations:
+  publishHexagonFogGenerated:
+    action: send
+    channel:
+      $ref: '#/channels/hexagonFogGenerated'
+    summary: Publish a HexagonFogGenerated event
+
+  consumeHexagonFogGenerated:
+    action: receive
+    channel:
+      $ref: '#/channels/hexagonFogGenerated'
+    summary: Subscribe to HexagonFogGenerated events
+    description: |
+      Primary consumers:
+      - AI Kernel — cost ledger (BigQuery streaming + per-tenant rollups)
+      - Observability — engagement analytics + cost monitoring
+
+components:
+  messages:
+    HexagonFogGenerated:
+      name: HexagonFogGenerated
+      title: Hexagon Fog Generated
+      summary: chora-fog-orchestrator successfully generated a hexagon
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/consumption/knowledge_graph.proto#/chora.consumption.v1.HexagonFogGenerated'

@@ -1,0 +1,306 @@
+// =============================================================================
+// Chora Notifications Service (gRPC)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 1 D1
+//   + .claude/rules/ddd-enforcement.md
+//   + chora-contracts/openapi/notifications-admin.yaml
+//   + services/chora-notifications/internal/domain/notification/notification.go
+//   + docs/m13/grpc-mass-remediation-2026-05-16.md (Wave-1 N-FULL)
+//
+// Inter-service gRPC contract for the Notifications supporting domain
+// (chora_notifications database, Team 3 / Platform). REST surfaces in
+// services/chora-notifications/internal/adapter/http are the user-facing
+// equivalents; gRPC is for internal service-to-service sync calls only
+// (mTLS via Cloud Service Mesh per CLAUDE.md §4 protocol strategy).
+//
+// Primary callers (per docs/m13/grpc-mass-remediation-2026-05-16.md §4):
+//   - chora-gateway BFF — proxies FE in-app notification routes
+//   - chora-identity   — fires email-verified / closure-saga notifications
+//   - chora-tenancy    — fires billing-related notifications
+//   - chora-creation   — fires atom-published notifications to subscribers
+//   - chora-sharing    — fires social-graph reaction / mention notifications
+//   - chora-delivery   — fires assessment / certification notifications
+//
+// Aggregates exposed (per
+// services/chora-notifications/internal/domain/notification/notification.go):
+//   - Notification           — single delivery instance (email/push/in-app)
+//   - NotificationTemplate   — append-only versioned content templates
+//   - SubscriptionPreference — per-user opt-in/out, glob-matched by topic
+//
+// Append-only invariant (ddd-enforcement aggregate-invariant #4): template
+// versions are immutable; mutation spawns a new version row.
+//
+// Cross-DB queries FORBIDDEN — atom_ids / gcid / tenant_id are cross-domain
+// UUIDs referenced without FK constraint. Inter-domain side effects flow
+// via Pub/Sub events (Protobuf Schema Registry validated).
+//
+// Deployed in chora-489812 team-platform pool. mTLS via Cloud Service Mesh;
+// SPIFFE identity in mesh; W3C trace context in gRPC metadata.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.services.notifications.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/notifications/v1;notificationsv1";
+
+import "google/protobuf/timestamp.proto";
+
+// -----------------------------------------------------------------------------
+// Service
+// -----------------------------------------------------------------------------
+
+service Notifications {
+  // EnqueueNotification queues a new delivery instance for a recipient. The
+  // server first looks up the recipient's SubscriptionPreference rows and
+  // matches topic_glob against the template_id (treated as the topic). If
+  // any matching preference has opted_in=false, the notification is created
+  // with status=SUPPRESSED and not delivered. Otherwise it is persisted in
+  // status=QUEUED and the dispatcher picks it up async.
+  //
+  // Idempotent on (tenant_id, idempotency_key) when idempotency_key is set.
+  rpc EnqueueNotification(EnqueueNotificationRequest) returns (EnqueueNotificationResponse);
+
+  // GetNotification fetches a single Notification by (tenant_id, id).
+  // Returns NOT_FOUND when no row matches.
+  rpc GetNotification(GetNotificationRequest) returns (GetNotificationResponse);
+
+  // ListNotifications enumerates notifications for a tenant with optional
+  // filters (recipient_gcid / channel / created-time range). Soft-deleted
+  // rows are excluded (deleted_at IS NULL per ddd-enforcement invariant #6).
+  rpc ListNotifications(ListNotificationsRequest) returns (ListNotificationsResponse);
+
+  // CreateTemplate adds a new NotificationTemplate (or a new VERSION of an
+  // existing template, append-only). The server resolves the latest version
+  // by (tenant_id, name); if present, version = prev.version + 1, else 1.
+  // Channel + tenant_id must remain stable across versions.
+  rpc CreateTemplate(CreateTemplateRequest) returns (CreateTemplateResponse);
+
+  // GetTemplate fetches a single NotificationTemplate by (tenant_id, id).
+  rpc GetTemplate(GetTemplateRequest) returns (GetTemplateResponse);
+
+  // ListTemplates enumerates all template versions for a tenant.
+  rpc ListTemplates(ListTemplatesRequest) returns (ListTemplatesResponse);
+
+  // UpsertPreference creates-or-updates a SubscriptionPreference row keyed
+  // by (gcid, channel, topic_glob).
+  rpc UpsertPreference(UpsertPreferenceRequest) returns (UpsertPreferenceResponse);
+
+  // ListPreferencesByGcid enumerates all preferences for a single user.
+  rpc ListPreferencesByGcid(ListPreferencesByGcidRequest) returns (ListPreferencesByGcidResponse);
+}
+
+// -----------------------------------------------------------------------------
+// Shared enums
+// -----------------------------------------------------------------------------
+
+// Channel mirrors notification.Channel (email/push/in_app). SMS is
+// intentionally out-of-scope per the Phase D skeleton.
+enum Channel {
+  CHANNEL_UNSPECIFIED = 0;
+  CHANNEL_EMAIL = 1;
+  CHANNEL_PUSH = 2;
+  CHANNEL_IN_APP = 3;
+}
+
+// Status mirrors notification.Status (queued / sent / failed / suppressed).
+enum Status {
+  STATUS_UNSPECIFIED = 0;
+  STATUS_QUEUED = 1;
+  STATUS_SENT = 2;
+  STATUS_FAILED = 3;
+  STATUS_SUPPRESSED = 4;
+}
+
+// -----------------------------------------------------------------------------
+// Shared message types
+// -----------------------------------------------------------------------------
+
+// Notification projection — wire form of the Notification aggregate.
+message Notification {
+  string id = 1;
+  string tenant_id = 2;
+  string recipient_gcid = 3;
+  Channel channel = 4;
+  string template_id = 5;
+
+  // Payload encoded as JSON string (the domain Payload is map[string]any;
+  // proto-encoding via google.protobuf.Struct adds dependency weight without
+  // benefit at the wire layer — caller round-trips through encoding/json).
+  string payload_json = 6;
+
+  Status status = 7;
+  string priority = 8;
+  string idempotency_key = 9;
+  int32 retry_count = 10;
+
+  google.protobuf.Timestamp sent_at = 11;
+  google.protobuf.Timestamp read_at = 12;
+  google.protobuf.Timestamp deleted_at = 13;
+  google.protobuf.Timestamp created_at = 14;
+}
+
+// NotificationTemplate projection — wire form of the immutable template
+// version aggregate.
+message NotificationTemplate {
+  string id = 1;
+  string tenant_id = 2;
+  string name = 3;
+  Channel channel = 4;
+  string subject_tmpl = 5;
+  string body_tmpl = 6;
+  int32 version = 7;
+  google.protobuf.Timestamp created_at = 8;
+}
+
+// SubscriptionPreference projection — wire form of the per-user opt-in/out
+// flag keyed by (gcid, channel, topic_glob).
+message SubscriptionPreference {
+  string gcid = 1;
+  Channel channel = 2;
+  string topic_glob = 3;
+  bool opted_in = 4;
+  google.protobuf.Timestamp updated_at = 5;
+}
+
+// -----------------------------------------------------------------------------
+// EnqueueNotification
+// -----------------------------------------------------------------------------
+
+message EnqueueNotificationRequest {
+  // Required. Tenant context — multi-tenant isolation key.
+  string tenant_id = 1;
+
+  // Required. GCID of the recipient (must be valid UUID).
+  string recipient_gcid = 2;
+
+  // Required. Delivery channel.
+  Channel channel = 3;
+
+  // Required. Template identifier (treated as topic for suppression match).
+  string template_id = 4;
+
+  // Optional. Notification payload as JSON-encoded string. Empty means {}.
+  string payload_json = 5;
+
+  // Optional. Idempotency key for dedup; recommend UUIDv7 from caller.
+  string idempotency_key = 6;
+}
+
+message EnqueueNotificationResponse {
+  // The persisted Notification (either status=QUEUED or status=SUPPRESSED).
+  Notification notification = 1;
+
+  // True if the call was suppressed by a matching opt-out preference.
+  bool suppressed = 2;
+}
+
+// -----------------------------------------------------------------------------
+// GetNotification
+// -----------------------------------------------------------------------------
+
+message GetNotificationRequest {
+  string tenant_id = 1;
+  string id = 2;
+}
+
+message GetNotificationResponse {
+  Notification notification = 1;
+}
+
+// -----------------------------------------------------------------------------
+// ListNotifications
+// -----------------------------------------------------------------------------
+
+message ListNotificationsRequest {
+  // Required. Tenant context.
+  string tenant_id = 1;
+
+  // Optional filters.
+  string recipient_gcid = 2;
+  Channel channel = 3;
+  google.protobuf.Timestamp from = 4;
+  google.protobuf.Timestamp to = 5;
+
+  // Optional. Pagination — default limit 100 when 0.
+  int32 limit = 6;
+  int32 offset = 7;
+}
+
+message ListNotificationsResponse {
+  repeated Notification items = 1;
+  int32 total = 2;
+}
+
+// -----------------------------------------------------------------------------
+// CreateTemplate
+// -----------------------------------------------------------------------------
+
+message CreateTemplateRequest {
+  // Required.
+  string tenant_id = 1;
+  string name = 2;
+  Channel channel = 3;
+  string subject_tmpl = 4;
+  string body_tmpl = 5;
+}
+
+message CreateTemplateResponse {
+  NotificationTemplate template = 1;
+}
+
+// -----------------------------------------------------------------------------
+// GetTemplate
+// -----------------------------------------------------------------------------
+
+message GetTemplateRequest {
+  string tenant_id = 1;
+  string id = 2;
+}
+
+message GetTemplateResponse {
+  NotificationTemplate template = 1;
+}
+
+// -----------------------------------------------------------------------------
+// ListTemplates
+// -----------------------------------------------------------------------------
+
+message ListTemplatesRequest {
+  string tenant_id = 1;
+}
+
+message ListTemplatesResponse {
+  repeated NotificationTemplate items = 1;
+  int32 total = 2;
+}
+
+// -----------------------------------------------------------------------------
+// UpsertPreference
+// -----------------------------------------------------------------------------
+
+message UpsertPreferenceRequest {
+  // Required.
+  string gcid = 1;
+  Channel channel = 2;
+  string topic_glob = 3;
+  bool opted_in = 4;
+}
+
+message UpsertPreferenceResponse {
+  SubscriptionPreference preference = 1;
+}
+
+// -----------------------------------------------------------------------------
+// ListPreferencesByGcid
+// -----------------------------------------------------------------------------
+
+message ListPreferencesByGcidRequest {
+  string gcid = 1;
+}
+
+message ListPreferencesByGcidResponse {
+  repeated SubscriptionPreference items = 1;
+  int32 total = 2;
+}

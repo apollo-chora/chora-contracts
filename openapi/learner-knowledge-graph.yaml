@@ -1,0 +1,1232 @@
+openapi: "3.2.0"
+info:
+  title: "Chora Learner Knowledge Graph API"
+  version: "1.1.0"
+  description: |
+    Per-user Knowledge Graph REST API for the Content Consumption core domain.
+
+    Covers per-user hexagonal exploration fog: knowledge maps (clusters),
+    explorations (seed-rooted journeys), hexagon layouts (focal + 6 LLM-generated
+    neighbors), trail history, and user-consented junction joins.
+
+    Owning domain : Content Consumption (`chora_consumption` database)
+    Owning team   : Team 1 (Content)
+    Surface       : A+ (learner self-service); H+ admin counterpart for
+                    cap config lives in this same contract (KG-CANVAS §7+§8).
+
+    v1.1 (2026-05-16, E2E-BE-KG-CANVAS): added 8 canvas + management +
+    tenant-config endpoints per docs/m13/kg-fog-aplus-integration-backend-handoff-2026-05-13.md.
+    FE call paths use camelCase + `{data, error?}` envelope. Compatible
+    with v1.0 snake_case paths (kept for back-compat).
+
+    All endpoints are scoped to the authenticated GCID (Bearer JWT). The
+    `/me/...` path prefix is the canonical user-self surface. Tenant header
+    + GCID header injected by chora-bff-gateway.
+
+    AP-01: This contract exists BEFORE implementation. See ADR-143 for full
+    semantics, ADR-142 for tenant `config_overrides` precedent, and CLAUDE.md
+    §4 for protocol strategy (REST for commands, GraphQL for reads — but
+    given this stream's simple shapes, REST covers both here for parity with
+    learner-economy.yaml).
+
+    Source-of-truth: `docs/architecture/adrs/adr-143-per-user-knowledge-graph-hexagonal-fog.md`
+  contact:
+    name: "Chora Content Team (Team 1)"
+  license:
+    name: "Proprietary"
+
+servers:
+  - url: "https://api.chora.app"
+    description: "Production"
+  - url: "http://localhost:8080"
+    description: "Local development"
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: MapClusters
+    description: "Per-user knowledge map clusters (disconnected maps)"
+  - name: Explorations
+    description: "Seed-rooted journeys within a cluster"
+  - name: Hexagon
+    description: "Focal node + 6 LLM-generated neighbors (hybrid-cached fog)"
+  - name: Junctions
+    description: "Auto-detected cluster overlaps + user-consented merges"
+  - name: Health
+    description: "Health check"
+
+paths:
+  /api/v1/me/knowledge-graph/clusters:
+    get:
+      operationId: listMyMapClusters
+      summary: "List the caller's knowledge map clusters"
+      tags: [MapClusters]
+      parameters:
+        - $ref: "#/components/parameters/StatusFilter"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: "Clusters listed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MapClusterListResponse"
+    post:
+      operationId: createMapCluster
+      summary: "Create a new knowledge map cluster (seeded by topic)"
+      description: |
+        Creates a new MapCluster with one initial Exploration. Server resolves
+        seed_topic → seed_atom_id via Meilisearch with LLM fallback.
+
+        Returns 409 Conflict when the user is at
+        `max_concurrent_kg_clusters_per_user` (per-tenant configurable).
+      tags: [MapClusters]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateMapClusterRequest"
+      responses:
+        "201":
+          description: "Cluster created + initial exploration started"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateMapClusterResponse"
+        "402":
+          $ref: "#/components/responses/PaymentRequired"
+        "409":
+          $ref: "#/components/responses/ClusterCapReached"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /api/v1/me/knowledge-graph/clusters/{clusterId}:
+    parameters:
+      - $ref: "#/components/parameters/ClusterIdPath"
+    get:
+      operationId: getMyMapCluster
+      summary: "Get a single MapCluster (with explorations)"
+      tags: [MapClusters]
+      responses:
+        "200":
+          description: "Cluster found"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MapClusterDetail"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/me/knowledge-graph/clusters/{clusterId}:merge:
+    parameters:
+      - $ref: "#/components/parameters/ClusterIdPath"
+    post:
+      operationId: mergeMapClusters
+      summary: "Merge two clusters via a junction atom (user-consented)"
+      description: |
+        Merges {clusterId} with target_cluster_id via via_atom_id. The smaller
+        cluster (by node_count) is marked MERGED_INTO; the larger absorbs it.
+        Surviving cluster's display_name defaults to
+        "{seed_topic_a} + {seed_topic_b}".
+
+        Idempotent on Idempotency-Key.
+      tags: [Junctions, MapClusters]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MergeMapClustersRequest"
+      responses:
+        "200":
+          description: "Clusters merged"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MergeMapClustersResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /api/v1/me/knowledge-graph/clusters/{clusterId}:archive:
+    parameters:
+      - $ref: "#/components/parameters/ClusterIdPath"
+    post:
+      operationId: archiveMapCluster
+      summary: "Archive a knowledge map cluster"
+      description: |
+        Status → ARCHIVED. Cluster becomes read-only. Sweeper soft-deletes
+        hexagon nodes for the cluster's explorations after grace × 12.
+
+        Idempotent on (clusterId, status).
+      tags: [MapClusters]
+      responses:
+        "200":
+          description: "Cluster archived"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MapCluster"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/me/knowledge-graph/clusters/{clusterId}/explorations:
+    parameters:
+      - $ref: "#/components/parameters/ClusterIdPath"
+    post:
+      operationId: createExploration
+      summary: "Create a new exploration within an active cluster"
+      description: |
+        Cluster creation implicitly creates the first Exploration; this
+        endpoint is for additional explorations within an already-active
+        cluster — typically post-merge when the cluster contains multiple
+        seed origins.
+      tags: [Explorations]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateExplorationRequest"
+      responses:
+        "201":
+          description: "Exploration created"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Exploration"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /api/v1/me/knowledge-graph/clusters/{clusterId}/explorations/{explorationId}/hexagon:
+    parameters:
+      - $ref: "#/components/parameters/ClusterIdPath"
+      - $ref: "#/components/parameters/ExplorationIdPath"
+    get:
+      operationId: getHexagon
+      summary: "Get the hexagon (focal + 6 neighbors) for an exploration"
+      description: |
+        Returns the cached HexagonLayout for the exploration's current focal,
+        OR triggers synchronous fog regeneration via FogOrchestrator if the
+        cache is stale or missing. Optional `focalAtomId` override allows
+        fetching the hexagon for any focal in the exploration's history.
+
+        SLOs: cache hit P50 < 200ms; cache miss P50 < 2.5s, P99 < 6s.
+      tags: [Hexagon]
+      parameters:
+        - name: focalAtomId
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: |
+            Override focal. Defaults to exploration.current_focal_atom_id.
+            Must be in the exploration's trail history (server validates).
+        - name: forceRegenerate
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: "Force regeneration even if cache fresh (admin only)"
+      responses:
+        "200":
+          description: "Hexagon (with junction opportunities if any)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HexagonResponse"
+        "402":
+          $ref: "#/components/responses/PaymentRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/Timeout"
+
+  /api/v1/me/knowledge-graph/clusters/{clusterId}/explorations/{explorationId}/focal:move:
+    parameters:
+      - $ref: "#/components/parameters/ClusterIdPath"
+      - $ref: "#/components/parameters/ExplorationIdPath"
+    post:
+      operationId: moveFocalNode
+      summary: "Click-to-graduate: move focal to one of the current 6 neighbors"
+      description: |
+        Atomically:
+          1. Validates target_atom_id is one of the cached neighbors
+          2. Appends a kg_exploration_trail row (step_index = current + 1)
+          3. Updates kg_user_explorations.current_focal_atom_id (OCC)
+          4. Triggers fog gen for new focal (synchronous)
+          5. Emits ExplorationFocalNodeChanged event
+
+        Idempotent on Idempotency-Key (UUIDv7 derived from
+        `(exploration_id, target_atom_id, generation_epoch)` recommended).
+      tags: [Hexagon, Explorations]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MoveFocalNodeRequest"
+      responses:
+        "200":
+          description: "Focal moved + new hexagon returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MoveFocalNodeResponse"
+        "402":
+          $ref: "#/components/responses/PaymentRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/Timeout"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  # ---------------------------------------------------------------------------
+  # E2E-BE-KG-CANVAS (2026-05-16) — 8 FE-shaped endpoints.
+  #
+  # The endpoints below mirror the v1.0 snake_case counterparts but emit
+  # camelCase fields wrapped in the `{ "data": { ... } }` envelope per
+  # docs/m13/kg-fog-aplus-integration-backend-handoff-2026-05-13.md §1.3-§1.7
+  # plus the cluster-management (§5+§6) and tenant-config (§7+§8) routes.
+  # FE call paths route via `/api/v1/me/...` through chora-gateway → these
+  # `/v1/me/...` upstream paths on chora-consumption.
+  # ---------------------------------------------------------------------------
+
+  /v1/me/knowledge-graph/clusters/{clusterId}/explorations/{explorationId}/hexagon:
+    parameters:
+      - $ref: "#/components/parameters/ClusterIdPath"
+      - $ref: "#/components/parameters/ExplorationIdPath"
+    get:
+      operationId: getCanvasHexagon
+      summary: "Canvas: get hexagon layout (FE-shaped, camelCase, envelope)"
+      description: |
+        FE-shaped variant of getHexagon. Returns the cached HexagonLayout for
+        the exploration's current focal in the camelCase + envelope shape FE
+        expects (see HexagonLayout in §2 of the handoff brief).
+
+        On cache miss returns 404 with code `FOG_CACHE_MISS` so the FE can
+        offer a retry. Synchronous fog regen is out-of-scope for this
+        endpoint; the canvas worker triggers regen via the existing
+        `/api/v1/consumption/kg/explore/{atomId}` Vertex AI Agent Engine
+        path.
+      tags: [Hexagon]
+      responses:
+        "200":
+          description: "Hexagon layout (envelope)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CanvasHexagonResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/me/knowledge-graph/clusters/{clusterId}/explorations/{explorationId}/focal:move:
+    parameters:
+      - $ref: "#/components/parameters/ClusterIdPath"
+      - $ref: "#/components/parameters/ExplorationIdPath"
+    post:
+      operationId: canvasMoveFocal
+      summary: "Canvas: click-to-graduate focal move (FE-shaped)"
+      description: |
+        FE-shaped variant of moveFocalNode. Body uses `targetAtomId`
+        (camelCase) and the response envelope contains the new HexagonLayout.
+        Server-side validation: target must be one of the cached 6 neighbors.
+      tags: [Hexagon, Explorations]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CanvasFocalMoveRequest"
+      responses:
+        "200":
+          description: "Focal moved + new HexagonLayout returned"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CanvasHexagonResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /v1/me/knowledge-graph/clusters/{clusterId}/archive:
+    parameters:
+      - $ref: "#/components/parameters/ClusterIdPath"
+    post:
+      operationId: canvasArchiveCluster
+      summary: "Canvas: soft-archive a cluster (FE-shaped POST)"
+      description: |
+        FE-shaped variant of archiveMapCluster. Identical semantics — the
+        cluster transitions ACTIVE -> ARCHIVED. Returns 204 No Content; the
+        FE doesn't expect a body. Idempotent on (clusterId, status).
+      tags: [MapClusters]
+      responses:
+        "204":
+          description: "Cluster archived"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/me/knowledge-graph/junctions/{junctionId}/decide:
+    parameters:
+      - name: junctionId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+        description: "Junction UUIDv7"
+    post:
+      operationId: canvasDecideJunction
+      summary: "Canvas: accept or decline a junction (single endpoint)"
+      description: |
+        Single-endpoint variant of accept/reject from v1.0. Body carries
+        `decision: 'accept' | 'decline'`. On `accept` the smaller cluster
+        is merged into the larger and the surviving cluster's
+        HexagonLayout (camelCase, envelope) is returned. On `decline` the
+        junction is marked rejected and the response envelope's `data` is
+        omitted (Observable<HexagonLayout | null> per FE service shape).
+      tags: [Junctions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CanvasJunctionDecideRequest"
+      responses:
+        "200":
+          description: "Decision applied"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CanvasJunctionDecideResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /v1/me/knowledge-graph/clusters/management:
+    get:
+      operationId: listClusterManagement
+      summary: "Cluster management summaries for the caller (canvas H+ side)"
+      description: |
+        Returns one ClusterManagementSummary per ACTIVE cluster for the
+        caller. Includes per-cluster cost roll-up + trail depth + current
+        focal title for the canvas-management screen.
+      tags: [MapClusters]
+      responses:
+        "200":
+          description: "Cluster management list"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CanvasClusterManagementListResponse"
+
+  /v1/me/knowledge-graph/clusters/{clusterId}:
+    parameters:
+      - $ref: "#/components/parameters/ClusterIdPath"
+    patch:
+      operationId: canvasRenameCluster
+      summary: "Canvas: rename a cluster's display name"
+      description: |
+        PATCH endpoint to update the cluster's display_name. Idempotent
+        on (clusterId, displayName). 422 on empty / too-long body.
+      tags: [MapClusters]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CanvasClusterRenameRequest"
+      responses:
+        "204":
+          description: "Cluster renamed"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /v1/tenants/{tenantId}/knowledge-graph/config:
+    parameters:
+      - name: tenantId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+        description: "Tenant UUIDv7"
+    get:
+      operationId: getTenantKgConfig
+      summary: "H+: read tenant KG config dials"
+      description: |
+        Returns the two KG-specific dials per ADR-143 §8:
+          - maxConcurrentKgClustersPerUser (1..10, default 3)
+          - kgFogInvalidationGraceSeconds  (60..3600, default 300)
+
+        Plus updated_at + updated_by audit fields for the H+ form.
+      tags: [MapClusters]
+      responses:
+        "200":
+          description: "Tenant KG config"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CanvasTenantKgConfigResponse"
+    patch:
+      operationId: updateTenantKgConfig
+      summary: "H+: update tenant KG config dials"
+      description: |
+        Updates the per-tenant KG config dials. Values are bounds-checked
+        per ADR-143 §8 — out-of-range values fail with 422.
+      tags: [MapClusters]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CanvasTenantKgConfigUpdateRequest"
+      responses:
+        "200":
+          description: "Tenant KG config updated"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CanvasTenantKgConfigResponse"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /healthz:
+    get:
+      operationId: healthCheck
+      summary: "Liveness probe"
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: "Service is alive"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    ClusterIdPath:
+      name: clusterId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: "MapCluster UUIDv7"
+    ExplorationIdPath:
+      name: explorationId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: "Exploration UUIDv7"
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema:
+        type: string
+        format: uuid
+      description: "Repeat-safe key for mutation idempotency (UUIDv7 recommended)"
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      schema:
+        type: string
+      description: "Opaque pagination cursor"
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+      description: "Page size"
+    StatusFilter:
+      name: status
+      in: query
+      required: false
+      schema:
+        $ref: "#/components/schemas/MapClusterStatus"
+      description: "Filter by status (omit = all)"
+
+  responses:
+    NotFound:
+      description: "Resource not found or not accessible to caller"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Conflict:
+      description: "State conflict (e.g., target already merged or archived)"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    ClusterCapReached:
+      description: "User has reached max_concurrent_kg_clusters_per_user"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ClusterCapError"
+    ValidationError:
+      description: "Request body / parameters invalid"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    PaymentRequired:
+      description: "Insufficient mana for fog generation"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/InsufficientManaUpsell"
+    Timeout:
+      description: "Fog generation exceeded P99 budget"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  schemas:
+    # --- Enums ---
+
+    MapClusterStatus:
+      type: string
+      enum: [active, archived, merged_into]
+      description: "Lifecycle status of a knowledge map"
+
+    ExplorationStatus:
+      type: string
+      enum: [active, archived]
+
+    NeighborRelation:
+      type: string
+      enum: [prerequisite_of, extends, analogy_of, contrasts_with, applied_in, curiosity_jump]
+      description: "Type of relationship from focal to a hexagon neighbor"
+
+    FogInvalidationReason:
+      type: string
+      enum: [atom_published, atom_revision_updated, user_retention_shifted, manual_admin, never_generated]
+
+    # --- Aggregates ---
+
+    MapCluster:
+      type: object
+      required: [cluster_id, user_gcid, display_name, seed_topic, seed_atom_id, status, node_count, version, created_at, updated_at]
+      properties:
+        cluster_id:
+          type: string
+          format: uuid
+        user_gcid:
+          type: string
+          format: uuid
+        display_name:
+          type: string
+          maxLength: 128
+        seed_topic:
+          type: string
+        seed_atom_id:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/MapClusterStatus"
+        merged_into_cluster_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: "Set when status=merged_into"
+        merged_via_atom_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: "Set when status=merged_into"
+        node_count:
+          type: integer
+        version:
+          type: integer
+          description: "OCC version"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    MapClusterDetail:
+      allOf:
+        - $ref: "#/components/schemas/MapCluster"
+        - type: object
+          required: [explorations]
+          properties:
+            explorations:
+              type: array
+              items:
+                $ref: "#/components/schemas/Exploration"
+
+    MapClusterListResponse:
+      type: object
+      required: [items, active_count, max_concurrent_per_user]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/MapCluster"
+        active_count:
+          type: integer
+        max_concurrent_per_user:
+          type: integer
+        next_cursor:
+          type: string
+          nullable: true
+
+    Exploration:
+      type: object
+      required: [exploration_id, cluster_id, user_gcid, started_at_atom_id, current_focal_atom_id, status, version, created_at, updated_at]
+      properties:
+        exploration_id:
+          type: string
+          format: uuid
+        cluster_id:
+          type: string
+          format: uuid
+        user_gcid:
+          type: string
+          format: uuid
+        started_at_atom_id:
+          type: string
+          format: uuid
+        current_focal_atom_id:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/ExplorationStatus"
+        version:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    HexagonNeighbor:
+      type: object
+      required: [atom_id, relation, confidence, fog_label, is_junction]
+      properties:
+        atom_id:
+          type: string
+          format: uuid
+        relation:
+          $ref: "#/components/schemas/NeighborRelation"
+        confidence:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+        fog_label:
+          type: string
+          description: "LLM-generated teaser shown before user commits to traverse"
+        is_junction:
+          type: boolean
+          description: "True when this neighbor is a focal in another active cluster"
+
+    HexagonLayout:
+      type: object
+      required: [hex_node_id, exploration_id, cluster_id, focal_atom_id, neighbors, generated_by_run_id, generated_by_model_id, generated_at, is_cache_fresh]
+      properties:
+        hex_node_id:
+          type: string
+          format: uuid
+        exploration_id:
+          type: string
+          format: uuid
+        cluster_id:
+          type: string
+          format: uuid
+        focal_atom_id:
+          type: string
+          format: uuid
+        neighbors:
+          type: array
+          minItems: 6
+          maxItems: 6
+          items:
+            $ref: "#/components/schemas/HexagonNeighbor"
+        generated_by_run_id:
+          type: string
+          format: uuid
+        generated_by_model_id:
+          type: string
+        generated_at:
+          type: string
+          format: date-time
+        invalidated_at:
+          type: string
+          format: date-time
+          nullable: true
+        invalidation_reason:
+          $ref: "#/components/schemas/FogInvalidationReason"
+        is_cache_fresh:
+          type: boolean
+
+    JunctionOpportunity:
+      type: object
+      required: [via_atom_id, current_cluster_id, other_cluster_id, current_cluster_display_name, other_cluster_display_name]
+      properties:
+        via_atom_id:
+          type: string
+          format: uuid
+        current_cluster_id:
+          type: string
+          format: uuid
+        other_cluster_id:
+          type: string
+          format: uuid
+        current_cluster_display_name:
+          type: string
+        other_cluster_display_name:
+          type: string
+
+    TrailHop:
+      type: object
+      required: [trail_id, exploration_id, from_focal_atom_id, to_focal_atom_id, relation, step_index, traversed_at]
+      properties:
+        trail_id:
+          type: string
+          format: uuid
+        exploration_id:
+          type: string
+          format: uuid
+        from_focal_atom_id:
+          type: string
+          format: uuid
+        to_focal_atom_id:
+          type: string
+          format: uuid
+        relation:
+          $ref: "#/components/schemas/NeighborRelation"
+        step_index:
+          type: integer
+        traversed_at:
+          type: string
+          format: date-time
+
+    # --- Requests ---
+
+    CreateMapClusterRequest:
+      type: object
+      required: [seed_topic]
+      properties:
+        seed_topic:
+          type: string
+          maxLength: 128
+          description: "Topic to seed the cluster (e.g., \"agile\")"
+        display_name:
+          type: string
+          maxLength: 128
+          description: "Optional override (default: seed_topic)"
+        seed_atom_id:
+          type: string
+          format: uuid
+          description: "Optional pre-resolved seed atom (otherwise server resolves)"
+
+    CreateMapClusterResponse:
+      type: object
+      required: [cluster, initial_exploration]
+      properties:
+        cluster:
+          $ref: "#/components/schemas/MapCluster"
+        initial_exploration:
+          $ref: "#/components/schemas/Exploration"
+
+    MergeMapClustersRequest:
+      type: object
+      required: [target_cluster_id, via_atom_id]
+      properties:
+        target_cluster_id:
+          type: string
+          format: uuid
+        via_atom_id:
+          type: string
+          format: uuid
+
+    MergeMapClustersResponse:
+      type: object
+      required: [surviving_cluster, merged_cluster]
+      properties:
+        surviving_cluster:
+          $ref: "#/components/schemas/MapCluster"
+        merged_cluster:
+          $ref: "#/components/schemas/MapCluster"
+
+    CreateExplorationRequest:
+      type: object
+      required: [started_at_atom_id]
+      properties:
+        started_at_atom_id:
+          type: string
+          format: uuid
+
+    HexagonResponse:
+      type: object
+      required: [hexagon, junctions]
+      properties:
+        hexagon:
+          $ref: "#/components/schemas/HexagonLayout"
+        junctions:
+          type: array
+          items:
+            $ref: "#/components/schemas/JunctionOpportunity"
+
+    MoveFocalNodeRequest:
+      type: object
+      required: [target_atom_id]
+      properties:
+        target_atom_id:
+          type: string
+          format: uuid
+
+    MoveFocalNodeResponse:
+      type: object
+      required: [exploration, new_hexagon, trail_hop, junctions]
+      properties:
+        exploration:
+          $ref: "#/components/schemas/Exploration"
+        new_hexagon:
+          $ref: "#/components/schemas/HexagonLayout"
+        trail_hop:
+          $ref: "#/components/schemas/TrailHop"
+        junctions:
+          type: array
+          items:
+            $ref: "#/components/schemas/JunctionOpportunity"
+
+    # --- Errors ---
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+
+    ClusterCapError:
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - type: object
+          properties:
+            active_count:
+              type: integer
+            max_concurrent_per_user:
+              type: integer
+
+    InsufficientManaUpsell:
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - type: object
+          properties:
+            required_units:
+              type: integer
+              format: int64
+            current_balance_units:
+              type: integer
+              format: int64
+            upsell_paths:
+              type: array
+              items:
+                type: string
+                description: "Suggested top-up paths (e.g., '/me/marketplace/companion-plans')"
+
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        version:
+          type: string
+
+    # =========================================================================
+    # E2E-BE-KG-CANVAS (v1.1) — camelCase + envelope schemas.
+    # =========================================================================
+
+    # FE-facing HexagonNeighbor (camelCase). Compatible with v1.0
+    # HexagonNeighbor; distinct schema so the codegen split stays clean.
+    CanvasHexagonNeighbor:
+      type: object
+      required: [atomId, position, relation, confidence]
+      properties:
+        atomId:
+          type: string
+          format: uuid
+        title:
+          type: string
+        topic:
+          type: string
+        position:
+          type: string
+          enum: [N, NE, SE, S, SW, NW]
+          description: "Position on hexagon (60° intervals, deterministic from rank)"
+        relation:
+          $ref: "#/components/schemas/NeighborRelation"
+        confidence:
+          type: string
+          enum: [low, med, high]
+          description: "3-bucket confidence (UI shows 3-dot calibration indicator)"
+        previewSnippet:
+          type: string
+          description: "First ~120 chars of atom content"
+        generatedByModelId:
+          type: string
+          description: "IMDA D2 transparency — model that produced this candidate"
+
+    CanvasTrailEntry:
+      type: object
+      required: [atomId]
+      properties:
+        atomId:
+          type: string
+          format: uuid
+        title:
+          type: string
+        topic:
+          type: string
+        explorationId:
+          type: string
+          format: uuid
+
+    CanvasJunctionCandidate:
+      type: object
+      required: [junctionId, otherClusterId, otherClusterSeedTopic, viaAtomId]
+      properties:
+        junctionId:
+          type: string
+          format: uuid
+        otherClusterId:
+          type: string
+          format: uuid
+        otherClusterSeedTopic:
+          type: string
+        viaAtomId:
+          type: string
+          format: uuid
+        viaAtomTitle:
+          type: string
+
+    CanvasHexagonLayout:
+      type: object
+      required: [clusterId, explorationId, focalAtomId, neighbors, trail, generatedAt, isCacheFresh, totalCostMicros]
+      properties:
+        clusterId:
+          type: string
+          format: uuid
+        explorationId:
+          type: string
+          format: uuid
+        focalAtomId:
+          type: string
+          format: uuid
+        focalTitle:
+          type: string
+        focalTopic:
+          type: string
+        focalPreview:
+          type: string
+        neighbors:
+          type: array
+          minItems: 0
+          maxItems: 6
+          items:
+            $ref: "#/components/schemas/CanvasHexagonNeighbor"
+        trail:
+          type: array
+          items:
+            $ref: "#/components/schemas/CanvasTrailEntry"
+        generatedAt:
+          type: string
+          format: date-time
+        invalidatedAt:
+          type: string
+          format: date-time
+          nullable: true
+        isCacheFresh:
+          type: boolean
+        generatedByModelId:
+          type: string
+        junctionCandidate:
+          $ref: "#/components/schemas/CanvasJunctionCandidate"
+        totalCostMicros:
+          type: integer
+          format: int64
+
+    CanvasHexagonResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/CanvasHexagonLayout"
+        error:
+          $ref: "#/components/schemas/Error"
+
+    CanvasFocalMoveRequest:
+      type: object
+      required: [targetAtomId]
+      properties:
+        targetAtomId:
+          type: string
+          format: uuid
+
+    CanvasJunctionDecideRequest:
+      type: object
+      required: [decision]
+      properties:
+        decision:
+          type: string
+          enum: [accept, decline]
+
+    CanvasJunctionDecideResponse:
+      type: object
+      properties:
+        data:
+          $ref: "#/components/schemas/CanvasHexagonLayout"
+          description: "Surviving cluster's HexagonLayout on `accept`. Absent on `decline`."
+        error:
+          $ref: "#/components/schemas/Error"
+
+    CanvasClusterManagementSummary:
+      type: object
+      required: [clusterId, seedTopic, displayName, trailDepth, createdAt, lastVisitedAt, totalCostMicros, isStale]
+      properties:
+        clusterId:
+          type: string
+          format: uuid
+        seedTopic:
+          type: string
+        displayName:
+          type: string
+        currentFocalAtomId:
+          type: string
+          format: uuid
+        currentFocalTitle:
+          type: string
+        trailDepth:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        lastVisitedAt:
+          type: string
+          format: date-time
+        totalCostMicros:
+          type: integer
+          format: int64
+        isStale:
+          type: boolean
+
+    CanvasClusterManagementListResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/CanvasClusterManagementSummary"
+        error:
+          $ref: "#/components/schemas/Error"
+
+    CanvasClusterRenameRequest:
+      type: object
+      required: [displayName]
+      properties:
+        displayName:
+          type: string
+          maxLength: 128
+
+    CanvasTenantKgConfig:
+      type: object
+      required: [maxConcurrentKgClustersPerUser, kgFogInvalidationGraceSeconds, updatedAt]
+      properties:
+        maxConcurrentKgClustersPerUser:
+          type: integer
+          minimum: 1
+          maximum: 10
+        kgFogInvalidationGraceSeconds:
+          type: integer
+          minimum: 60
+          maximum: 3600
+        updatedAt:
+          type: string
+          format: date-time
+        updatedByDisplayName:
+          type: string
+
+    CanvasTenantKgConfigResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/CanvasTenantKgConfig"
+        error:
+          $ref: "#/components/schemas/Error"
+
+    CanvasTenantKgConfigUpdateRequest:
+      type: object
+      properties:
+        maxConcurrentKgClustersPerUser:
+          type: integer
+          minimum: 1
+          maximum: 10
+        kgFogInvalidationGraceSeconds:
+          type: integer
+          minimum: 60
+          maximum: 3600

@@ -1,0 +1,83 @@
+asyncapi: "3.0.0"
+info:
+  title: "chora.delivery.booking.confirmed.v1"
+  version: "1.0.0"
+  description: |
+    Published when a booking transitions PENDING -> CONFIRMED. Canonical
+    "your seat is held" event. Drives confirmation emails, calendar invites,
+    and entitles the learner to the related path.
+    Companion to `proto/events/delivery/booking.proto` message `BookingConfirmed`.
+  contact: { name: "Chora Platform Team" }
+  license: { name: "Proprietary" }
+
+defaultContentType: application/x-protobuf
+
+servers:
+  local: { host: "localhost:8085", protocol: googlepubsub, description: "Pub/Sub Emulator" }
+  production: { host: "pubsub.googleapis.com", protocol: googlepubsub, description: "Google Cloud Pub/Sub" }
+
+channels:
+  bookingConfirmed:
+    address: chora.delivery.booking.confirmed.v1
+    description: |
+      Carries BookingConfirmed Protobuf payload.
+
+      Downstream consumers:
+        - chora-notifications  : confirmation + calendar invite
+        - chora-consumption    : path entitlement
+    messages:
+      bookingConfirmed:
+        $ref: "#/components/messages/BookingConfirmed"
+
+operations:
+  publishBookingConfirmed:
+    action: send
+    channel: { $ref: "#/channels/bookingConfirmed" }
+    summary: "Publish BookingConfirmed"
+    messages: [ { $ref: "#/channels/bookingConfirmed/messages/bookingConfirmed" } ]
+  consumeBookingConfirmed:
+    action: receive
+    channel: { $ref: "#/channels/bookingConfirmed" }
+    summary: "Consume BookingConfirmed"
+    messages: [ { $ref: "#/channels/bookingConfirmed/messages/bookingConfirmed" } ]
+
+components:
+  messages:
+    BookingConfirmed:
+      name: BookingConfirmed
+      title: "Booking Confirmed"
+      summary: "A booking has been confirmed."
+      contentType: application/x-protobuf
+      payload:
+        type: object
+        description: "Mirrors chora.delivery.v1.BookingConfirmed."
+        properties:
+          envelope: { $ref: "#/components/schemas/EventEnvelope" }
+          booking_id: { type: string, format: uuid }
+          course_id: { type: string, format: uuid }
+          learner_gcid: { type: string }
+          status: { $ref: "#/components/schemas/BookingStatus" }
+          seat_number: { type: integer }
+          confirmed_at: { type: string, format: date-time }
+  schemas:
+    EventEnvelope:
+      type: object
+      description: "Mirrors chora.common.v1.EventEnvelope."
+      required: [event_id, idempotency_key, tenant_id, occurred_at, published_at, traceparent, source_project, source_service, schema_version]
+      properties:
+        event_id: { type: string, format: uuid }
+        idempotency_key: { type: string }
+        tenant_id: { type: string }
+        gcid: { type: string }
+        occurred_at: { type: string, format: date-time }
+        published_at: { type: string, format: date-time }
+        traceparent: { type: string }
+        tracestate: { type: string }
+        source_project: { type: string }
+        source_service: { type: string }
+        schema_version: { type: integer }
+        correlation_id: { type: string }
+        causation_id: { type: string }
+    BookingStatus:
+      type: string
+      enum: [BOOKING_STATUS_UNSPECIFIED, BOOKING_STATUS_PENDING, BOOKING_STATUS_CONFIRMED, BOOKING_STATUS_CANCELLED, BOOKING_STATUS_NO_SHOW, BOOKING_STATUS_COMPLETED]

@@ -1,0 +1,101 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Content Consumption — WeaknessDocUploaded
+  version: 1.1.0
+  description: |
+    Published by chora-consumption AFTER a learner uploads a "weakness document"
+    (a marked-up past test, free-form notes, a scribble, or — new in ADR-205 —
+    a grounding source_material textbook) and the blob is stored, but BEFORE
+    analysis. Triggers the ai-kernel Growth-Edge analyser crew.
+
+    - Domain: Content Consumption (`chora_consumption` DB)
+    - Aggregate root: `learner_weakness` (per-GCID Growth Edges)
+    - Topic: `chora.consumption.weakness_doc.uploaded.v1`
+    - Schema format: Protobuf binary
+    - Source proto: `proto/events/consumption/weakness.proto`
+       message `chora.consumption.v1.WeaknessDocUploaded`
+
+    LEARNER-FACING term is "Growth Edge"; the internal term is "weakness"
+    (3-audience explainability). The raw blob is TRANSIENT — once analysed it is
+    crypto-shredded (ADR-205 D8 / ADR-186); the persisted Growth Edge is
+    descriptive metadata, never the document.
+
+    ## v1.1.0 — ADR-205 graduation (WS-1, additive, backward-compatible)
+
+    The single-shot analyser is graduating to a governed multimodal HITL crew.
+    Three additive fields support bounded, injection-safe steering + the
+    reserve→refund economy (live subscribers ignore unknown fields, so the
+    pre-graduation crew is unaffected):
+
+    - `structured_clues` (field 10) — bounded learner steering (subject,
+      weak_topic_keys, self_confidence 1-5, context_kind enum, optional
+      Model-Armor-screened note). SUPERSEDES the free-text `context_hint`
+      (field 8) as the injection-safe path; clues are DATA the diagnose node
+      reads, never instruction it obeys.
+    - `requested_outputs` (field 11) — the learner's pre-selected outputs
+      (focused dose / Companion coaching / practice test / study aids); the
+      authoritative selection is the bounded HITL resume payload (WS-8).
+    - `reservation_id` (field 12) — the mana reservation made at the upload
+      door (reserve-on-accept; refund-on-fail; ADR-205 D6 / ADR-178). Empty for
+      free-tier (e.g. graded-assessment-derived) edges.
+
+    The `upload_kind` field also gains a documented value `source_material`
+    (a transient grounding textbook/reference distilled to a scope-profile;
+    never persisted, never reproduced verbatim into generated atoms).
+  contact:
+    name: Team 1 (Content) + Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+    description: Google Cloud Pub/Sub (chora-489812 platform host)
+
+channels:
+  weaknessDocUploaded:
+    address: chora.consumption.weakness_doc.uploaded.v1
+    description: Single-event topic for WeaknessDocUploaded.
+    messages:
+      weaknessDocUploaded:
+        $ref: '#/components/messages/WeaknessDocUploaded'
+
+operations:
+  publishWeaknessDocUploaded:
+    action: send
+    channel:
+      $ref: '#/channels/weaknessDocUploaded'
+    summary: Publish a WeaknessDocUploaded event
+    description: |
+      Emitted by chora-consumption from the Growth-Edge upload handler once the
+      blob is stored and (ADR-205 D6) the mana reservation is taken.
+    messages:
+      - $ref: '#/channels/weaknessDocUploaded/messages/weaknessDocUploaded'
+
+  consumeWeaknessDocUploaded:
+    action: receive
+    channel:
+      $ref: '#/channels/weaknessDocUploaded'
+    summary: Subscribe to WeaknessDocUploaded events
+    description: |
+      Primary consumer: chora-ai-kernel-orchestrator (the Growth-Edge analyser
+      crew) — downloads the blob, runs the governed multimodal HITL diagnosis,
+      and emits `weakness.analyzed.v1`.
+    messages:
+      - $ref: '#/channels/weaknessDocUploaded/messages/weaknessDocUploaded'
+
+components:
+  messages:
+    WeaknessDocUploaded:
+      name: WeaknessDocUploaded
+      title: Weakness Document Uploaded (Growth-Edge analysis trigger)
+      summary: A learner uploaded a document for Growth-Edge diagnosis
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/consumption/weakness.proto#/chora.consumption.v1.WeaknessDocUploaded'

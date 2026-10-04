@@ -1,0 +1,73 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Content Consumption — PathEnrolled
+  version: 1.0.0
+  description: |
+    Published when a learner enrols in a `LearningPath`.
+
+    - Domain: Content Consumption (`chora_consumption` DB)
+    - Aggregate root: `LearningPath`
+    - Topic: `chora.consumption.path.enrolled.v1`
+    - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
+    - Source proto: `proto/events/consumption/learning_path.proto`
+       message `chora.consumption.v1.PathEnrolled`
+
+    Embeds the mandatory `chora.common.v1.EventEnvelope` as field 1.
+  contact:
+    name: Chora Platform Team (Team 3) + Team 1 (Content)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+    description: Google Cloud Pub/Sub (chora-489812 platform host)
+
+channels:
+  pathEnrolled:
+    address: chora.consumption.path.enrolled.v1
+    description: |
+      Single-event topic for `PathEnrolled`. One topic per event type
+      per Tier 2 D8 — no omnibus topics.
+    messages:
+      pathEnrolled:
+        $ref: '#/components/messages/PathEnrolled'
+
+operations:
+  publishPathEnrolled:
+    action: send
+    channel:
+      $ref: '#/channels/pathEnrolled'
+    summary: Publish a PathEnrolled event
+    messages:
+      - $ref: '#/channels/pathEnrolled/messages/pathEnrolled'
+
+  consumePathEnrolled:
+    action: receive
+    channel:
+      $ref: '#/channels/pathEnrolled'
+    summary: Subscribe to PathEnrolled events
+    description: |
+      Primary consumers:
+      - Sharing — onboarding XP bonus, social broadcast
+      - Notifications — welcome / first-step nudge
+      - Delivery — initialise certification track progress
+      - Observability — funnel + retention metrics
+    messages:
+      - $ref: '#/channels/pathEnrolled/messages/pathEnrolled'
+
+components:
+  messages:
+    PathEnrolled:
+      name: PathEnrolled
+      title: Path Enrolled
+      summary: A learner enrolled in a LearningPath
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/consumption/learning_path.proto#/chora.consumption.v1.PathEnrolled'

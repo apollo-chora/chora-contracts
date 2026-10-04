@@ -1,0 +1,61 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Identity — TenantMembershipGranted
+  version: 1.0.0
+  description: |
+    Published when a GCID is granted membership in a tenant with one or
+    more roles. Note: AGIDs CANNOT hold TenantMembership.
+
+    - Domain: Identity (`chora_identity` DB)
+    - Topic: `chora.identity.tenancy_membership.granted.v1`
+    - Source proto: `proto/events/identity/tenancy_membership.proto`
+       message `chora.identity.v1.TenantMembershipGranted`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  tenantMembershipGranted:
+    address: chora.identity.tenancy_membership.granted.v1
+    messages:
+      tenantMembershipGranted:
+        $ref: '#/components/messages/TenantMembershipGranted'
+
+operations:
+  publishTenantMembershipGranted:
+    action: send
+    channel:
+      $ref: '#/channels/tenantMembershipGranted'
+    messages:
+      - $ref: '#/channels/tenantMembershipGranted/messages/tenantMembershipGranted'
+
+  consumeTenantMembershipGranted:
+    action: receive
+    channel:
+      $ref: '#/channels/tenantMembershipGranted'
+    description: |
+      Consumers: Tenancy (entitlement resolution), Notifications
+      (welcome to tenant), all role-gated UIs across the 5 surfaces.
+    messages:
+      - $ref: '#/channels/tenantMembershipGranted/messages/tenantMembershipGranted'
+
+components:
+  messages:
+    TenantMembershipGranted:
+      name: TenantMembershipGranted
+      title: Tenant Membership Granted
+      summary: A GCID gained membership in a tenant
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/identity/tenancy_membership.proto#/chora.identity.v1.TenantMembershipGranted'

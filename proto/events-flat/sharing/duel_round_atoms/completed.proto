@@ -1,0 +1,61 @@
+// =============================================================================
+// GENERATED — DO NOT EDIT.
+// Source : events/sharing/duel_round_atoms.proto message DuelRoundAtomsCompleted
+// Tool   : chora-contracts/internal/protoflatten
+// Why    : GCP Pub/Sub Schema Registry rejects (a) schemas with `import`
+//          statements and (b) schemas with more than one top-level message.
+//          This flat copy contains exactly ONE top-level message;
+//          EventEnvelope + Timestamp + transitive deps are nested inside.
+// Path C : see chora-contracts/CHANGELOG.md and m10-data-plane main.tf.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.sharing.v1;
+
+message DuelRoundAtomsCompleted {
+  // Inlined chora.common.v1.EventEnvelope (nested for self-contained schema).
+  message Envelope {
+    string event_id = 1;
+    string idempotency_key = 2;
+    string tenant_id = 3;
+    string gcid = 4;
+    Timestamp occurred_at = 5;
+    Timestamp published_at = 6;
+    string traceparent = 7;
+    string tracestate = 8;
+    string source_project = 9;
+    string source_service = 10;
+    int32 schema_version = 11;
+    string correlation_id = 12;
+    string causation_id = 13;
+    string chora_imda_dimension = 14;
+    string imda_lifecycle_stage = 15;
+  }
+
+  // Inlined google.protobuf.Timestamp (nested; wire-compatible).
+  message Timestamp {
+    int64 seconds = 1;
+    int32 nanos = 2;
+  }
+
+  // Inlined dep: DuelRoundAtom
+  message DuelRoundAtom {
+    string atom_id = 1;
+    string revision_id = 2;
+    string question = 3;
+    repeated string options = 4;
+    string answer = 5;
+    string source = 6;
+  }
+
+  Envelope envelope = 1;
+  string round_id = 2;
+  string duel_id = 3;
+  string status = 4;
+  string error_code = 5;
+  string workflow_id = 6;
+  string generated_by_model_id = 7;
+  repeated DuelRoundAtom atoms = 8;
+  Timestamp completed_at = 9;
+}

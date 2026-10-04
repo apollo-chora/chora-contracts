@@ -1,0 +1,112 @@
+asyncapi: "3.0.0"
+info:
+  title: "chora.delivery.enrollment.cancelled.v1"
+  version: "1.0.0"
+  description: |
+    Published when a learner cancels an enrolment (DELETE
+    /v1/courses/{course_id}/enrolments/{enrolment_id}). Soft-delete
+    semantics — the enrolment row remains in chora_delivery for audit
+    + GDPR cooperative-pseudonymisation per `account-closure-saga`.
+
+    Owning domain : Content Delivery (chora_delivery DB)
+    Owning team   : Team 2 (Delivery)
+    Surface       : A+ (learner)
+
+    Companion to `proto/events/delivery/enrollment.proto` message
+    `EnrollmentCancelled` (deferred — added to the proto registry
+    alongside CoursePublished in the next breaking-change window).
+
+    Idempotency_key MUST equal `enrollment:{course_id}:{learner_gcid}:cancelled`
+    so re-emission on the same logical fact dedupes at the bus.
+  contact:
+    name: "Chora Platform Team"
+  license:
+    name: "Proprietary"
+
+defaultContentType: application/x-protobuf
+
+servers:
+  local:
+    host: "localhost:8085"
+    protocol: googlepubsub
+    description: "Cloud Pub/Sub Emulator"
+  production:
+    host: "pubsub.googleapis.com"
+    protocol: googlepubsub
+    description: "Google Cloud Pub/Sub"
+
+channels:
+  enrollmentCancelled:
+    address: chora.delivery.enrollment.cancelled.v1
+    description: |
+      Carries EnrollmentCancelled Protobuf payload.
+
+      Downstream consumers:
+        - chora-identity     : revoke CourseRole(learner) projection
+        - chora-consumption  : LearningPath teardown / archive
+        - chora-observability: audit + cancellation analytics
+    messages:
+      enrollmentCancelled:
+        $ref: "#/components/messages/EnrollmentCancelled"
+
+operations:
+  publishEnrollmentCancelled:
+    action: send
+    channel: { $ref: "#/channels/enrollmentCancelled" }
+    summary: "Publish EnrollmentCancelled"
+    messages: [ { $ref: "#/channels/enrollmentCancelled/messages/enrollmentCancelled" } ]
+  consumeEnrollmentCancelled:
+    action: receive
+    channel: { $ref: "#/channels/enrollmentCancelled" }
+    summary: "Consume EnrollmentCancelled"
+    messages: [ { $ref: "#/channels/enrollmentCancelled/messages/enrollmentCancelled" } ]
+
+components:
+  messages:
+    EnrollmentCancelled:
+      name: EnrollmentCancelled
+      title: "Enrollment Cancelled"
+      summary: "A learner cancelled their enrolment in a course."
+      contentType: application/x-protobuf
+      payload:
+        type: object
+        description: "Mirrors chora.delivery.v1.EnrollmentCancelled."
+        properties:
+          envelope:
+            $ref: "#/components/schemas/EventEnvelope"
+          enrollment_id:
+            type: string
+            format: uuid
+          course_id:
+            type: string
+            format: uuid
+          learner_gcid:
+            type: string
+            format: uuid
+          reason:
+            type: string
+            description: "Free-text reason; defaults to 'user-initiated'."
+          cancelled_at:
+            type: string
+            format: date-time
+
+  schemas:
+    EventEnvelope:
+      type: object
+      description: "Mirrors chora.common.v1.EventEnvelope."
+      required: [event_id, idempotency_key, tenant_id, occurred_at, published_at,
+                 traceparent, source_project, source_service, schema_version]
+      properties:
+        event_id: { type: string, format: uuid }
+        idempotency_key: { type: string }
+        tenant_id: { type: string }
+        gcid: { type: string }
+        occurred_at: { type: string, format: date-time }
+        published_at: { type: string, format: date-time }
+        traceparent: { type: string }
+        tracestate: { type: string }
+        source_project: { type: string }
+        source_service: { type: string }
+        schema_version: { type: integer }
+        correlation_id: { type: string }
+        causation_id: { type: string }

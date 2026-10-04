@@ -1,0 +1,97 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Content Consumption — LearningPathCompleted (S4.2)
+  version: 1.0.0
+  description: |
+    Published when a learner's correctly-graded AtomicSession completion
+    advances the LearningPath past its final atom (Straight-Up linear
+    cert close).
+
+    Idempotent — completion stamp is set once on the aggregate; replay of
+    the closing-atom advance is a no-op and does NOT republish.
+
+    Distinct from the legacy `chora.consumption.path.completed.v1` topic
+    (which uses the older `domain/path` aggregate). The S4.2 cleanup
+    consolidates onto the `domain/learning_path` aggregate; legacy topic
+    retained for backward compatibility but new emits go here.
+
+    - Domain: Content Consumption (`chora_consumption` DB)
+    - Aggregate root: `LearningPath`
+    - Topic: `chora.consumption.learning_path.completed.v1`
+    - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
+  contact:
+    name: Chora Platform Team (Team 3) + Team 1 (Content)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+    description: Google Cloud Pub/Sub (chora-489812 platform host)
+
+channels:
+  learningPathCompleted:
+    address: chora.consumption.learning_path.completed.v1
+    description: |
+      Carries LearningPathCompleted Protobuf payload.
+
+      Downstream consumers:
+        - chora-delivery       : trigger Certification.Issue if course
+                                   has a cert programme
+        - chora-sharing        : XP / Reputation award; "completed" post
+        - chora-observability  : audit + IMDA D1 accountability evidence
+        - chora-notifications  : completion email
+    messages:
+      learningPathCompleted:
+        $ref: '#/components/messages/LearningPathCompleted'
+
+operations:
+  publishLearningPathCompleted:
+    action: send
+    channel: { $ref: '#/channels/learningPathCompleted' }
+    summary: Publish LearningPathCompleted
+    messages: [ { $ref: '#/channels/learningPathCompleted/messages/learningPathCompleted' } ]
+  consumeLearningPathCompleted:
+    action: receive
+    channel: { $ref: '#/channels/learningPathCompleted' }
+    summary: Consume LearningPathCompleted
+    messages: [ { $ref: '#/channels/learningPathCompleted/messages/learningPathCompleted' } ]
+
+components:
+  messages:
+    LearningPathCompleted:
+      name: LearningPathCompleted
+      title: Learning Path Completed
+      summary: A LearningPath has reached its final atom.
+      contentType: application/vnd.google.protobuf
+      payload:
+        type: object
+        description: Mirrors chora.consumption.v1.LearningPathCompleted
+        properties:
+          envelope: { $ref: '#/components/schemas/EventEnvelope' }
+          path_id: { type: string, format: uuid }
+          course_id: { type: string, format: uuid }
+          learner_gcid: { type: string }
+          atom_count: { type: integer }
+          completed_at: { type: string, format: date-time }
+  schemas:
+    EventEnvelope:
+      type: object
+      required: [event_id, idempotency_key, tenant_id, occurred_at, published_at, traceparent, source_project, source_service, schema_version]
+      properties:
+        event_id: { type: string, format: uuid }
+        idempotency_key: { type: string }
+        tenant_id: { type: string }
+        gcid: { type: string }
+        occurred_at: { type: string, format: date-time }
+        published_at: { type: string, format: date-time }
+        traceparent: { type: string }
+        tracestate: { type: string }
+        source_project: { type: string }
+        source_service: { type: string }
+        schema_version: { type: integer }
+        correlation_id: { type: string }
+        causation_id: { type: string }

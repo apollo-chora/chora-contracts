@@ -1,0 +1,1451 @@
+openapi: "3.2.0"
+info:
+  title: Chora Sharing Learner API
+  version: "1.0.0"
+  description: |
+    Learner-facing REST API for the Content Sharing domain (C+ Connect+).
+
+    Covers atom sharing, bookmarks, the shared-atom feed, social connections
+    (follow / block), reactions, comments, and leaderboard reads.
+
+    Auth: Identity Platform JWT (Bearer). All routes are tenant-scoped via
+    the `X-Tenant-ID` header. The gateway stamps the caller's `gcid` header
+    after JWT validation; both are required on every /v1 route (missing → 400).
+    Write endpoints require an `Idempotency-Key` header.
+
+    Owning team   : Team 1 (Content)
+    Owning domain : Content Sharing (chora_sharing database)
+    Topic prefix  : chora.sharing.*
+
+    AP-01: This contract exists BEFORE implementation.
+  contact:
+    name: Chora Platform Team — Content Track
+  license:
+    name: Proprietary
+
+servers:
+  - url: https://api.chora.io
+    description: Production
+  - url: http://localhost:8094
+    description: Local development
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Atom Sharing
+    description: Share / revoke atoms to the feed
+  - name: Feed
+    description: Shared-atom feed reads
+  - name: Bookmarks
+    description: Personal atom collection
+  - name: Connections
+    description: Follow / block / connection listing
+  - name: Reactions
+    description: Toggle / remove reactions on posts
+  - name: Comments
+    description: Create / list comments on posts
+  - name: Leaderboard
+    description: Ranked board reads
+  - name: Duels
+    description: Real-time PvP quiz duels over WebSocket
+  - name: Profiler
+    description: User interest profile with AI-generated tags
+  - name: Health
+    description: Service health
+
+paths:
+  # ---------------------------------------------------------------------------
+  # Health
+  # ---------------------------------------------------------------------------
+  /healthz:
+    get:
+      operationId: healthz
+      summary: Liveness probe
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: Service is alive
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /readyz:
+    get:
+      operationId: readyz
+      summary: Readiness probe
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: Service is ready
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  # ---------------------------------------------------------------------------
+  # Atom Sharing
+  # ---------------------------------------------------------------------------
+  /v1/atoms/{atom_id}/share:
+    post:
+      operationId: shareAtom
+      summary: Share an atom to the feed
+      description: |
+        An author shares their own atom to the feed with a per-atom license.
+        Author validation via AtomProjectionReader (caller MUST equal
+        projection owner_gcid). Caption moderation via Cloud Model Armor
+        BEFORE persisting. Publishes `chora.sharing.atom.shared.v1`.
+      tags: [Atom Sharing]
+      parameters:
+        - $ref: "#/components/parameters/AtomID"
+        - $ref: "#/components/parameters/X-Tenant-ID"
+        - $ref: "#/components/parameters/Idempotency-Key"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ShareAtomRequest"
+      responses:
+        "201":
+          description: Atom shared
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ShareAtomResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "412":
+          description: Atom not published or withdrawn
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Caption blocked by guardrail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    delete:
+      operationId: revokeShare
+      summary: Revoke a share
+      description: |
+        Revokes the caller's share of the given atom from the feed. The feed
+        entry is NOT deleted (immutable) — an EventRevoked is appended,
+        excluding it from feed reads. Idempotent: 204 even when already
+        revoked or never shared.
+      tags: [Atom Sharing]
+      parameters:
+        - $ref: "#/components/parameters/AtomID"
+        - $ref: "#/components/parameters/X-Tenant-ID"
+      responses:
+        "204":
+          description: Share revoked (or was already revoked)
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  # ---------------------------------------------------------------------------
+  # Bookmarks
+  # ---------------------------------------------------------------------------
+  /v1/atoms/{atom_id}/bookmark:
+    post:
+      operationId: bookmarkAtom
+      summary: Bookmark an atom
+      description: |
+        Saves an atom to the caller's personal collection. Idempotent on
+        (gcid, atom_id) — re-bookmarking is a no-op.
+      tags: [Bookmarks]
+      parameters:
+        - $ref: "#/components/parameters/AtomID"
+        - $ref: "#/components/parameters/X-Tenant-ID"
+        - $ref: "#/components/parameters/Idempotency-Key"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BookmarkAtomRequest"
+      responses:
+        "201":
+          description: Bookmark saved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BookmarkJSON"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+    delete:
+      operationId: unbookmarkAtom
+      summary: Remove bookmark
+      description: |
+        Removes the atom from the caller's personal collection. Idempotent —
+        returns 204 whether or not the bookmark existed.
+      tags: [Bookmarks]
+      parameters:
+        - $ref: "#/components/parameters/AtomID"
+        - $ref: "#/components/parameters/X-Tenant-ID"
+      responses:
+        "204":
+          description: Bookmark removed (or was already absent)
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/me/bookmarks:
+    get:
+      operationId: listBookmarks
+      summary: List bookmarks
+      description: |
+        Paginated read of the caller's bookmarks, newest-first.
+      tags: [Bookmarks]
+      parameters:
+        - $ref: "#/components/parameters/X-Tenant-ID"
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+        - name: cursor
+          in: query
+          description: Opaque keyset cursor (last bookmark id).
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Bookmark list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListBookmarksResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # ---------------------------------------------------------------------------
+  # Feed
+  # ---------------------------------------------------------------------------
+  /v1/feed/shared-atoms:
+    get:
+      operationId: listSharedAtoms
+      summary: List shared atoms feed
+      description: |
+        Paginated feed of shared atoms. Revoked + hidden shares excluded.
+        Newest-first by UUIDv7 entry id. Blocked users' atoms are filtered.
+      tags: [Feed]
+      parameters:
+        - $ref: "#/components/parameters/X-Tenant-ID"
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+        - name: cursor
+          in: query
+          description: Opaque keyset cursor (last entry id).
+          schema:
+            type: string
+        - name: topic_filter
+          in: query
+          schema:
+            type: string
+        - name: question_type_filter
+          in: query
+          schema:
+            type: string
+        - name: scope
+          in: query
+          description: "tenant (default) or following."
+          schema:
+            type: string
+            enum: [tenant, following]
+            default: tenant
+      responses:
+        "200":
+          description: Shared-atom feed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListSharedAtomsResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # ---------------------------------------------------------------------------
+  # Connections
+  # ---------------------------------------------------------------------------
+  /v1/connections:
+    get:
+      operationId: listConnections
+      summary: List connections
+      description: |
+        Lists the caller's following, followers, or blocked connections.
+      tags: [Connections]
+      parameters:
+        - $ref: "#/components/parameters/X-Tenant-ID"
+        - name: type
+          in: query
+          description: Connection type to list.
+          schema:
+            type: string
+            enum: [following, followers, blocked]
+            default: following
+      responses:
+        "200":
+          description: Connection list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListConnectionsResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/connections/{target_gcid}/follow:
+    post:
+      operationId: followUser
+      summary: Follow a user
+      description: |
+        Creates a follow edge (follower → followee). Returns 201 when a new
+        edge was created, 200 when the follow already existed (idempotent).
+        Publishes `chora.sharing.follow.created.v1`.
+      tags: [Connections]
+      parameters:
+        - $ref: "#/components/parameters/TargetGCID"
+        - $ref: "#/components/parameters/X-Tenant-ID"
+      responses:
+        "200":
+          description: Already following (idempotent)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectionJSON"
+        "201":
+          description: Follow created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectionJSON"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+    delete:
+      operationId: unfollowUser
+      summary: Unfollow a user
+      description: |
+        Removes a follow edge. Idempotent — 204 whether or not the edge
+        existed. Publishes `chora.sharing.follow.removed.v1`.
+      tags: [Connections]
+      parameters:
+        - $ref: "#/components/parameters/TargetGCID"
+        - $ref: "#/components/parameters/X-Tenant-ID"
+      responses:
+        "204":
+          description: Unfollowed (or was not following)
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/connections/{target_gcid}/block:
+    post:
+      operationId: blockUser
+      summary: Block a user
+      description: |
+        Creates a block edge. Blocking auto-unfollows — the blocked user's
+        content disappears from the feed. Publishes
+        `chora.sharing.follow.blocked.v1`.
+      tags: [Connections]
+      parameters:
+        - $ref: "#/components/parameters/TargetGCID"
+        - $ref: "#/components/parameters/X-Tenant-ID"
+      responses:
+        "201":
+          description: Block created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectionJSON"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+    delete:
+      operationId: unblockUser
+      summary: Unblock a user
+      description: |
+        Removes a block edge. Idempotent — 204 whether or not the edge
+        existed.
+      tags: [Connections]
+      parameters:
+        - $ref: "#/components/parameters/TargetGCID"
+        - $ref: "#/components/parameters/X-Tenant-ID"
+      responses:
+        "204":
+          description: Unblock successful (or was not blocked)
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # ---------------------------------------------------------------------------
+  # Reactions
+  # ---------------------------------------------------------------------------
+  /v1/posts/{post_id}/reactions:
+    post:
+      operationId: reactToPost
+      summary: Toggle reaction
+      description: |
+        Toggle semantics (backend-owned):
+          - No existing reaction → add it.
+          - Same kind already active → remove it (toggle off).
+          - Different kind active → remove old, add new (switch).
+
+        Returns the updated per-type counts + the user's active reaction
+        (null when toggled off). Publishes `chora.sharing.reaction.added.v1`
+        or `chora.sharing.reaction.removed.v1`.
+      tags: [Reactions]
+      parameters:
+        - $ref: "#/components/parameters/PostID"
+        - $ref: "#/components/parameters/X-Tenant-ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReactToPostRequest"
+      responses:
+        "200":
+          description: Reaction toggled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReactToPostResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/posts/{post_id}/reactions/{reaction_id}:
+    delete:
+      operationId: removeReaction
+      summary: Remove reaction
+      description: |
+        Ownership-checked removal — the reaction is removed only if the
+        caller owns it. Not-owned / not-found → 404 (existence never leaks).
+        Idempotent — a repeat DELETE returns 204.
+      tags: [Reactions]
+      parameters:
+        - $ref: "#/components/parameters/PostID"
+        - $ref: "#/components/parameters/ReactionID"
+        - $ref: "#/components/parameters/X-Tenant-ID"
+      responses:
+        "204":
+          description: Reaction removed (or was already absent)
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---------------------------------------------------------------------------
+  # Comments
+  # ---------------------------------------------------------------------------
+  /v1/posts/{post_id}/comments:
+    post:
+      operationId: createComment
+      summary: Create comment
+      description: |
+        Creates a 1-level reply on a post. The post MUST exist (else 404).
+        Idempotency-Key is required.
+      tags: [Comments]
+      parameters:
+        - $ref: "#/components/parameters/PostID"
+        - $ref: "#/components/parameters/X-Tenant-ID"
+        - $ref: "#/components/parameters/Idempotency-Key"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCommentRequest"
+      responses:
+        "201":
+          description: Comment created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommentJSON"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    get:
+      operationId: listComments
+      summary: List comments
+      description: |
+        Cursor-paginated list of comments on a post, newest-first.
+      tags: [Comments]
+      parameters:
+        - $ref: "#/components/parameters/PostID"
+        - $ref: "#/components/parameters/X-Tenant-ID"
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+        - name: cursor
+          in: query
+          description: Opaque keyset cursor (last comment id).
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Comment list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListCommentsResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---------------------------------------------------------------------------
+  # Leaderboard
+  # ---------------------------------------------------------------------------
+  /v1/leaderboard:
+    get:
+      operationId: getLeaderboard
+      summary: Get leaderboard
+      description: |
+        Ranked board read. Query params: scope (global|tenant|class|course),
+        scope_target_id (for class/course), metric (xp|duel_wins|duel_elo|
+        reputation|streak_days), period (weekly|monthly|all-time), limit.
+        Ties share a rank; tie-break gcid ASC. Display name is pseudonymised.
+      tags: [Leaderboard]
+      parameters:
+        - $ref: "#/components/parameters/X-Tenant-ID"
+        - name: scope
+          in: query
+          schema:
+            type: string
+            enum: [global, tenant, class, course]
+            default: global
+        - name: scope_target_id
+          in: query
+          description: Required when scope is class or course.
+          schema:
+            type: string
+            format: uuid
+        - name: metric
+          in: query
+          schema:
+            type: string
+            enum: [xp, duel_wins, duel_elo, reputation, streak_days]
+            default: xp
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [weekly, monthly, all-time]
+            default: all-time
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+      responses:
+        "200":
+          description: Leaderboard snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GetLeaderboardResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # ---------------------------------------------------------------------------
+  # Duels
+  # ---------------------------------------------------------------------------
+  /v1/duels:
+    post:
+      operationId: challengeDuel
+      summary: Challenge an opponent to a duel
+      tags: [Duels]
+      parameters:
+        - $ref: "#/components/parameters/X-Tenant-ID"
+        - $ref: "#/components/parameters/Idempotency-Key"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChallengeDuelRequest"
+      responses:
+        "201":
+          description: Duel created
+          headers:
+            Location:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChallengeDuelResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    get:
+      operationId: listDuels
+      summary: List duels for the caller
+      tags: [Duels]
+      parameters:
+        - $ref: "#/components/parameters/X-Tenant-ID"
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, accepted, in_progress, completed, forfeited, expired]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+        - name: cursor
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Duel list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListDuelsResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/duels/suggestions:
+    get:
+      operationId: getDuelSuggestions
+      summary: Get suggested opponents based on proficiency + interest tags
+      tags: [Duels]
+      parameters:
+        - $ref: "#/components/parameters/X-Tenant-ID"
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 10
+            maximum: 50
+      responses:
+        "200":
+          description: Suggested opponents
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/DuelSuggestion"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/duels/{duel_id}:
+    get:
+      operationId: getDuel
+      summary: Get duel details
+      tags: [Duels]
+      parameters:
+        - $ref: "#/components/parameters/X-Tenant-ID"
+        - name: duel_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Duel details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DuelDetail"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/duels/{duel_id}/accept:
+    post:
+      operationId: acceptDuel
+      summary: Accept a duel challenge
+      tags: [Duels]
+      parameters:
+        - $ref: "#/components/parameters/X-Tenant-ID"
+        - name: duel_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Duel accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/duels/{duel_id}/answer:
+    post:
+      operationId: submitDuelAnswer
+      summary: Submit an answer for a duel round
+      tags: [Duels]
+      parameters:
+        - $ref: "#/components/parameters/X-Tenant-ID"
+        - name: duel_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [round_no, answer]
+              properties:
+                round_no:
+                  type: integer
+                answer:
+                  type: string
+      responses:
+        "200":
+          description: Answer result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DuelAnswerResult"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/duels/{duel_id}/ws:
+    get:
+      operationId: duelWebSocket
+      summary: WebSocket upgrade for real-time duel play
+      tags: [Duels]
+      parameters:
+        - $ref: "#/components/parameters/X-Tenant-ID"
+        - name: duel_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "101":
+          description: Switching Protocols
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---------------------------------------------------------------------------
+  # Profiler
+  # ---------------------------------------------------------------------------
+  /v1/me/profile:
+    get:
+      operationId: getProfile
+      summary: Get the caller's interest profile
+      tags: [Profiler]
+      parameters:
+        - $ref: "#/components/parameters/X-Tenant-ID"
+      responses:
+        "200":
+          description: User profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProfileResponse"
+
+  /v1/me/profile/generate:
+    post:
+      operationId: generateProfile
+      summary: Generate interest tags from bio + course history via AI
+      tags: [Profiler]
+      parameters:
+        - $ref: "#/components/parameters/X-Tenant-ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [bio]
+              properties:
+                bio:
+                  type: string
+                  description: Free-text "tell me about yourself"
+                course_titles:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        "201":
+          description: Profile generated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProfileResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/me/profile/tags:
+    put:
+      operationId: updateProfileTags
+      summary: Manually edit the AI-generated interest tags
+      tags: [Profiler]
+      parameters:
+        - $ref: "#/components/parameters/X-Tenant-ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tags]
+              properties:
+                tags:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/InterestTag"
+      responses:
+        "200":
+          description: Tags updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProfileResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    X-Tenant-ID:
+      name: X-Tenant-ID
+      in: header
+      required: true
+      description: Tenant scope for the request (UUIDv7).
+      schema:
+        type: string
+        format: uuid
+    Idempotency-Key:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Client-generated key for idempotent write replay.
+      schema:
+        type: string
+    AtomID:
+      name: atom_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    PostID:
+      name: post_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ReactionID:
+      name: reaction_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    TargetGCID:
+      name: target_gcid
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unauthorized:
+      description: Authentication required
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Forbidden:
+      description: Caller lacks permission for this resource
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Conflict:
+      description: Conflict with current state
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          example: "ok"
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+
+    # -- Duel schemas --
+    DuelStatus:
+      type: string
+      enum: [pending, accepted, in_progress, completed, forfeited, expired]
+
+    DuelScope:
+      type: string
+      enum: [friendly, ranked]
+
+    ChallengeDuelRequest:
+      type: object
+      required: [opponent_gcid]
+      properties:
+        opponent_gcid:
+          type: string
+          format: uuid
+        scope:
+          $ref: "#/components/schemas/DuelScope"
+        round_count:
+          type: integer
+          default: 5
+          maximum: 20
+        interest_tags:
+          type: array
+          items:
+            type: string
+
+    ChallengeDuelResponse:
+      type: object
+      required: [duel_id, status]
+      properties:
+        duel_id:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/DuelStatus"
+        expires_at:
+          type: string
+          format: date-time
+
+    DuelDetail:
+      type: object
+      properties:
+        duel_id:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/DuelStatus"
+        scope:
+          $ref: "#/components/schemas/DuelScope"
+        challenger_gcid:
+          type: string
+        opponent_gcid:
+          type: string
+        score_challenger:
+          type: integer
+        score_opponent:
+          type: integer
+        combo_challenger:
+          type: integer
+        combo_opponent:
+          type: integer
+        winner_gcid:
+          type: string
+        interest_tags:
+          type: array
+          items:
+            type: string
+        round_count:
+          type: integer
+
+    ListDuelsResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/DuelDetail"
+        next_cursor:
+          type: string
+
+    DuelSuggestion:
+      type: object
+      properties:
+        gcid:
+          type: string
+        display_name:
+          type: string
+        proficiency:
+          type: integer
+        shared_tags:
+          type: array
+          items:
+            type: string
+
+    DuelAnswerResult:
+      type: object
+      properties:
+        correct:
+          type: boolean
+        combo_multiplier:
+          type: integer
+        points_awarded:
+          type: integer
+        current_combo:
+          type: integer
+        speed_bonus:
+          type: integer
+        duel_status:
+          $ref: "#/components/schemas/DuelStatus"
+        winner_gcid:
+          type: string
+
+    # -- Profiler schemas --
+    InterestTag:
+      type: object
+      required: [category, tag]
+      properties:
+        category:
+          type: string
+          enum: [programming, mathematics, science, humanities, arts, languages]
+        tag:
+          type: string
+
+    ProfileResponse:
+      type: object
+      properties:
+        gcid:
+          type: string
+        bio:
+          type: string
+        tags:
+          type: array
+          items:
+            $ref: "#/components/schemas/InterestTag"
+        course_titles:
+          type: array
+          items:
+            type: string
+        updated_at:
+          type: string
+          format: date-time
+
+    # -- Shared enums --
+    ReactionKind:
+      type: string
+      enum: [like, inspired, insightful, curious]
+      description: |
+        Reaction kind labels. The toggle endpoint accepts UPPER_CASE proto
+        labels or lowercase snake_case; the response uses lowercase.
+
+    RoyaltyRate:
+      type: object
+      properties:
+        kind:
+          type: string
+        value:
+          type: number
+          format: float
+
+    # -- Atom sharing --
+    ShareAtomRequest:
+      type: object
+      required: [license_terms]
+      properties:
+        atom_revision_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            Optional explicit revision. If omitted, the latest published
+            revision is used.
+        caption:
+          type: string
+          maxLength: 512
+          nullable: true
+        license_terms:
+          type: string
+          description: |
+            License label (lowercase snake_case accepted). One of:
+            free, royalty_pct, royalty_fixed, cc_by_sa, cc_nd.
+          example: free
+        royalty_rate:
+          $ref: "#/components/schemas/RoyaltyRate"
+          description: Required when license_terms is royalty_pct or royalty_fixed.
+
+    ShareAtomResponse:
+      type: object
+      required: [share_entry_id, author_display_name, created_at]
+      properties:
+        share_entry_id:
+          type: string
+          format: uuid
+        author_display_name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    SharedAtomCard:
+      type: object
+      required:
+        - share_entry_id
+        - author_gcid
+        - author_display_name
+        - atom_id
+        - atom_revision_id
+        - atom_stem_preview
+        - question_type
+        - license_terms
+        - reaction_count
+        - created_at
+      properties:
+        share_entry_id:
+          type: string
+          format: uuid
+        author_gcid:
+          type: string
+          format: uuid
+        author_display_name:
+          type: string
+        atom_id:
+          type: string
+          format: uuid
+        atom_revision_id:
+          type: string
+          format: uuid
+        atom_stem_preview:
+          type: string
+        question_type:
+          type: string
+        caption:
+          type: string
+          nullable: true
+        license_terms:
+          type: string
+        royalty_rate:
+          $ref: "#/components/schemas/RoyaltyRate"
+          nullable: true
+          description: Only present when the license is royalty-based.
+        reaction_count:
+          type: integer
+          format: int32
+        reaction_counts:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int32
+          description: Per-type reaction counts.
+        my_reaction:
+          type: string
+          nullable: true
+          description: The caller's active reaction kind, if any.
+        created_at:
+          type: string
+          format: date-time
+
+    ListSharedAtomsResponse:
+      type: object
+      required: [cards]
+      properties:
+        cards:
+          type: array
+          items:
+            $ref: "#/components/schemas/SharedAtomCard"
+        next_cursor:
+          type: string
+          nullable: true
+
+    # -- Bookmarks --
+    BookmarkAtomRequest:
+      type: object
+      properties:
+        atom_revision_id:
+          type: string
+          format: uuid
+          nullable: true
+
+    BookmarkJSON:
+      type: object
+      required: [id, atom_id, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        atom_id:
+          type: string
+          format: uuid
+        atom_revision_id:
+          type: string
+          format: uuid
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    ListBookmarksResponse:
+      type: object
+      required: [bookmarks]
+      properties:
+        bookmarks:
+          type: array
+          items:
+            $ref: "#/components/schemas/BookmarkJSON"
+        next_cursor:
+          type: string
+          nullable: true
+
+    # -- Connections --
+    ConnectionJSON:
+      type: object
+      required: [gcid]
+      properties:
+        gcid:
+          type: string
+          format: uuid
+        display_name:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    ListConnectionsResponse:
+      type: object
+      required: [connections]
+      properties:
+        connections:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConnectionJSON"
+        next_cursor:
+          type: string
+          nullable: true
+
+    # -- Reactions --
+    ReactToPostRequest:
+      type: object
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          description: |
+            Reaction kind label (UPPER_CASE proto or lowercase accepted).
+          example: like
+
+    ReactionJSON:
+      type: object
+      required:
+        - reaction_id
+        - post_id
+        - reactor_gcid
+        - tenant_id
+        - kind
+        - reacted_at
+      properties:
+        reaction_id:
+          type: string
+          format: uuid
+        post_id:
+          type: string
+          format: uuid
+        reactor_gcid:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        kind:
+          type: string
+        reacted_at:
+          type: string
+          format: date-time
+
+    ReactToPostResponse:
+      type: object
+      required: [reaction_counts]
+      properties:
+        reaction:
+          $ref: "#/components/schemas/ReactionJSON"
+          nullable: true
+          description: The caller's active reaction, or null when toggled off.
+        reaction_counts:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int32
+          description: Updated per-type counts for the post.
+
+    # -- Comments --
+    CreateCommentRequest:
+      type: object
+      required: [body]
+      properties:
+        body:
+          type: string
+          maxLength: 4096
+          description: Comment body (non-empty, max 4 KiB).
+        parent_comment_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            Optional parent comment UUID. When set, this is a 1-level reply;
+            the parent must itself be a top-level comment.
+
+    CommentJSON:
+      type: object
+      required: [id, post_id, author_gcid, body, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        post_id:
+          type: string
+          format: uuid
+        author_gcid:
+          type: string
+          format: uuid
+        body:
+          type: string
+        parent_comment_id:
+          type: string
+          format: uuid
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    ListCommentsResponse:
+      type: object
+      required: [comments]
+      properties:
+        comments:
+          type: array
+          items:
+            $ref: "#/components/schemas/CommentJSON"
+        next_cursor:
+          type: string
+          nullable: true
+
+    # -- Leaderboard --
+    LeaderboardEntryJSON:
+      type: object
+      required: [gcid, score, rank]
+      properties:
+        gcid:
+          type: string
+          format: uuid
+        score:
+          type: integer
+          format: int64
+        rank:
+          type: integer
+          format: int32
+
+    GetLeaderboardResponse:
+      type: object
+      required: [entries, computed_at]
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/LeaderboardEntryJSON"
+        next_cursor:
+          type: string
+          nullable: true
+        computed_at:
+          type: string
+          format: date-time

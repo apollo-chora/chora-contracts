@@ -1,0 +1,63 @@
+asyncapi: 3.0.0
+info:
+  title: Chora AI Kernel — GuardrailTriggered
+  version: 1.0.0
+  description: |
+    Published when a guardrail evaluation requires governance follow-up
+    (BLOCK / REDACT / FLAG). Distinct from GuardrailEvaluated which is the
+    per-tier ledger — Triggered fans out to Governance + Notifications.
+
+    - Domain: AI Kernel (`chora_ai_kernel` DB)
+    - Topic: `chora.ai_kernel.guardrail.triggered.v1`
+    - Source proto: `proto/events/ai_kernel/guardrail.proto`
+       message `chora.ai_kernel.v1.GuardrailTriggered`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  guardrailTriggered:
+    address: chora.ai_kernel.guardrail.triggered.v1
+    messages:
+      guardrailTriggered:
+        $ref: '#/components/messages/GuardrailTriggered'
+
+operations:
+  publishGuardrailTriggered:
+    action: send
+    channel:
+      $ref: '#/channels/guardrailTriggered'
+    messages:
+      - $ref: '#/channels/guardrailTriggered/messages/guardrailTriggered'
+
+  consumeGuardrailTriggered:
+    action: receive
+    channel:
+      $ref: '#/channels/guardrailTriggered'
+    description: |
+      Consumers: Governance (PolicyViolationDetected emission),
+      O+ moderation queue, Notifications (admin advisory),
+      AI Kernel orchestrator (block invocation flow).
+    messages:
+      - $ref: '#/channels/guardrailTriggered/messages/guardrailTriggered'
+
+components:
+  messages:
+    GuardrailTriggered:
+      name: GuardrailTriggered
+      title: Guardrail Triggered
+      summary: A guardrail evaluation requires governance follow-up
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/ai_kernel/guardrail.proto#/chora.ai_kernel.v1.GuardrailTriggered'

@@ -1,0 +1,100 @@
+// =============================================================================
+// Chora EXP Rule Service (gRPC)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture/adrs/adr-218-companion-capability-catalogue-species-path.md (D6)
+//   + docs/architecture/adrs/adr-201 §5 (ExpRuleResolver, H+ editors)
+//   + chora-identity migrations/0027_companion_exp_rules_layer.up.sql
+//
+// Inter-service gRPC contract for the configurable per-source companion-EXP
+// rules layer (Identity supporting domain, chora_identity database). The
+// resolver runs the precedence ladder (tenant override → platform plan →
+// exp_source_def catalogue default) server-side; callers receive the winning
+// rule for one occurrence of a verified EXP source.
+//
+// Primary caller:
+//   - chora-consumption — companion growth award path (ADR-218 D6: the live
+//     in-code growth/curve.go map is unified onto this resolver; the in-code
+//     map remains ONLY as the documented fail-loud-logged fallback when this
+//     service is unreachable — parity seeds guarantee identical values).
+//
+// INVARIANT (ADR-203 L16 — verified-EXP anti-gaming): the EXP source is
+// ALWAYS a Chora-verified system event and is NON-CONFIGURABLE. This RPC
+// tunes value / cap / eligibility / enabled of KNOWN sources only; an
+// unknown source_code returns INVALID_ARGUMENT — it can NEVER mint a new
+// source.
+//
+// Read-only + side-effect free: no idempotency key needed. Callers MAY
+// cache responses briefly (rules change via rare H+ editor actions).
+//
+// Deployed in chora-489812 team-platform pool. mTLS via Cloud Service Mesh;
+// SPIFFE identity in mesh; W3C trace context in gRPC metadata.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.services.identity.v1;
+
+option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/identity/v1;identityv1";
+
+// -----------------------------------------------------------------------------
+// Service
+// -----------------------------------------------------------------------------
+
+service ExpRuleService {
+  // Resolve the EXP rule for one verified source occurrence via the
+  // precedence ladder (tenant override → platform plan → catalogue
+  // default). A DISABLED source resolves SUCCESSFULLY with enabled=false
+  // (the caller skips the award) — it is NOT an error. An unknown or
+  // deprecated source_code returns INVALID_ARGUMENT (ADR-203 L16:
+  // sources are non-configurable and cannot be minted by callers).
+  rpc ResolveExpRule(ResolveExpRuleRequest) returns (ResolveExpRuleResponse);
+}
+
+// -----------------------------------------------------------------------------
+// ResolveExpRule RPC
+// -----------------------------------------------------------------------------
+
+message ResolveExpRuleRequest {
+  // Canonical verified-event source being valued (e.g. "atom_session").
+  // Required. Must exist in exp_source_def (the sole registry of verified
+  // sources).
+  string source_code = 1;
+
+  // Tenant context. "" ⇒ platform plan + catalogue only. When set, the
+  // tenant's ACTIVE override plan (if any) wins for this source.
+  string tenant_id = 2;
+
+  // OPTIONAL — reserved named-plan selector (mirrors ADR-178's Tier
+  // sub-axis position in PricePlanResolver). Advisory passthrough today;
+  // never required to resolve a rule.
+  string plan = 3;
+
+  // OPTIONAL — forward-compatible resolution context (e.g.
+  // {"growth_stage":"4"}); advisory passthrough today.
+  map<string, string> context = 4;
+}
+
+message ResolveExpRuleResponse {
+  // Echoes the resolved verified-event source.
+  string source_code = 1;
+
+  // Resolved EXP award (>= 0) for ONE occurrence of the source.
+  int64 exp_value = 2;
+
+  // Maximum EXP this source may award per calendar day; 0 = uncapped.
+  // The caller (chora-consumption ledger admission) enforces the ceiling.
+  int32 daily_cap = 3;
+
+  // Advisory eligibility constraint the caller applies — "" = always
+  // eligible. Only plan rules carry one; the catalogue default is "".
+  string eligibility = 4;
+
+  // Whether the source currently awards EXP. false ⇒ the caller skips
+  // the award (a successful resolution, not an error).
+  bool enabled = 5;
+
+  // Which precedence rung resolved the rule: "tenant" | "plan" |
+  // "catalogue". Audit / observability.
+  string resolution_source = 6;
+}

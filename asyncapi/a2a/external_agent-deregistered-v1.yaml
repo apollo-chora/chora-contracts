@@ -1,0 +1,64 @@
+asyncapi: "3.0.0"
+info:
+  title: "Chora Agent-to-Agent — external_agent.deregistered.v1"
+  version: "1.0.0"
+  description: |
+    Published when an external agent is permanently deregistered (soft
+    delete). All open invocations involving the agent are force-failed;
+    all contracts pinned to it transition to REVOKED automatically.
+
+    Owning team   : Team 3 (Platform)
+    Owning domain : Agent-to-Agent (chora_a2a database)
+    Reference     : ADR-132 §3
+  contact:
+    name: "Chora Platform Team — Platform Track"
+  license:
+    name: "Proprietary"
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  production:
+    host: "pubsub.googleapis.com"
+    protocol: googlepubsub
+    description: "Google Cloud Pub/Sub (production)"
+  emulator:
+    host: "localhost:8085"
+    protocol: googlepubsub
+    description: "Cloud Pub/Sub Emulator (local dev)"
+
+channels:
+  externalAgentDeregistered:
+    address: "chora.a2a.external_agent.deregistered.v1"
+    messages:
+      externalAgentDeregistered:
+        $ref: "#/components/messages/ExternalAgentDeregistered"
+
+operations:
+  publishExternalAgentDeregistered:
+    action: send
+    channel:
+      $ref: "#/channels/externalAgentDeregistered"
+    summary: "Publish an external agent deregistration event"
+    description: |
+      Producer: chora-a2a-gateway.
+      Consumers: A2A Gateway routing tables (cache invalidation),
+                 contract revocation worker (cascades),
+                 O+ partner registry,
+                 Audit log.
+    messages:
+      - $ref: "#/channels/externalAgentDeregistered/messages/externalAgentDeregistered"
+
+components:
+  messages:
+    ExternalAgentDeregistered:
+      name: "ExternalAgentDeregistered"
+      title: "External Agent Deregistered"
+      summary: "An external agent has been permanently deregistered"
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf;version=3
+      payload:
+        schemaFormat: "application/vnd.google.protobuf;version=3"
+        schema:
+          protoFile: "proto/events/a2a/external_agent.proto"
+          messageName: "chora.a2a.v1.ExternalAgentDeregistered"

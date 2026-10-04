@@ -1,0 +1,61 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Tenancy — SubscriptionCancelled
+  version: 1.0.0
+  description: |
+    Published when a subscription is cancelled. Triggers AddonDeactivated
+    events at the effective_at boundary.
+
+    - Domain: Tenancy + Billing (`chora_tenancy` DB)
+    - Topic: `chora.tenancy.subscription.cancelled.v1`
+    - Source proto: `proto/events/tenancy/subscription.proto`
+       message `chora.tenancy.v1.SubscriptionCancelled`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  subscriptionCancelled:
+    address: chora.tenancy.subscription.cancelled.v1
+    messages:
+      subscriptionCancelled:
+        $ref: '#/components/messages/SubscriptionCancelled'
+
+operations:
+  publishSubscriptionCancelled:
+    action: send
+    channel:
+      $ref: '#/channels/subscriptionCancelled'
+    messages:
+      - $ref: '#/channels/subscriptionCancelled/messages/subscriptionCancelled'
+
+  consumeSubscriptionCancelled:
+    action: receive
+    channel:
+      $ref: '#/channels/subscriptionCancelled'
+    description: |
+      Consumers: Tenancy (downstream AddonDeactivated at boundary),
+      Notifications (cancellation confirmation), Observability (churn KPI).
+    messages:
+      - $ref: '#/channels/subscriptionCancelled/messages/subscriptionCancelled'
+
+components:
+  messages:
+    SubscriptionCancelled:
+      name: SubscriptionCancelled
+      title: Subscription Cancelled
+      summary: A tenant subscription has been cancelled
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/tenancy/subscription.proto#/chora.tenancy.v1.SubscriptionCancelled'

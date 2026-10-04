@@ -1,0 +1,64 @@
+asyncapi: 3.0.0
+info:
+  title: Chora Tenancy — TenantManaPoolDepleted
+  version: 1.0.0
+  description: |
+    Published when a TenantManaPool's balance crosses below the
+    configurable low-balance threshold (default 10% of monthly_topup_units),
+    and again when balance reaches 0. Drives admin notifications +
+    auto-renew pre-bill confirmation flows.
+
+    - Domain: Tenancy + Billing (`chora_tenancy` DB)
+    - Topic: `chora.tenancy.tenant_mana_pool.depleted.v1`
+    - Source proto: `proto/events/tenancy/tenant_mana_pool.proto`
+       message `chora.tenancy.v1.TenantManaPoolDepleted`
+  contact:
+    name: Chora Platform Team (Team 3)
+  license:
+    name: Proprietary
+
+defaultContentType: application/vnd.google.protobuf
+
+servers:
+  pubsub:
+    host: pubsub.googleapis.com
+    protocol: googlepubsub
+
+channels:
+  tenantManaPoolDepleted:
+    address: chora.tenancy.tenant_mana_pool.depleted.v1
+    messages:
+      tenantManaPoolDepleted:
+        $ref: '#/components/messages/TenantManaPoolDepleted'
+
+operations:
+  publishTenantManaPoolDepleted:
+    action: send
+    channel:
+      $ref: '#/channels/tenantManaPoolDepleted'
+    messages:
+      - $ref: '#/channels/tenantManaPoolDepleted/messages/tenantManaPoolDepleted'
+
+  consumeTenantManaPoolDepleted:
+    action: receive
+    channel:
+      $ref: '#/channels/tenantManaPoolDepleted'
+    description: |
+      Consumers: Notifications (low-balance / depleted admin alert),
+      Observability (depletion-rate KPI), Tenancy auto-renew job
+      (trigger pre-bill confirmation).
+    messages:
+      - $ref: '#/channels/tenantManaPoolDepleted/messages/tenantManaPoolDepleted'
+
+components:
+  messages:
+    TenantManaPoolDepleted:
+      name: TenantManaPoolDepleted
+      title: Tenant Mana Pool Depleted
+      summary: A tenant mana pool has crossed a low-balance threshold or hit zero
+      contentType: application/vnd.google.protobuf
+      schemaFormat: application/vnd.google.protobuf
+      payload:
+        schemaFormat: application/vnd.google.protobuf
+        schema:
+          $ref: '../../proto/events/tenancy/tenant_mana_pool.proto#/chora.tenancy.v1.TenantManaPoolDepleted'
