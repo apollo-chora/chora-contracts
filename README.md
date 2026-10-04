@@ -2,7 +2,7 @@
 
 > API contract boundary for the Chora platform. **Leaf package** — no internal dependencies.
 >
-> Aligned with **Architecture Review locked 2026-05-07** + **2026-05-15 consolidation**. Source-of-truth: [`../docs/architecture.md`](../docs/architecture.md) (canonical consolidated doc) §5.1-5.4 + §3.
+> Aligned with **Architecture Review locked 2026-05-07** + **2026-05-15 consolidation** (§5.1-5.4 + §3).
 
 All Chora services consume contracts from this repo. Contracts come BEFORE implementation per **AP-01 (API-First, Headless Always)** — non-negotiable.
 
@@ -40,7 +40,7 @@ chora-contracts/
 
 ## 12-domain topic taxonomy
 
-`chora.{domain}.{aggregate}.{event_type}.v{N}` — see `docs/architecture.md` §5.4 for the canonical convention.
+`chora.{domain}.{aggregate}.{event_type}.v{N}` — the canonical event-topic naming convention (§5.4).
 
 **5 core Content {verb} domains**: `creation`, `consumption`, `delivery`, `sharing`, `a2a`.
 
@@ -92,7 +92,7 @@ buf generate                            # produce gen/{go,python}/ stubs
                                         # google_pubsub_schema.
 ```
 
-`gen/` and `proto/events-flat/` are **committed to git** — services run `go build` and `pip install -e ../../chora-contracts` directly against the committed output. Chora-infra terraform plan reads `proto/events-flat/` as static input for `google_pubsub_schema.aggregate.definition`. CI re-runs buf + protoflatten to assert the committed output matches the proto definitions (`tests/test_events_flat_up_to_date.sh` + `internal/protoflatten/main_test.go`).
+`gen/` and `proto/events-flat/` are **committed to git** — services consume the generated Go module and Python package directly against the committed output. CI re-runs buf + protoflatten to assert the committed output matches the proto definitions (`tests/test_events_flat_up_to_date.sh` + `internal/protoflatten/main_test.go`).
 
 Hand-edits to `gen/` and `proto/events-flat/` are rejected.
 
@@ -123,11 +123,9 @@ A bulk proto restructure (move flat protos under `proto/services/{name}/v1/`) wo
 
   ```
   require github.com/apollo-chora/chora-contracts/gen/go v0.0.0-…
-
-  replace github.com/apollo-chora/chora-contracts/gen/go => ../../chora-contracts/gen/go
   ```
 
-- **Python consumers**: `pip install -e ../../chora-contracts` (path-install in the monorepo). Then:
+- **Python consumers**: `pip install -e .` (install this repository). Then:
 
   ```python
   from chora_contracts_gen.services import agent_executor_pb2_grpc
@@ -146,7 +144,7 @@ A bulk proto restructure (move flat protos under `proto/services/{name}/v1/`) wo
 
 ### Wave-2 BFF gRPC swap — DEFERRED
 
-Per `docs/architecture.md` §5.2.1 + §5.2.2: the `chora-gateway` BFF dials 9 domain services over HTTP rather than gRPC. The 2026-05-23 audit narrowed the missing-RPC count from **arch.md's "~25-30" to ~8-12 learner-facing mutation RPCs** (Update*, Archive*, Bulk* operations).
+The `chora-gateway` BFF dials 9 domain services over HTTP rather than gRPC (§5.2.1 + §5.2.2). The 2026-05-23 audit narrowed the missing-RPC count from ~25-30 to ~8-12 learner-facing mutation RPCs (Update*, Archive*, Bulk* operations).
 
 **Pending reconciliation (C-series)**:
 
@@ -184,7 +182,7 @@ Payload fields are domain data only.
 
 ## Surface-mapped scope (full-deployment intention)
 
-The full-deployment intention adopts the **C.H.O.R.A. surface-mapped solid/dotted convention** used by `docs/report/ch04/05/09` and `docs/references/ddd-aggregate-map.md`:
+The full-deployment intention adopts the **C.H.O.R.A. surface-mapped solid/dotted convention**:
 
 | Surface | Domains served | Scope |
 |---|---|---|
@@ -194,7 +192,7 @@ The full-deployment intention adopts the **C.H.O.R.A. surface-mapped solid/dotte
 | **C+** (Circle+) | Content Sharing (social) | DOTTED |
 | **O+** (Observability+) | Governance + Observability + runtime + A2A admin console | DOTTED |
 
-Within in-scope surfaces, certain sub-features are also deferred — see `docs/references/ddd-aggregate-map.md` §1.4 for the locked filter.
+Within in-scope surfaces, certain sub-features are also deferred (§1.4 locked filter).
 
 ## Guardrails — Cloud Model Armor (per ADR-152, supersedes chora-guardrail)
 
@@ -204,11 +202,4 @@ Per **ADR-152** (PROPOSED 2026-05-13 → ACCEPTED 2026-05-14), the `chora-guardr
 
 ## Related
 
-- Parent monorepo CLAUDE.md: [`../CLAUDE.md`](../CLAUDE.md)
-- Canonical architecture: [`../docs/architecture.md`](../docs/architecture.md) (consolidated 2026-05-15; replaces deleted `architecture-review-inputs-2026-05-07.md`)
-- Always-loaded agentic specialisation: [`../docs/architecture_llm.md`](../docs/architecture_llm.md)
-- DDD aggregate map: [`../docs/references/ddd-aggregate-map.md`](../docs/references/ddd-aggregate-map.md) (refreshed 2026-05-23)
 - Protobuf conventions: [`proto/README.md`](proto/README.md)
-- Always-loaded rules: [`../.claude/rules/{ddd-enforcement,development-execution,git-workflow}.md`](../.claude/rules/)
-- Skills (post-M11.2): `.claude/skills/{coding-protobuf, event-driven, pub-sub-topology, ddd-aggregate, account-closure-saga, cloud-model-armor-guardrails}/SKILL.md`
-- ADRs (canonical at `../docs/architecture/adrs/`): ADR-132 (A2A) · ADR-133 (GCID portability) · ADR-140 (gRPC inter-service) · ADR-141 (IMDA labels) · ADR-145 (polyglot Agent Engine) · ADR-146 (Model Broker retired) · ADR-152 (chora-guardrail superseded) · ADR-155 (Assessment 8-state FSM) · ADR-156 (LearningAtom aggregate root)
