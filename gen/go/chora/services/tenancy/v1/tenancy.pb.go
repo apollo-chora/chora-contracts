@@ -2454,7 +2454,7 @@ const file_services_tenancy_v1_tenancy_proto_rawDesc = "" +
 	"\x0fGenerateInvoice\x121.chora.services.tenancy.v1.GenerateInvoiceRequest\x1a2.chora.services.tenancy.v1.GenerateInvoiceResponse\x12\x8a\x01\n" +
 	"\x15ListMembershipsByGCID\x127.chora.services.tenancy.v1.ListMembershipsByGCIDRequest\x1a8.chora.services.tenancy.v1.ListMembershipsByGCIDResponse\x12{\n" +
 	"\x10UpsertMembership\x122.chora.services.tenancy.v1.UpsertMembershipRequest\x1a3.chora.services.tenancy.v1.UpsertMembershipResponse\x12{\n" +
-	"\x10RemoveMembership\x122.chora.services.tenancy.v1.RemoveMembershipRequest\x1a3.chora.services.tenancy.v1.RemoveMembershipResponseB^Z\\github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/tenancy/v1;tenancyv1b\x06proto3"
+	"\x10RemoveMembership\x122.chora.services.tenancy.v1.RemoveMembershipRequest\x1a3.chora.services.tenancy.v1.RemoveMembershipResponseB^Z\\github.com/apollo-chora/chora-contracts/gen/go/chora/services/tenancy/v1;tenancyv1b\x06proto3"
 
 var (
 	file_services_tenancy_v1_tenancy_proto_rawDescOnce sync.Once
