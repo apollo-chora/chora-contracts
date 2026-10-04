@@ -5,22 +5,24 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   publish:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
         with:
           version: "latest"
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - run: uv build
-      - name: Publish
-        run: uv publish --index-url https://ghcr.io/5007-Capstone/
+      - name: Publish to GitHub Packages
+        run: uv publish --publish-url https://pypi.pkg.github.com/apollo-chora/
         env:
+          UV_PUBLISH_USERNAME: __token__
           UV_PUBLISH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
