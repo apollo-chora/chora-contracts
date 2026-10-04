@@ -147,7 +147,7 @@ paths:
         Stripe API egress requirement: the chora-tenancy pod must have
         outbound HTTPS to `api.stripe.com`. The Stripe API key is loaded
         from Secret Manager (`STRIPE_SECRET_KEY` env via the
-        `chora-go-common/secrets` helper).
+        `chora-common/secrets` helper).
       tags: [CompanionEggs]
       requestBody:
         required: true
