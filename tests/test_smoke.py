@@ -1,5 +1,6 @@
-from chora_contracts import __version__
 from chora_contracts_gen.services import agent_executor_pb2, agent_executor_pb2_grpc
+
+from chora_contracts import __version__
 
 
 def test_package_metadata_and_generated_imports() -> None:
