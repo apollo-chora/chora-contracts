@@ -16,7 +16,7 @@ syntax = "proto3";
 
 package chora.tenancy.v1;
 
-option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/tenancy/v1;tenancyv1";
+option go_package = "github.com/apollo-chora/chora-contracts/gen/go/chora/tenancy/v1;tenancyv1";
 
 import "google/protobuf/timestamp.proto";
 import "chora/common/v1/envelope.proto";

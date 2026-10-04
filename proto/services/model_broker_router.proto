@@ -33,7 +33,7 @@ syntax = "proto3";
 
 package chora.services.model_broker_router.v1;
 
-option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/model_broker_router/v1;model_broker_routerv1";
+option go_package = "github.com/apollo-chora/chora-contracts/gen/go/chora/services/model_broker_router/v1;model_broker_routerv1";
 
 import "google/protobuf/timestamp.proto";
 

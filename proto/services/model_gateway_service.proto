@@ -57,7 +57,7 @@ syntax = "proto3";
 
 package chora.services.model_gateway.v1;
 
-option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/model_gateway/v1;model_gatewayv1";
+option go_package = "github.com/apollo-chora/chora-contracts/gen/go/chora/services/model_gateway/v1;model_gatewayv1";
 
 import "google/protobuf/struct.proto";
 import "google/protobuf/timestamp.proto";

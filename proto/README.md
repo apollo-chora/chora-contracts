@@ -56,7 +56,7 @@ message AtomPublished {
 
 - **Files**: `{aggregate}.proto` per aggregate root (e.g., `atom.proto`, `session.proto`).
 - **Packages**: `chora.{domain}.v1` (e.g., `chora.creation.v1`).
-- **Go package**: `github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/{domain}/v1;{domain}v1`.
+- **Go package**: `github.com/apollo-chora/chora-contracts/gen/go/chora/{domain}/v1;{domain}v1`.
 - **Messages**: `PascalCase`, past-tense for events (`AtomPublished`, not `PublishAtom`).
 - **Enums**: `SCREAMING_SNAKE_CASE` values; first value MUST be `{ENUM}_UNSPECIFIED = 0`.
 - **Field numbers**: 1 reserved for envelope; 2-15 for hot fields (1-byte tag); 16+ for cold fields.

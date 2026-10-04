@@ -50,7 +50,7 @@ syntax = "proto3";
 
 package chora.services.agent_executor.v1;
 
-option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/agent_executor/v1;agent_executorv1";
+option go_package = "github.com/apollo-chora/chora-contracts/gen/go/chora/services/agent_executor/v1;agent_executorv1";
 
 import "google/protobuf/timestamp.proto";
 

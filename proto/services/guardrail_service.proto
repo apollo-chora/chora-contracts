@@ -30,7 +30,7 @@ syntax = "proto3";
 
 package chora.services.guardrail_service.v1;
 
-option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/guardrail_service/v1;guardrail_servicev1";
+option go_package = "github.com/apollo-chora/chora-contracts/gen/go/chora/services/guardrail_service/v1;guardrail_servicev1";
 
 import "google/protobuf/timestamp.proto";
 

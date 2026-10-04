@@ -22,7 +22,7 @@ syntax = "proto3";
 
 package chora.sharing.v1;
 
-option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/sharing/v1;sharingv1";
+option go_package = "github.com/apollo-chora/chora-contracts/gen/go/chora/sharing/v1;sharingv1";
 
 import "google/protobuf/timestamp.proto";
 import "chora/common/v1/envelope.proto";

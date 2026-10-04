@@ -20,7 +20,7 @@ syntax = "proto3";
 
 package chora.notifications.v1;
 
-option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/notifications/v1;notificationsv1";
+option go_package = "github.com/apollo-chora/chora-contracts/gen/go/chora/notifications/v1;notificationsv1";
 
 import "google/protobuf/timestamp.proto";
 import "chora/common/v1/envelope.proto";

@@ -35,7 +35,7 @@ syntax = "proto3";
 
 package chora.services.langgraph_orchestrator.v1;
 
-option go_package = "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/langgraph_orchestrator/v1;langgraph_orchestratorv1";
+option go_package = "github.com/apollo-chora/chora-contracts/gen/go/chora/services/langgraph_orchestrator/v1;langgraph_orchestratorv1";
 
 import "google/protobuf/timestamp.proto";
 
