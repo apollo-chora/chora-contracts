@@ -26,14 +26,14 @@ from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__
 from chora_contracts_gen.chora.common.v1 import envelope_pb2 as chora_dot_common_dot_v1_dot_envelope__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n!events/governance/bias_test.proto\x12\x13\x63hora.governance.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1e\x63hora/common/v1/envelope.proto\"\xa1\x03\n\x11\x42iasTestCompleted\x12:\n\x08\x65nvelope\x18\x01 \x01(\x0b\x32\x1e.chora.common.v1.EventEnvelopeR\x08\x65nvelope\x12\x15\n\x06run_id\x18\x02 \x01(\tR\x05runId\x12\x19\n\x08\x61gent_id\x18\x03 \x01(\tR\x07\x61gentId\x12/\n\x13protected_attribute\x18\x04 \x01(\tR\x12protectedAttribute\x12\x1b\n\ttest_type\x18\x05 \x01(\tR\x08testType\x12\x14\n\x05score\x18\x06 \x01(\x01R\x05score\x12\x1c\n\tthreshold\x18\x07 \x01(\x01R\tthreshold\x12$\n\x0eraw_bias_score\x18\x08 \x01(\x01R\x0crawBiasScore\x12\x1f\n\x0bjudge_model\x18\t \x01(\tR\njudgeModel\x12\x16\n\x06reason\x18\n \x01(\tR\x06reason\x12=\n\x0c\x65valuated_at\x18\x0b \x01(\x0b\x32\x1a.google.protobuf.TimestampR\x0b\x65valuatedAtB[ZYgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/governance/v1;governancev1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n!events/governance/bias_test.proto\x12\x13\x63hora.governance.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1e\x63hora/common/v1/envelope.proto\"\xa1\x03\n\x11\x42iasTestCompleted\x12:\n\x08\x65nvelope\x18\x01 \x01(\x0b\x32\x1e.chora.common.v1.EventEnvelopeR\x08\x65nvelope\x12\x15\n\x06run_id\x18\x02 \x01(\tR\x05runId\x12\x19\n\x08\x61gent_id\x18\x03 \x01(\tR\x07\x61gentId\x12/\n\x13protected_attribute\x18\x04 \x01(\tR\x12protectedAttribute\x12\x1b\n\ttest_type\x18\x05 \x01(\tR\x08testType\x12\x14\n\x05score\x18\x06 \x01(\x01R\x05score\x12\x1c\n\tthreshold\x18\x07 \x01(\x01R\tthreshold\x12$\n\x0eraw_bias_score\x18\x08 \x01(\x01R\x0crawBiasScore\x12\x1f\n\x0bjudge_model\x18\t \x01(\tR\njudgeModel\x12\x16\n\x06reason\x18\n \x01(\tR\x06reason\x12=\n\x0c\x65valuated_at\x18\x0b \x01(\x0b\x32\x1a.google.protobuf.TimestampR\x0b\x65valuatedAtBQZOgithub.com/apollo-chora/chora-contracts/gen/go/chora/governance/v1;governancev1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'events.governance.bias_test_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
-  _globals['DESCRIPTOR']._serialized_options = b'ZYgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/governance/v1;governancev1'
+  _globals['DESCRIPTOR']._serialized_options = b'ZOgithub.com/apollo-chora/chora-contracts/gen/go/chora/governance/v1;governancev1'
   _globals['_BIASTESTCOMPLETED']._serialized_start=124
   _globals['_BIASTESTCOMPLETED']._serialized_end=541
 # @@protoc_insertion_point(module_scope)

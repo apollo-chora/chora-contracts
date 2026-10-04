@@ -26,14 +26,14 @@ from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__
 from chora_contracts_gen.chora.common.v1 import envelope_pb2 as chora_dot_common_dot_v1_dot_envelope__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n(events/tenancy/tenant_bootstrapped.proto\x12\x10\x63hora.tenancy.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1e\x63hora/common/v1/envelope.proto\"\xc3\x02\n\x12TenantBootstrapped\x12:\n\x08\x65nvelope\x18\x01 \x01(\x0b\x32\x1e.chora.common.v1.EventEnvelopeR\x08\x65nvelope\x12\x1b\n\ttenant_id\x18\x02 \x01(\tR\x08tenantId\x12\x1d\n\nowner_gcid\x18\x03 \x01(\tR\townerGcid\x12!\n\x0c\x64isplay_name\x18\x04 \x01(\tR\x0b\x64isplayName\x12&\n\x0fowner_member_id\x18\x05 \x01(\tR\rownerMemberId\x12%\n\x0e\x65ntitlement_id\x18\x06 \x01(\tR\rentitlementId\x12\x43\n\x0f\x62ootstrapped_at\x18\x07 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\x0e\x62ootstrappedAtBUZSgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/tenancy/v1;tenancyv1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n(events/tenancy/tenant_bootstrapped.proto\x12\x10\x63hora.tenancy.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1e\x63hora/common/v1/envelope.proto\"\xc3\x02\n\x12TenantBootstrapped\x12:\n\x08\x65nvelope\x18\x01 \x01(\x0b\x32\x1e.chora.common.v1.EventEnvelopeR\x08\x65nvelope\x12\x1b\n\ttenant_id\x18\x02 \x01(\tR\x08tenantId\x12\x1d\n\nowner_gcid\x18\x03 \x01(\tR\townerGcid\x12!\n\x0c\x64isplay_name\x18\x04 \x01(\tR\x0b\x64isplayName\x12&\n\x0fowner_member_id\x18\x05 \x01(\tR\rownerMemberId\x12%\n\x0e\x65ntitlement_id\x18\x06 \x01(\tR\rentitlementId\x12\x43\n\x0f\x62ootstrapped_at\x18\x07 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\x0e\x62ootstrappedAtBKZIgithub.com/apollo-chora/chora-contracts/gen/go/chora/tenancy/v1;tenancyv1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'events.tenancy.tenant_bootstrapped_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
-  _globals['DESCRIPTOR']._serialized_options = b'ZSgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/tenancy/v1;tenancyv1'
+  _globals['DESCRIPTOR']._serialized_options = b'ZIgithub.com/apollo-chora/chora-contracts/gen/go/chora/tenancy/v1;tenancyv1'
   _globals['_TENANTBOOTSTRAPPED']._serialized_start=128
   _globals['_TENANTBOOTSTRAPPED']._serialized_end=451
 # @@protoc_insertion_point(module_scope)

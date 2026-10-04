@@ -26,14 +26,14 @@ from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__
 from chora_contracts_gen.chora.common.v1 import envelope_pb2 as chora_dot_common_dot_v1_dot_envelope__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n!events/observability/metric.proto\x12\x16\x63hora.observability.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1e\x63hora/common/v1/envelope.proto\"\x8e\x03\n\x11KpiMetricRecorded\x12:\n\x08\x65nvelope\x18\x01 \x01(\x0b\x32\x1e.chora.common.v1.EventEnvelopeR\x08\x65nvelope\x12\x1f\n\x0bmetric_name\x18\x02 \x01(\tR\nmetricName\x12\x14\n\x05value\x18\x03 \x01(\x01R\x05value\x12\x1b\n\ttenant_id\x18\x04 \x01(\tR\x08tenantId\x12Y\n\ndimensions\x18\x05 \x03(\x0b\x32\x39.chora.observability.v1.KpiMetricRecorded.DimensionsEntryR\ndimensions\x12\x12\n\x04unit\x18\x06 \x01(\tR\x04unit\x12;\n\x0brecorded_at\x18\x07 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\nrecordedAt\x1a=\n\x0f\x44imensionsEntry\x12\x10\n\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n\x05value\x18\x02 \x01(\tR\x05value:\x02\x38\x01\x42\x61Z_github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/observability/v1;observabilityv1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n!events/observability/metric.proto\x12\x16\x63hora.observability.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1e\x63hora/common/v1/envelope.proto\"\x8e\x03\n\x11KpiMetricRecorded\x12:\n\x08\x65nvelope\x18\x01 \x01(\x0b\x32\x1e.chora.common.v1.EventEnvelopeR\x08\x65nvelope\x12\x1f\n\x0bmetric_name\x18\x02 \x01(\tR\nmetricName\x12\x14\n\x05value\x18\x03 \x01(\x01R\x05value\x12\x1b\n\ttenant_id\x18\x04 \x01(\tR\x08tenantId\x12Y\n\ndimensions\x18\x05 \x03(\x0b\x32\x39.chora.observability.v1.KpiMetricRecorded.DimensionsEntryR\ndimensions\x12\x12\n\x04unit\x18\x06 \x01(\tR\x04unit\x12;\n\x0brecorded_at\x18\x07 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\nrecordedAt\x1a=\n\x0f\x44imensionsEntry\x12\x10\n\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n\x05value\x18\x02 \x01(\tR\x05value:\x02\x38\x01\x42WZUgithub.com/apollo-chora/chora-contracts/gen/go/chora/observability/v1;observabilityv1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'events.observability.metric_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
-  _globals['DESCRIPTOR']._serialized_options = b'Z_github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/observability/v1;observabilityv1'
+  _globals['DESCRIPTOR']._serialized_options = b'ZUgithub.com/apollo-chora/chora-contracts/gen/go/chora/observability/v1;observabilityv1'
   _globals['_KPIMETRICRECORDED_DIMENSIONSENTRY']._loaded_options = None
   _globals['_KPIMETRICRECORDED_DIMENSIONSENTRY']._serialized_options = b'8\001'
   _globals['_KPIMETRICRECORDED']._serialized_start=127

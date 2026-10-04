@@ -25,14 +25,14 @@ _sym_db = _symbol_database.Default()
 from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n/services/tenancy/v1/companion_egg_service.proto\x12\x19\x63hora.services.tenancy.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"M\n\x15PreviewEggOddsRequest\x12\x1b\n\ttenant_id\x18\x01 \x01(\tR\x08tenantId\x12\x17\n\x07\x65gg_sku\x18\x02 \x01(\tR\x06\x65ggSku\"\xe2\x01\n\x16PreviewEggOddsResponse\x12\x17\n\x07\x65gg_sku\x18\x01 \x01(\tR\x06\x65ggSku\x12\x38\n\x04odds\x18\x02 \x03(\x0b\x32$.chora.services.tenancy.v1.BreedOddsR\x04odds\x12!\n\x0ctotal_weight\x18\x03 \x01(\x01R\x0btotalWeight\x12R\n\x17\x64istribution_updated_at\x18\x04 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\x15\x64istributionUpdatedAt\"_\n\tBreedOdds\x12\x18\n\x07species\x18\x01 \x01(\tR\x07species\x12 \n\x0bprobability\x18\x02 \x01(\x01R\x0bprobability\x12\x16\n\x06rarity\x18\x03 \x01(\tR\x06rarity2\x85\x01\n\x0c\x43ompanionEgg\x12u\n\x0ePreviewEggOdds\x12\x30.chora.services.tenancy.v1.PreviewEggOddsRequest\x1a\x31.chora.services.tenancy.v1.PreviewEggOddsResponseB^Z\\github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/tenancy/v1;tenancyv1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n/services/tenancy/v1/companion_egg_service.proto\x12\x19\x63hora.services.tenancy.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"M\n\x15PreviewEggOddsRequest\x12\x1b\n\ttenant_id\x18\x01 \x01(\tR\x08tenantId\x12\x17\n\x07\x65gg_sku\x18\x02 \x01(\tR\x06\x65ggSku\"\xe2\x01\n\x16PreviewEggOddsResponse\x12\x17\n\x07\x65gg_sku\x18\x01 \x01(\tR\x06\x65ggSku\x12\x38\n\x04odds\x18\x02 \x03(\x0b\x32$.chora.services.tenancy.v1.BreedOddsR\x04odds\x12!\n\x0ctotal_weight\x18\x03 \x01(\x01R\x0btotalWeight\x12R\n\x17\x64istribution_updated_at\x18\x04 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\x15\x64istributionUpdatedAt\"_\n\tBreedOdds\x12\x18\n\x07species\x18\x01 \x01(\tR\x07species\x12 \n\x0bprobability\x18\x02 \x01(\x01R\x0bprobability\x12\x16\n\x06rarity\x18\x03 \x01(\tR\x06rarity2\x85\x01\n\x0c\x43ompanionEgg\x12u\n\x0ePreviewEggOdds\x12\x30.chora.services.tenancy.v1.PreviewEggOddsRequest\x1a\x31.chora.services.tenancy.v1.PreviewEggOddsResponseBTZRgithub.com/apollo-chora/chora-contracts/gen/go/chora/services/tenancy/v1;tenancyv1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'services.tenancy.v1.companion_egg_service_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
-  _globals['DESCRIPTOR']._serialized_options = b'Z\\github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/tenancy/v1;tenancyv1'
+  _globals['DESCRIPTOR']._serialized_options = b'ZRgithub.com/apollo-chora/chora-contracts/gen/go/chora/services/tenancy/v1;tenancyv1'
   _globals['_PREVIEWEGGODDSREQUEST']._serialized_start=111
   _globals['_PREVIEWEGGODDSREQUEST']._serialized_end=188
   _globals['_PREVIEWEGGODDSRESPONSE']._serialized_start=191

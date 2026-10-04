@@ -26,14 +26,14 @@ from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__
 from chora_contracts_gen.chora.common.v1 import envelope_pb2 as chora_dot_common_dot_v1_dot_envelope__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n events/governance/evidence.proto\x12\x13\x63hora.governance.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1e\x63hora/common/v1/envelope.proto\"\xb6\x03\n\x10\x45videnceRecorded\x12:\n\x08\x65nvelope\x18\x01 \x01(\x0b\x32\x1e.chora.common.v1.EventEnvelopeR\x08\x65nvelope\x12#\n\revidence_type\x18\x02 \x01(\tR\x0c\x65videnceType\x12*\n\x11source_event_type\x18\x03 \x01(\tR\x0fsourceEventType\x12;\n\x0brecorded_at\x18\x04 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\nrecordedAt\x12)\n\x10policy_reference\x18\x05 \x01(\tR\x0fpolicyReference\x12h\n\x11\x61\x64\x64itional_fields\x18\x06 \x03(\x0b\x32;.chora.governance.v1.EvidenceRecorded.AdditionalFieldsEntryR\x10\x61\x64\x64itionalFields\x1a\x43\n\x15\x41\x64\x64itionalFieldsEntry\x12\x10\n\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n\x05value\x18\x02 \x01(\tR\x05value:\x02\x38\x01\x42[ZYgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/governance/v1;governancev1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n events/governance/evidence.proto\x12\x13\x63hora.governance.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1e\x63hora/common/v1/envelope.proto\"\xb6\x03\n\x10\x45videnceRecorded\x12:\n\x08\x65nvelope\x18\x01 \x01(\x0b\x32\x1e.chora.common.v1.EventEnvelopeR\x08\x65nvelope\x12#\n\revidence_type\x18\x02 \x01(\tR\x0c\x65videnceType\x12*\n\x11source_event_type\x18\x03 \x01(\tR\x0fsourceEventType\x12;\n\x0brecorded_at\x18\x04 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\nrecordedAt\x12)\n\x10policy_reference\x18\x05 \x01(\tR\x0fpolicyReference\x12h\n\x11\x61\x64\x64itional_fields\x18\x06 \x03(\x0b\x32;.chora.governance.v1.EvidenceRecorded.AdditionalFieldsEntryR\x10\x61\x64\x64itionalFields\x1a\x43\n\x15\x41\x64\x64itionalFieldsEntry\x12\x10\n\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n\x05value\x18\x02 \x01(\tR\x05value:\x02\x38\x01\x42QZOgithub.com/apollo-chora/chora-contracts/gen/go/chora/governance/v1;governancev1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'events.governance.evidence_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
-  _globals['DESCRIPTOR']._serialized_options = b'ZYgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/governance/v1;governancev1'
+  _globals['DESCRIPTOR']._serialized_options = b'ZOgithub.com/apollo-chora/chora-contracts/gen/go/chora/governance/v1;governancev1'
   _globals['_EVIDENCERECORDED_ADDITIONALFIELDSENTRY']._loaded_options = None
   _globals['_EVIDENCERECORDED_ADDITIONALFIELDSENTRY']._serialized_options = b'8\001'
   _globals['_EVIDENCERECORDED']._serialized_start=123

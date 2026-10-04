@@ -26,14 +26,14 @@ from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__
 from chora_contracts_gen.chora.common.v1 import envelope_pb2 as chora_dot_common_dot_v1_dot_envelope__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n$events/consumption/preferences.proto\x12\x14\x63hora.consumption.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1e\x63hora/common/v1/envelope.proto\"9\n\x0fPreferenceEntry\x12\x10\n\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n\x05value\x18\x02 \x01(\tR\x05value\"\xf9\x01\n\x12PreferencesUpdated\x12:\n\x08\x65nvelope\x18\x01 \x01(\x0b\x32\x1e.chora.common.v1.EventEnvelopeR\x08\x65nvelope\x12!\n\x0clearner_gcid\x18\x02 \x01(\tR\x0blearnerGcid\x12G\n\x0bpreferences\x18\x03 \x03(\x0b\x32%.chora.consumption.v1.PreferenceEntryR\x0bpreferences\x12;\n\x0boccurred_at\x18\x04 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\noccurredAtB]Z[github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/consumption/v1;consumptionv1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n$events/consumption/preferences.proto\x12\x14\x63hora.consumption.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1e\x63hora/common/v1/envelope.proto\"9\n\x0fPreferenceEntry\x12\x10\n\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n\x05value\x18\x02 \x01(\tR\x05value\"\xf9\x01\n\x12PreferencesUpdated\x12:\n\x08\x65nvelope\x18\x01 \x01(\x0b\x32\x1e.chora.common.v1.EventEnvelopeR\x08\x65nvelope\x12!\n\x0clearner_gcid\x18\x02 \x01(\tR\x0blearnerGcid\x12G\n\x0bpreferences\x18\x03 \x03(\x0b\x32%.chora.consumption.v1.PreferenceEntryR\x0bpreferences\x12;\n\x0boccurred_at\x18\x04 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\noccurredAtBSZQgithub.com/apollo-chora/chora-contracts/gen/go/chora/consumption/v1;consumptionv1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'events.consumption.preferences_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
-  _globals['DESCRIPTOR']._serialized_options = b'Z[github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/consumption/v1;consumptionv1'
+  _globals['DESCRIPTOR']._serialized_options = b'ZQgithub.com/apollo-chora/chora-contracts/gen/go/chora/consumption/v1;consumptionv1'
   _globals['_PREFERENCEENTRY']._serialized_start=127
   _globals['_PREFERENCEENTRY']._serialized_end=184
   _globals['_PREFERENCESUPDATED']._serialized_start=187

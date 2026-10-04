@@ -24,14 +24,14 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n+services/identity/v1/exp_rule_service.proto\x12\x1a\x63hora.services.identity.v1\"\xff\x01\n\x15ResolveExpRuleRequest\x12\x1f\n\x0bsource_code\x18\x01 \x01(\tR\nsourceCode\x12\x1b\n\ttenant_id\x18\x02 \x01(\tR\x08tenantId\x12\x12\n\x04plan\x18\x03 \x01(\tR\x04plan\x12X\n\x07\x63ontext\x18\x04 \x03(\x0b\x32>.chora.services.identity.v1.ResolveExpRuleRequest.ContextEntryR\x07\x63ontext\x1a:\n\x0c\x43ontextEntry\x12\x10\n\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n\x05value\x18\x02 \x01(\tR\x05value:\x02\x38\x01\"\xdc\x01\n\x16ResolveExpRuleResponse\x12\x1f\n\x0bsource_code\x18\x01 \x01(\tR\nsourceCode\x12\x1b\n\texp_value\x18\x02 \x01(\x03R\x08\x65xpValue\x12\x1b\n\tdaily_cap\x18\x03 \x01(\x05R\x08\x64\x61ilyCap\x12 \n\x0b\x65ligibility\x18\x04 \x01(\tR\x0b\x65ligibility\x12\x18\n\x07\x65nabled\x18\x05 \x01(\x08R\x07\x65nabled\x12+\n\x11resolution_source\x18\x06 \x01(\tR\x10resolutionSource2\x89\x01\n\x0e\x45xpRuleService\x12w\n\x0eResolveExpRule\x12\x31.chora.services.identity.v1.ResolveExpRuleRequest\x1a\x32.chora.services.identity.v1.ResolveExpRuleResponseB`Z^github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/identity/v1;identityv1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n+services/identity/v1/exp_rule_service.proto\x12\x1a\x63hora.services.identity.v1\"\xff\x01\n\x15ResolveExpRuleRequest\x12\x1f\n\x0bsource_code\x18\x01 \x01(\tR\nsourceCode\x12\x1b\n\ttenant_id\x18\x02 \x01(\tR\x08tenantId\x12\x12\n\x04plan\x18\x03 \x01(\tR\x04plan\x12X\n\x07\x63ontext\x18\x04 \x03(\x0b\x32>.chora.services.identity.v1.ResolveExpRuleRequest.ContextEntryR\x07\x63ontext\x1a:\n\x0c\x43ontextEntry\x12\x10\n\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n\x05value\x18\x02 \x01(\tR\x05value:\x02\x38\x01\"\xdc\x01\n\x16ResolveExpRuleResponse\x12\x1f\n\x0bsource_code\x18\x01 \x01(\tR\nsourceCode\x12\x1b\n\texp_value\x18\x02 \x01(\x03R\x08\x65xpValue\x12\x1b\n\tdaily_cap\x18\x03 \x01(\x05R\x08\x64\x61ilyCap\x12 \n\x0b\x65ligibility\x18\x04 \x01(\tR\x0b\x65ligibility\x12\x18\n\x07\x65nabled\x18\x05 \x01(\x08R\x07\x65nabled\x12+\n\x11resolution_source\x18\x06 \x01(\tR\x10resolutionSource2\x89\x01\n\x0e\x45xpRuleService\x12w\n\x0eResolveExpRule\x12\x31.chora.services.identity.v1.ResolveExpRuleRequest\x1a\x32.chora.services.identity.v1.ResolveExpRuleResponseBVZTgithub.com/apollo-chora/chora-contracts/gen/go/chora/services/identity/v1;identityv1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'services.identity.v1.exp_rule_service_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
-  _globals['DESCRIPTOR']._serialized_options = b'Z^github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/identity/v1;identityv1'
+  _globals['DESCRIPTOR']._serialized_options = b'ZTgithub.com/apollo-chora/chora-contracts/gen/go/chora/services/identity/v1;identityv1'
   _globals['_RESOLVEEXPRULEREQUEST_CONTEXTENTRY']._loaded_options = None
   _globals['_RESOLVEEXPRULEREQUEST_CONTEXTENTRY']._serialized_options = b'8\001'
   _globals['_RESOLVEEXPRULEREQUEST']._serialized_start=76

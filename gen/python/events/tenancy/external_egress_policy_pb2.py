@@ -26,14 +26,14 @@ from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__
 from chora_contracts_gen.chora.common.v1 import envelope_pb2 as chora_dot_common_dot_v1_dot_envelope__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n+events/tenancy/external_egress_policy.proto\x12\x10\x63hora.tenancy.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1e\x63hora/common/v1/envelope.proto\"\xbf\x03\n\x1b\x45xternalEgressPolicyUpdated\x12:\n\x08\x65nvelope\x18\x01 \x01(\x0b\x32\x1e.chora.common.v1.EventEnvelopeR\x08\x65nvelope\x12\x1b\n\ttenant_id\x18\x02 \x01(\tR\x08tenantId\x12%\n\x0e\x65gress_enabled\x18\x03 \x01(\x08R\regressEnabled\x12,\n\x12\x64\x61ily_call_ceiling\x18\x04 \x01(\x05R\x10\x64\x61ilyCallCeiling\x12\x18\n\x07version\x18\x05 \x01(\x03R\x07version\x12&\n\x0fupdated_by_gcid\x18\x06 \x01(\tR\rupdatedByGcid\x12\x36\n\x17previous_egress_enabled\x18\x07 \x01(\x08R\x15previousEgressEnabled\x12=\n\x1bprevious_daily_call_ceiling\x18\x08 \x01(\x05R\x18previousDailyCallCeiling\x12\x39\n\nupdated_at\x18\t \x01(\x0b\x32\x1a.google.protobuf.TimestampR\tupdatedAtBUZSgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/tenancy/v1;tenancyv1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n+events/tenancy/external_egress_policy.proto\x12\x10\x63hora.tenancy.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1e\x63hora/common/v1/envelope.proto\"\xbf\x03\n\x1b\x45xternalEgressPolicyUpdated\x12:\n\x08\x65nvelope\x18\x01 \x01(\x0b\x32\x1e.chora.common.v1.EventEnvelopeR\x08\x65nvelope\x12\x1b\n\ttenant_id\x18\x02 \x01(\tR\x08tenantId\x12%\n\x0e\x65gress_enabled\x18\x03 \x01(\x08R\regressEnabled\x12,\n\x12\x64\x61ily_call_ceiling\x18\x04 \x01(\x05R\x10\x64\x61ilyCallCeiling\x12\x18\n\x07version\x18\x05 \x01(\x03R\x07version\x12&\n\x0fupdated_by_gcid\x18\x06 \x01(\tR\rupdatedByGcid\x12\x36\n\x17previous_egress_enabled\x18\x07 \x01(\x08R\x15previousEgressEnabled\x12=\n\x1bprevious_daily_call_ceiling\x18\x08 \x01(\x05R\x18previousDailyCallCeiling\x12\x39\n\nupdated_at\x18\t \x01(\x0b\x32\x1a.google.protobuf.TimestampR\tupdatedAtBKZIgithub.com/apollo-chora/chora-contracts/gen/go/chora/tenancy/v1;tenancyv1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'events.tenancy.external_egress_policy_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
-  _globals['DESCRIPTOR']._serialized_options = b'ZSgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/tenancy/v1;tenancyv1'
+  _globals['DESCRIPTOR']._serialized_options = b'ZIgithub.com/apollo-chora/chora-contracts/gen/go/chora/tenancy/v1;tenancyv1'
   _globals['_EXTERNALEGRESSPOLICYUPDATED']._serialized_start=131
   _globals['_EXTERNALEGRESSPOLICYUPDATED']._serialized_end=578
 # @@protoc_insertion_point(module_scope)

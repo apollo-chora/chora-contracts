@@ -26,14 +26,14 @@ from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__
 from chora_contracts_gen.chora.common.v1 import envelope_pb2 as chora_dot_common_dot_v1_dot_envelope__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n!events/delivery/exam_result.proto\x12\x11\x63hora.delivery.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1e\x63hora/common/v1/envelope.proto\"\xba\x03\n\x12\x45xamResultReleased\x12:\n\x08\x65nvelope\x18\x01 \x01(\x0b\x32\x1e.chora.common.v1.EventEnvelopeR\x08\x65nvelope\x12\x1b\n\tresult_id\x18\x02 \x01(\tR\x08resultId\x12\x17\n\x07\x65xam_id\x18\x03 \x01(\tR\x06\x65xamId\x12 \n\x0c\x65xam_form_id\x18\x04 \x01(\tR\nexamFormId\x12#\n\rcandidate_ref\x18\x05 \x01(\tR\x0c\x63\x61ndidateRef\x12\x1b\n\ttenant_id\x18\x06 \x01(\tR\x08tenantId\x12>\n\x07outcome\x18\x07 \x01(\x0e\x32$.chora.delivery.v1.ExamResultOutcomeR\x07outcome\x12\x1b\n\traw_score\x18\x08 \x01(\x05R\x08rawScore\x12\x1b\n\tmax_score\x18\t \x01(\x05R\x08maxScore\x12\x1b\n\tcut_score\x18\n \x01(\x05R\x08\x63utScore\x12\x37\n\tscored_at\x18\x0b \x01(\x0b\x32\x1a.google.protobuf.TimestampR\x08scoredAt*t\n\x11\x45xamResultOutcome\x12#\n\x1f\x45XAM_RESULT_OUTCOME_UNSPECIFIED\x10\x00\x12\x1c\n\x18\x45XAM_RESULT_OUTCOME_PASS\x10\x01\x12\x1c\n\x18\x45XAM_RESULT_OUTCOME_FAIL\x10\x02\x42WZUgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/delivery/v1;deliveryv1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n!events/delivery/exam_result.proto\x12\x11\x63hora.delivery.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1e\x63hora/common/v1/envelope.proto\"\xba\x03\n\x12\x45xamResultReleased\x12:\n\x08\x65nvelope\x18\x01 \x01(\x0b\x32\x1e.chora.common.v1.EventEnvelopeR\x08\x65nvelope\x12\x1b\n\tresult_id\x18\x02 \x01(\tR\x08resultId\x12\x17\n\x07\x65xam_id\x18\x03 \x01(\tR\x06\x65xamId\x12 \n\x0c\x65xam_form_id\x18\x04 \x01(\tR\nexamFormId\x12#\n\rcandidate_ref\x18\x05 \x01(\tR\x0c\x63\x61ndidateRef\x12\x1b\n\ttenant_id\x18\x06 \x01(\tR\x08tenantId\x12>\n\x07outcome\x18\x07 \x01(\x0e\x32$.chora.delivery.v1.ExamResultOutcomeR\x07outcome\x12\x1b\n\traw_score\x18\x08 \x01(\x05R\x08rawScore\x12\x1b\n\tmax_score\x18\t \x01(\x05R\x08maxScore\x12\x1b\n\tcut_score\x18\n \x01(\x05R\x08\x63utScore\x12\x37\n\tscored_at\x18\x0b \x01(\x0b\x32\x1a.google.protobuf.TimestampR\x08scoredAt*t\n\x11\x45xamResultOutcome\x12#\n\x1f\x45XAM_RESULT_OUTCOME_UNSPECIFIED\x10\x00\x12\x1c\n\x18\x45XAM_RESULT_OUTCOME_PASS\x10\x01\x12\x1c\n\x18\x45XAM_RESULT_OUTCOME_FAIL\x10\x02\x42MZKgithub.com/apollo-chora/chora-contracts/gen/go/chora/delivery/v1;deliveryv1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'events.delivery.exam_result_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
-  _globals['DESCRIPTOR']._serialized_options = b'ZUgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/delivery/v1;deliveryv1'
+  _globals['DESCRIPTOR']._serialized_options = b'ZKgithub.com/apollo-chora/chora-contracts/gen/go/chora/delivery/v1;deliveryv1'
   _globals['_EXAMRESULTOUTCOME']._serialized_start=566
   _globals['_EXAMRESULTOUTCOME']._serialized_end=682
   _globals['_EXAMRESULTRELEASED']._serialized_start=122
