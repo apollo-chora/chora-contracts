@@ -27,7 +27,7 @@
 // Standalone module (mirrors internal/protoflatten) so it does not pollute
 // chora-contracts/gen/go, which is the published codegen module path.
 // Run with GOWORK=off.
-module github.com/locoroco-git/Chora-LMS/chora-contracts/internal/schemaguard
+module github.com/apollo-chora/chora-contracts/internal/schemaguard
 
 go 1.26.1
 

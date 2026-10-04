@@ -7,7 +7,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/descriptorpb"
 
-	"github.com/locoroco-git/Chora-LMS/chora-contracts/internal/schemaguard"
+	"github.com/apollo-chora/chora-contracts/internal/schemaguard"
 )
 
 // A committed Pub/Sub schema, in the exact shape protoflatten emits: ONE

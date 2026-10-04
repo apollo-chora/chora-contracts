@@ -34,7 +34,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/descriptorpb"
 
-	"github.com/locoroco-git/Chora-LMS/chora-contracts/internal/schemaguard"
+	"github.com/apollo-chora/chora-contracts/internal/schemaguard"
 )
 
 // snapshotEntry is one committed schema, frozen for hermetic CI.

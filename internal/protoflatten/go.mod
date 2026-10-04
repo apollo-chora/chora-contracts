@@ -18,7 +18,7 @@
 // Standalone module so it does not pollute the chora-contracts/gen/go go.mod
 // (which is the published codegen module path).
 
-module github.com/locoroco-git/Chora-LMS/chora-contracts/internal/protoflatten
+module github.com/apollo-chora/chora-contracts/internal/protoflatten
 
 go 1.26.1
 
