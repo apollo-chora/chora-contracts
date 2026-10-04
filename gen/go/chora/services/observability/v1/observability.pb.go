@@ -2089,7 +2089,7 @@ const file_services_observability_v1_observability_proto_rawDesc = "" +
 	"\x10GetAgentDecision\x128.chora.services.observability.v1.GetAgentDecisionRequest\x1a9.chora.services.observability.v1.GetAgentDecisionResponse\x12\x81\x01\n" +
 	"\x0eGetAuditEvents\x126.chora.services.observability.v1.GetAuditEventsRequest\x1a7.chora.services.observability.v1.GetAuditEventsResponse\x12\x90\x01\n" +
 	"\x13RegisterCorrelation\x12;.chora.services.observability.v1.RegisterCorrelationRequest\x1a<.chora.services.observability.v1.RegisterCorrelationResponse\x12\x81\x01\n" +
-	"\x0eGetCorrelation\x126.chora.services.observability.v1.GetCorrelationRequest\x1a7.chora.services.observability.v1.GetCorrelationResponseBjZhgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/observability/v1;observabilityv1b\x06proto3"
+	"\x0eGetCorrelation\x126.chora.services.observability.v1.GetCorrelationRequest\x1a7.chora.services.observability.v1.GetCorrelationResponseB`Z^github.com/apollo-chora/chora-contracts/gen/go/chora/services/observability/v1;observabilityv1b\x06proto3"
 
 var (
 	file_services_observability_v1_observability_proto_rawDescOnce sync.Once

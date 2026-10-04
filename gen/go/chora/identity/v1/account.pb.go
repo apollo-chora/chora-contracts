@@ -31,7 +31,7 @@
 package identityv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -714,7 +714,7 @@ const file_events_identity_account_proto_rawDesc = "" +
 	"\x17ACCOUNT_STATE_SUSPENDED\x10\x03\x12\x1f\n" +
 	"\x1bACCOUNT_STATE_PSEUDONYMIZED\x10\x04\x12\x1f\n" +
 	"\x1bACCOUNT_STATE_COLD_ARCHIVED\x10\x05\x12!\n" +
-	"\x1dACCOUNT_STATE_CRYPTO_SHREDDED\x10\x06BWZUgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/identity/v1;identityv1b\x06proto3"
+	"\x1dACCOUNT_STATE_CRYPTO_SHREDDED\x10\x06BMZKgithub.com/apollo-chora/chora-contracts/gen/go/chora/identity/v1;identityv1b\x06proto3"
 
 var (
 	file_events_identity_account_proto_rawDescOnce sync.Once

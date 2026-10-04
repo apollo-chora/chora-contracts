@@ -358,7 +358,7 @@ const file_services_model_broker_classifier_proto_rawDesc = "" +
 	"\x1dCLASSIFIER_KIND_AGENT_ROUTING\x10\x04\x12\x1d\n" +
 	"\x19CLASSIFIER_KIND_COST_TIER\x10\x052\x9d\x01\n" +
 	"\x15ModelBrokerClassifier\x12\x83\x01\n" +
-	"\bClassify\x12:.chora.services.model_broker_classifier.v1.ClassifyRequest\x1a;.chora.services.model_broker_classifier.v1.ClassifyResponseB~Z|github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/model_broker_classifier/v1;model_broker_classifierv1b\x06proto3"
+	"\bClassify\x12:.chora.services.model_broker_classifier.v1.ClassifyRequest\x1a;.chora.services.model_broker_classifier.v1.ClassifyResponseBtZrgithub.com/apollo-chora/chora-contracts/gen/go/chora/services/model_broker_classifier/v1;model_broker_classifierv1b\x06proto3"
 
 var (
 	file_services_model_broker_classifier_proto_rawDescOnce sync.Once

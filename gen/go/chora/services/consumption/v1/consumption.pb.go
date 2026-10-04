@@ -2121,7 +2121,7 @@ const file_services_consumption_v1_consumption_proto_rawDesc = "" +
 	"\x0fSummonCompanion\x125.chora.services.consumption.v1.SummonCompanionRequest\x1a6.chora.services.consumption.v1.SummonCompanionResponse\x12w\n" +
 	"\fGetDailyDose\x122.chora.services.consumption.v1.GetDailyDoseRequest\x1a3.chora.services.consumption.v1.GetDailyDoseResponse\x12\x89\x01\n" +
 	"\x12EnrollLearningPath\x128.chora.services.consumption.v1.EnrollLearningPathRequest\x1a9.chora.services.consumption.v1.EnrollLearningPathResponse\x12\x9b\x01\n" +
-	"\x18RecommendAtomsForLearner\x12>.chora.services.consumption.v1.RecommendAtomsForLearnerRequest\x1a?.chora.services.consumption.v1.RecommendAtomsForLearnerResponseBfZdgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/consumption/v1;consumptionv1b\x06proto3"
+	"\x18RecommendAtomsForLearner\x12>.chora.services.consumption.v1.RecommendAtomsForLearnerRequest\x1a?.chora.services.consumption.v1.RecommendAtomsForLearnerResponseB\\ZZgithub.com/apollo-chora/chora-contracts/gen/go/chora/services/consumption/v1;consumptionv1b\x06proto3"
 
 var (
 	file_services_consumption_v1_consumption_proto_rawDescOnce sync.Once

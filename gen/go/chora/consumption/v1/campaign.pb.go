@@ -48,7 +48,7 @@
 package consumptionv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -879,7 +879,7 @@ const file_events_consumption_campaign_proto_rawDesc = "" +
 	"\x19CAMPAIGN_RUNG_APPLICATION\x10\x03\x12\x1a\n" +
 	"\x16CAMPAIGN_RUNG_ANALYSIS\x10\x04\x12\x1c\n" +
 	"\x18CAMPAIGN_RUNG_EVALUATION\x10\x05\x12\x1b\n" +
-	"\x17CAMPAIGN_RUNG_SYNTHESIS\x10\x06B]Z[github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/consumption/v1;consumptionv1b\x06proto3"
+	"\x17CAMPAIGN_RUNG_SYNTHESIS\x10\x06BSZQgithub.com/apollo-chora/chora-contracts/gen/go/chora/consumption/v1;consumptionv1b\x06proto3"
 
 var (
 	file_events_consumption_campaign_proto_rawDescOnce sync.Once

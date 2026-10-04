@@ -1055,7 +1055,7 @@ const file_services_identity_v1_mana_service_proto_rawDesc = "" +
 	"\n" +
 	"CreditMana\x12-.chora.services.identity.v1.CreditManaRequest\x1a..chora.services.identity.v1.CreditManaResponse\x12k\n" +
 	"\n" +
-	"GetBalance\x12-.chora.services.identity.v1.GetBalanceRequest\x1a..chora.services.identity.v1.GetBalanceResponseB`Z^github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/identity/v1;identityv1b\x06proto3"
+	"GetBalance\x12-.chora.services.identity.v1.GetBalanceRequest\x1a..chora.services.identity.v1.GetBalanceResponseBVZTgithub.com/apollo-chora/chora-contracts/gen/go/chora/services/identity/v1;identityv1b\x06proto3"
 
 var (
 	file_services_identity_v1_mana_service_proto_rawDescOnce sync.Once

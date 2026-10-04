@@ -54,7 +54,7 @@
 package creationv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -923,7 +923,7 @@ const file_events_creation_question_proto_rawDesc = "" +
 	"%QUESTION_GENERATION_JOB_STATUS_FAILED\x10\x04\x12+\n" +
 	"'QUESTION_GENERATION_JOB_STATUS_ACCEPTED\x10\x05\x125\n" +
 	"1QUESTION_GENERATION_JOB_STATUS_PARTIALLY_ACCEPTED\x10\x06\x12,\n" +
-	"(QUESTION_GENERATION_JOB_STATUS_CANCELLED\x10\aBWZUgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/creation/v1;creationv1b\x06proto3"
+	"(QUESTION_GENERATION_JOB_STATUS_CANCELLED\x10\aBMZKgithub.com/apollo-chora/chora-contracts/gen/go/chora/creation/v1;creationv1b\x06proto3"
 
 var (
 	file_events_creation_question_proto_rawDescOnce sync.Once

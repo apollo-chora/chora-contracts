@@ -902,7 +902,7 @@ const file_services_guardrail_service_proto_rawDesc = "" +
 	"\x0eEvaluateOutput\x12:.chora.services.guardrail_service.v1.EvaluateOutputRequest\x1a5.chora.services.guardrail_service.v1.EvaluateResponse\x12}\n" +
 	"\n" +
 	"LoadConfig\x126.chora.services.guardrail_service.v1.LoadConfigRequest\x1a7.chora.services.guardrail_service.v1.LoadConfigResponse\x12\x86\x01\n" +
-	"\rScreenContent\x129.chora.services.guardrail_service.v1.ScreenContentRequest\x1a:.chora.services.guardrail_service.v1.ScreenContentResponseBrZpgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/guardrail_service/v1;guardrail_servicev1b\x06proto3"
+	"\rScreenContent\x129.chora.services.guardrail_service.v1.ScreenContentRequest\x1a:.chora.services.guardrail_service.v1.ScreenContentResponseBhZfgithub.com/apollo-chora/chora-contracts/gen/go/chora/services/guardrail_service/v1;guardrail_servicev1b\x06proto3"
 
 var (
 	file_services_guardrail_service_proto_rawDescOnce sync.Once

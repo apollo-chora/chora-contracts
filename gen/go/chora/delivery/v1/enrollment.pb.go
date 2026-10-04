@@ -32,7 +32,7 @@
 package deliveryv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -156,7 +156,7 @@ const file_events_delivery_enrollment_proto_rawDesc = "" +
 	"\flearner_gcid\x18\x03 \x01(\tR\vlearnerGcid\x12\x1b\n" +
 	"\tcourse_id\x18\x04 \x01(\tR\bcourseId\x12\x16\n" +
 	"\x06passed\x18\x05 \x01(\bR\x06passed\x12=\n" +
-	"\fcompleted_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\vcompletedAtBWZUgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/delivery/v1;deliveryv1b\x06proto3"
+	"\fcompleted_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\vcompletedAtBMZKgithub.com/apollo-chora/chora-contracts/gen/go/chora/delivery/v1;deliveryv1b\x06proto3"
 
 var (
 	file_events_delivery_enrollment_proto_rawDescOnce sync.Once

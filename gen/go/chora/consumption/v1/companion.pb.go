@@ -28,7 +28,7 @@
 package consumptionv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -3479,7 +3479,7 @@ const file_events_consumption_companion_proto_rawDesc = "" +
 	"\x18COMPANION_SPECIES_TURTLE\x10\x06\x12\x1a\n" +
 	"\x16COMPANION_SPECIES_WOLF\x10\a\x12\x1b\n" +
 	"\x17COMPANION_SPECIES_RAVEN\x10\b\x12\x1d\n" +
-	"\x19COMPANION_SPECIES_PENGUIN\x10\tB]Z[github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/consumption/v1;consumptionv1b\x06proto3"
+	"\x19COMPANION_SPECIES_PENGUIN\x10\tBSZQgithub.com/apollo-chora/chora-contracts/gen/go/chora/consumption/v1;consumptionv1b\x06proto3"
 
 var (
 	file_events_consumption_companion_proto_rawDescOnce sync.Once

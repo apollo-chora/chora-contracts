@@ -40,7 +40,7 @@
 package governancev1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -378,7 +378,7 @@ const file_events_governance_closure_proto_rawDesc = "" +
 	"\x1cCLOSURE_STEP_STATE_SUSPENDED\x10\x03\x12$\n" +
 	" CLOSURE_STEP_STATE_PSEUDONYMIZED\x10\x04\x12$\n" +
 	" CLOSURE_STEP_STATE_COLD_ARCHIVED\x10\x05\x12&\n" +
-	"\"CLOSURE_STEP_STATE_CRYPTO_SHREDDED\x10\x06B[ZYgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/governance/v1;governancev1b\x06proto3"
+	"\"CLOSURE_STEP_STATE_CRYPTO_SHREDDED\x10\x06BQZOgithub.com/apollo-chora/chora-contracts/gen/go/chora/governance/v1;governancev1b\x06proto3"
 
 var (
 	file_events_governance_closure_proto_rawDescOnce sync.Once

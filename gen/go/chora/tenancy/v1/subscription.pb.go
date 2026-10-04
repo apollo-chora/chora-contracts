@@ -25,7 +25,7 @@
 package tenancyv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -417,7 +417,7 @@ const file_events_tenancy_subscription_proto_rawDesc = "" +
 	"\x13cancellation_reason\x18\x05 \x01(\tR\x12cancellationReason\x12*\n" +
 	"\x11cancelled_by_gcid\x18\x06 \x01(\tR\x0fcancelledByGcid\x12=\n" +
 	"\feffective_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\veffectiveAt\x12=\n" +
-	"\fcancelled_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\vcancelledAtBUZSgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/tenancy/v1;tenancyv1b\x06proto3"
+	"\fcancelled_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\vcancelledAtBKZIgithub.com/apollo-chora/chora-contracts/gen/go/chora/tenancy/v1;tenancyv1b\x06proto3"
 
 var (
 	file_events_tenancy_subscription_proto_rawDescOnce sync.Once

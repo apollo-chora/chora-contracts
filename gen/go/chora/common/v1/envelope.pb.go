@@ -288,7 +288,7 @@ const file_chora_common_v1_envelope_proto_rawDesc = "" +
 	"\x0ecorrelation_id\x18\f \x01(\tR\rcorrelationId\x12!\n" +
 	"\fcausation_id\x18\r \x01(\tR\vcausationId\x120\n" +
 	"\x14chora_imda_dimension\x18\x0e \x01(\tR\x12choraImdaDimension\x120\n" +
-	"\x14imda_lifecycle_stage\x18\x0f \x01(\tR\x12imdaLifecycleStageBSZQgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1;commonv1b\x06proto3"
+	"\x14imda_lifecycle_stage\x18\x0f \x01(\tR\x12imdaLifecycleStageBIZGgithub.com/apollo-chora/chora-contracts/gen/go/chora/common/v1;commonv1b\x06proto3"
 
 var (
 	file_chora_common_v1_envelope_proto_rawDescOnce sync.Once

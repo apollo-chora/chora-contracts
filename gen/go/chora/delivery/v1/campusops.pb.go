@@ -27,7 +27,7 @@
 package deliveryv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -459,7 +459,7 @@ const file_events_delivery_campusops_proto_rawDesc = "" +
 	"\x15INCIDENT_SEVERITY_LOW\x10\x01\x12\x1c\n" +
 	"\x18INCIDENT_SEVERITY_MEDIUM\x10\x02\x12\x1a\n" +
 	"\x16INCIDENT_SEVERITY_HIGH\x10\x03\x12\x1e\n" +
-	"\x1aINCIDENT_SEVERITY_CRITICAL\x10\x04BWZUgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/delivery/v1;deliveryv1b\x06proto3"
+	"\x1aINCIDENT_SEVERITY_CRITICAL\x10\x04BMZKgithub.com/apollo-chora/chora-contracts/gen/go/chora/delivery/v1;deliveryv1b\x06proto3"
 
 var (
 	file_events_delivery_campusops_proto_rawDescOnce sync.Once

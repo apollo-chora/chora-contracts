@@ -22,7 +22,7 @@
 package sharingv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -322,7 +322,7 @@ const file_events_sharing_reaction_proto_rawDesc = "" +
 	"\x18REACTION_TYPE_INSIGHTFUL\x10\x02\x12\x19\n" +
 	"\x15REACTION_TYPE_CURIOUS\x10\x03\x12\x17\n" +
 	"\x13REACTION_TYPE_CHEER\x10\x04\x12\x1b\n" +
-	"\x17REACTION_TYPE_CELEBRATE\x10\x05BUZSgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/sharing/v1;sharingv1b\x06proto3"
+	"\x17REACTION_TYPE_CELEBRATE\x10\x05BKZIgithub.com/apollo-chora/chora-contracts/gen/go/chora/sharing/v1;sharingv1b\x06proto3"
 
 var (
 	file_events_sharing_reaction_proto_rawDescOnce sync.Once

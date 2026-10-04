@@ -27,7 +27,7 @@
 package observabilityv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -245,7 +245,7 @@ const file_events_observability_trace_proto_rawDesc = "" +
 	"\x1bSPAN_FINAL_KIND_ERROR_SPIKE\x10\x01\x12\x1e\n" +
 	"\x1aSPAN_FINAL_KIND_SLO_BREACH\x10\x02\x12$\n" +
 	" SPAN_FINAL_KIND_ANOMALY_DETECTED\x10\x03\x12\x1d\n" +
-	"\x19SPAN_FINAL_KIND_LONG_TAIL\x10\x04BaZ_github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/observability/v1;observabilityv1b\x06proto3"
+	"\x19SPAN_FINAL_KIND_LONG_TAIL\x10\x04BWZUgithub.com/apollo-chora/chora-contracts/gen/go/chora/observability/v1;observabilityv1b\x06proto3"
 
 var (
 	file_events_observability_trace_proto_rawDescOnce sync.Once

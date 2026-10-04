@@ -57,7 +57,7 @@
 package creationv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -1652,7 +1652,7 @@ const file_events_creation_ai_assist_proto_rawDesc = "" +
 	"\x0fimages_rendered\x18\v \x01(\x05R\x0eimagesRendered\x12%\n" +
 	"\x0eimages_dropped\x18\f \x01(\x05R\rimagesDropped\x12#\n" +
 	"\rimages_failed\x18\r \x01(\x05R\fimagesFailed\x12%\n" +
-	"\x0eimages_skipped\x18\x0e \x01(\x05R\rimagesSkippedBWZUgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/creation/v1;creationv1b\x06proto3"
+	"\x0eimages_skipped\x18\x0e \x01(\x05R\rimagesSkippedBMZKgithub.com/apollo-chora/chora-contracts/gen/go/chora/creation/v1;creationv1b\x06proto3"
 
 var (
 	file_events_creation_ai_assist_proto_rawDescOnce sync.Once

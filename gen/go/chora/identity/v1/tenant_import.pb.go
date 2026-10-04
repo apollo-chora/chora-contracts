@@ -40,7 +40,7 @@
 package identityv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -671,7 +671,7 @@ const file_events_identity_tenant_import_proto_rawDesc = "" +
 	"\x1aIMPORT_JOB_STATE_COMPLETED\x10\x01\x12*\n" +
 	"&IMPORT_JOB_STATE_COMPLETED_WITH_ERRORS\x10\x02\x12\x1b\n" +
 	"\x17IMPORT_JOB_STATE_FAILED\x10\x03\x12\x1e\n" +
-	"\x1aIMPORT_JOB_STATE_CANCELLED\x10\x04BWZUgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/identity/v1;identityv1b\x06proto3"
+	"\x1aIMPORT_JOB_STATE_CANCELLED\x10\x04BMZKgithub.com/apollo-chora/chora-contracts/gen/go/chora/identity/v1;identityv1b\x06proto3"
 
 var (
 	file_events_identity_tenant_import_proto_rawDescOnce sync.Once

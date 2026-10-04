@@ -29,7 +29,7 @@
 package identityv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
@@ -164,7 +164,7 @@ const file_events_identity_tenant_idp_provider_proto_rawDesc = "" +
 	"\ttenant_id\x18\x04 \x01(\tR\btenantId\x12#\n" +
 	"\rprovider_type\x18\x05 \x01(\tR\fproviderType\x12\x1d\n" +
 	"\n" +
-	"actor_gcid\x18\x06 \x01(\tR\tactorGcidBWZUgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/identity/v1;identityv1b\x06proto3"
+	"actor_gcid\x18\x06 \x01(\tR\tactorGcidBMZKgithub.com/apollo-chora/chora-contracts/gen/go/chora/identity/v1;identityv1b\x06proto3"
 
 var (
 	file_events_identity_tenant_idp_provider_proto_rawDescOnce sync.Once

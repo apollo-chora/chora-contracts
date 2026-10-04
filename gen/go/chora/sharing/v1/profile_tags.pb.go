@@ -26,7 +26,7 @@
 package sharingv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -277,7 +277,7 @@ const file_events_sharing_profile_tags_proto_rawDesc = "" +
 	"\x04tags\x18\b \x03(\tR\x04tags\x12\x14\n" +
 	"\x05blurb\x18\t \x01(\tR\x05blurb\x12=\n" +
 	"\fcompleted_at\x18\n" +
-	" \x01(\v2\x1a.google.protobuf.TimestampR\vcompletedAtBUZSgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/sharing/v1;sharingv1b\x06proto3"
+	" \x01(\v2\x1a.google.protobuf.TimestampR\vcompletedAtBKZIgithub.com/apollo-chora/chora-contracts/gen/go/chora/sharing/v1;sharingv1b\x06proto3"
 
 var (
 	file_events_sharing_profile_tags_proto_rawDescOnce sync.Once

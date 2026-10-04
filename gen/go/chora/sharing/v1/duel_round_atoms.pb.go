@@ -27,7 +27,7 @@
 package sharingv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -468,7 +468,7 @@ const file_events_sharing_duel_round_atoms_proto_rawDesc = "" +
 	"workflowId\x121\n" +
 	"\x15generated_by_model_id\x18\a \x01(\tR\x12generatedByModelId\x125\n" +
 	"\x05atoms\x18\b \x03(\v2\x1f.chora.sharing.v1.DuelRoundAtomR\x05atoms\x12=\n" +
-	"\fcompleted_at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\vcompletedAtBUZSgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/sharing/v1;sharingv1b\x06proto3"
+	"\fcompleted_at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\vcompletedAtBKZIgithub.com/apollo-chora/chora-contracts/gen/go/chora/sharing/v1;sharingv1b\x06proto3"
 
 var (
 	file_events_sharing_duel_round_atoms_proto_rawDescOnce sync.Once

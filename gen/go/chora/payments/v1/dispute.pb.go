@@ -44,7 +44,7 @@
 package paymentsv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -632,7 +632,7 @@ const file_events_payments_dispute_proto_rawDesc = "" +
 	"\x10stripe_charge_id\x18\x06 \x01(\tR\x0estripeChargeId\x12!\n" +
 	"\famount_cents\x18\a \x01(\x03R\vamountCents\x12\x1a\n" +
 	"\bcurrency\x18\b \x01(\tR\bcurrency\x12?\n" +
-	"\rreinstated_at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\freinstatedAtBWZUgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/payments/v1;paymentsv1b\x06proto3"
+	"\rreinstated_at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\freinstatedAtBMZKgithub.com/apollo-chora/chora-contracts/gen/go/chora/payments/v1;paymentsv1b\x06proto3"
 
 var (
 	file_events_payments_dispute_proto_rawDescOnce sync.Once

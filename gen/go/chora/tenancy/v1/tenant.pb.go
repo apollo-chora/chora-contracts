@@ -28,7 +28,7 @@
 package tenancyv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -1082,7 +1082,7 @@ const file_events_tenancy_tenant_proto_rawDesc = "" +
 	"\x1cHOSTING_MODE_PLATFORM_HOSTED\x10\x01\x12\x1c\n" +
 	"\x18HOSTING_MODE_WHITE_LABEL\x10\x02\x12\x1a\n" +
 	"\x16HOSTING_MODE_FRANCHISE\x10\x03\x12\x1a\n" +
-	"\x16HOSTING_MODE_SELF_HOST\x10\x04BUZSgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/tenancy/v1;tenancyv1b\x06proto3"
+	"\x16HOSTING_MODE_SELF_HOST\x10\x04BKZIgithub.com/apollo-chora/chora-contracts/gen/go/chora/tenancy/v1;tenancyv1b\x06proto3"
 
 var (
 	file_events_tenancy_tenant_proto_rawDescOnce sync.Once

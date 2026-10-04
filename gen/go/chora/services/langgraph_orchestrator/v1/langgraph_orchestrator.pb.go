@@ -743,7 +743,7 @@ const file_services_langgraph_orchestrator_proto_rawDesc = "" +
 	"\x15AGENT_STEP_FINALIZING\x10\x052\xb2\x02\n" +
 	"\x15LangGraphOrchestrator\x12~\n" +
 	"\aRunCrew\x128.chora.services.langgraph_orchestrator.v1.RunCrewRequest\x1a9.chora.services.langgraph_orchestrator.v1.RunCrewResponse\x12\x98\x01\n" +
-	"\x12StreamCrewProgress\x12C.chora.services.langgraph_orchestrator.v1.StreamCrewProgressRequest\x1a;.chora.services.langgraph_orchestrator.v1.CrewProgressEvent0\x01B|Zzgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/langgraph_orchestrator/v1;langgraph_orchestratorv1b\x06proto3"
+	"\x12StreamCrewProgress\x12C.chora.services.langgraph_orchestrator.v1.StreamCrewProgressRequest\x1a;.chora.services.langgraph_orchestrator.v1.CrewProgressEvent0\x01BrZpgithub.com/apollo-chora/chora-contracts/gen/go/chora/services/langgraph_orchestrator/v1;langgraph_orchestratorv1b\x06proto3"
 
 var (
 	file_services_langgraph_orchestrator_proto_rawDescOnce sync.Once

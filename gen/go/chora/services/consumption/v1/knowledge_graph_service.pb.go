@@ -44,7 +44,7 @@
 package consumptionv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/consumption/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/consumption/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -1811,7 +1811,7 @@ const file_services_consumption_v1_knowledge_graph_service_proto_rawDesc = "" +
 	"\x11ArchiveMapCluster\x127.chora.services.consumption.v1.ArchiveMapClusterRequest\x1a8.chora.services.consumption.v1.ArchiveMapClusterResponse\x12\x86\x01\n" +
 	"\x11CreateExploration\x127.chora.services.consumption.v1.CreateExplorationRequest\x1a8.chora.services.consumption.v1.CreateExplorationResponse\x12\x92\x01\n" +
 	"\x15GetHexagonAroundFocal\x12;.chora.services.consumption.v1.GetHexagonAroundFocalRequest\x1a<.chora.services.consumption.v1.GetHexagonAroundFocalResponse\x12z\n" +
-	"\rMoveFocalNode\x123.chora.services.consumption.v1.MoveFocalNodeRequest\x1a4.chora.services.consumption.v1.MoveFocalNodeResponseBfZdgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/consumption/v1;consumptionv1b\x06proto3"
+	"\rMoveFocalNode\x123.chora.services.consumption.v1.MoveFocalNodeRequest\x1a4.chora.services.consumption.v1.MoveFocalNodeResponseB\\ZZgithub.com/apollo-chora/chora-contracts/gen/go/chora/services/consumption/v1;consumptionv1b\x06proto3"
 
 var (
 	file_services_consumption_v1_knowledge_graph_service_proto_rawDescOnce sync.Once

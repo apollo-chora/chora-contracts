@@ -51,7 +51,7 @@
 package consumptionv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -1651,7 +1651,7 @@ const file_events_consumption_weakness_proto_rawDesc = "" +
 	" WEAKNESS_CONTEXT_KIND_ASSIGNMENT\x10\x02\x12\x1e\n" +
 	"\x1aWEAKNESS_CONTEXT_KIND_QUIZ\x10\x03\x12\"\n" +
 	"\x1eWEAKNESS_CONTEXT_KIND_PRACTICE\x10\x04\x12$\n" +
-	" WEAKNESS_CONTEXT_KIND_SELF_STUDY\x10\x05B]Z[github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/consumption/v1;consumptionv1b\x06proto3"
+	" WEAKNESS_CONTEXT_KIND_SELF_STUDY\x10\x05BSZQgithub.com/apollo-chora/chora-contracts/gen/go/chora/consumption/v1;consumptionv1b\x06proto3"
 
 var (
 	file_events_consumption_weakness_proto_rawDescOnce sync.Once

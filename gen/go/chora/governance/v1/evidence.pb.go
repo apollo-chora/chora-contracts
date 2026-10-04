@@ -34,7 +34,7 @@
 package governancev1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -180,7 +180,7 @@ const file_events_governance_evidence_proto_rawDesc = "" +
 	"\x11additional_fields\x18\x06 \x03(\v2;.chora.governance.v1.EvidenceRecorded.AdditionalFieldsEntryR\x10additionalFields\x1aC\n" +
 	"\x15AdditionalFieldsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B[ZYgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/governance/v1;governancev1b\x06proto3"
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01BQZOgithub.com/apollo-chora/chora-contracts/gen/go/chora/governance/v1;governancev1b\x06proto3"
 
 var (
 	file_events_governance_evidence_proto_rawDescOnce sync.Once

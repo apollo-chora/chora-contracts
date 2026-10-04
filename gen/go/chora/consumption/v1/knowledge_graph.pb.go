@@ -34,7 +34,7 @@
 package consumptionv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -2011,7 +2011,7 @@ const file_chora_consumption_v1_knowledge_graph_proto_rawDesc = "" +
 	"\x1cNEIGHBOR_RELATION_ANALOGY_OF\x10\x03\x12$\n" +
 	" NEIGHBOR_RELATION_CONTRASTS_WITH\x10\x04\x12 \n" +
 	"\x1cNEIGHBOR_RELATION_APPLIED_IN\x10\x05\x12$\n" +
-	" NEIGHBOR_RELATION_CURIOSITY_JUMP\x10\x06B]Z[github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/consumption/v1;consumptionv1b\x06proto3"
+	" NEIGHBOR_RELATION_CURIOSITY_JUMP\x10\x06BSZQgithub.com/apollo-chora/chora-contracts/gen/go/chora/consumption/v1;consumptionv1b\x06proto3"
 
 var (
 	file_chora_consumption_v1_knowledge_graph_proto_rawDescOnce sync.Once

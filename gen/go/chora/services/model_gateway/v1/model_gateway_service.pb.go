@@ -1605,7 +1605,7 @@ const file_services_model_gateway_service_proto_rawDesc = "" +
 	"\x13ModelGatewayService\x12i\n" +
 	"\x06Invoke\x12..chora.services.model_gateway.v1.InvokeRequest\x1a/.chora.services.model_gateway.v1.InvokeResponse\x12\x81\x01\n" +
 	"\x0eGroundedSearch\x126.chora.services.model_gateway.v1.GroundedSearchRequest\x1a7.chora.services.model_gateway.v1.GroundedSearchResponse\x12f\n" +
-	"\x05Embed\x12-.chora.services.model_gateway.v1.EmbedRequest\x1a..chora.services.model_gateway.v1.EmbedResponseBjZhgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/model_gateway/v1;model_gatewayv1b\x06proto3"
+	"\x05Embed\x12-.chora.services.model_gateway.v1.EmbedRequest\x1a..chora.services.model_gateway.v1.EmbedResponseB`Z^github.com/apollo-chora/chora-contracts/gen/go/chora/services/model_gateway/v1;model_gatewayv1b\x06proto3"
 
 var (
 	file_services_model_gateway_service_proto_rawDescOnce sync.Once

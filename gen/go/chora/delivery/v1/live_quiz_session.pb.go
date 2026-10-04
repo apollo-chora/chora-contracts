@@ -37,7 +37,7 @@
 package deliveryv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -404,7 +404,7 @@ const file_events_delivery_live_quiz_session_proto_rawDesc = "" +
 	"\flive_quiz_id\x18\x03 \x01(\tR\n" +
 	"liveQuizId\x12'\n" +
 	"\x0ftotal_responses\x18\x04 \x01(\x05R\x0etotalResponses\x125\n" +
-	"\bended_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\aendedAtBWZUgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/delivery/v1;deliveryv1b\x06proto3"
+	"\bended_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\aendedAtBMZKgithub.com/apollo-chora/chora-contracts/gen/go/chora/delivery/v1;deliveryv1b\x06proto3"
 
 var (
 	file_events_delivery_live_quiz_session_proto_rawDescOnce sync.Once

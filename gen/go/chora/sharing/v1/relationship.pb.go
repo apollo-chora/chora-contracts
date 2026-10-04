@@ -38,7 +38,7 @@
 package sharingv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -633,7 +633,7 @@ const file_events_sharing_relationship_proto_rawDesc = "" +
 	"\benvelope\x18\x01 \x01(\v2\x1e.chora.common.v1.EventEnvelopeR\benvelope\x12%\n" +
 	"\x0eunblocker_gcid\x18\x02 \x01(\tR\runblockerGcid\x12%\n" +
 	"\x0eunblocked_gcid\x18\x03 \x01(\tR\runblockedGcid\x12=\n" +
-	"\funblocked_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\vunblockedAtBUZSgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/sharing/v1;sharingv1b\x06proto3"
+	"\funblocked_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\vunblockedAtBKZIgithub.com/apollo-chora/chora-contracts/gen/go/chora/sharing/v1;sharingv1b\x06proto3"
 
 var (
 	file_events_sharing_relationship_proto_rawDescOnce sync.Once

@@ -1538,7 +1538,7 @@ const file_services_notifications_v1_notifications_proto_rawDesc = "" +
 	"\vGetTemplate\x123.chora.services.notifications.v1.GetTemplateRequest\x1a4.chora.services.notifications.v1.GetTemplateResponse\x12~\n" +
 	"\rListTemplates\x125.chora.services.notifications.v1.ListTemplatesRequest\x1a6.chora.services.notifications.v1.ListTemplatesResponse\x12\x87\x01\n" +
 	"\x10UpsertPreference\x128.chora.services.notifications.v1.UpsertPreferenceRequest\x1a9.chora.services.notifications.v1.UpsertPreferenceResponse\x12\x96\x01\n" +
-	"\x15ListPreferencesByGcid\x12=.chora.services.notifications.v1.ListPreferencesByGcidRequest\x1a>.chora.services.notifications.v1.ListPreferencesByGcidResponseBjZhgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/notifications/v1;notificationsv1b\x06proto3"
+	"\x15ListPreferencesByGcid\x12=.chora.services.notifications.v1.ListPreferencesByGcidRequest\x1a>.chora.services.notifications.v1.ListPreferencesByGcidResponseB`Z^github.com/apollo-chora/chora-contracts/gen/go/chora/services/notifications/v1;notificationsv1b\x06proto3"
 
 var (
 	file_services_notifications_v1_notifications_proto_rawDescOnce sync.Once

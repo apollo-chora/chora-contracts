@@ -28,7 +28,7 @@
 package governancev1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -756,7 +756,7 @@ const file_events_governance_policy_proto_rawDesc = "" +
 	"\x16VIOLATION_SEVERITY_LOW\x10\x02\x12\x1d\n" +
 	"\x19VIOLATION_SEVERITY_MEDIUM\x10\x03\x12\x1b\n" +
 	"\x17VIOLATION_SEVERITY_HIGH\x10\x04\x12\x1f\n" +
-	"\x1bVIOLATION_SEVERITY_CRITICAL\x10\x05B[ZYgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/governance/v1;governancev1b\x06proto3"
+	"\x1bVIOLATION_SEVERITY_CRITICAL\x10\x05BQZOgithub.com/apollo-chora/chora-contracts/gen/go/chora/governance/v1;governancev1b\x06proto3"
 
 var (
 	file_events_governance_policy_proto_rawDescOnce sync.Once

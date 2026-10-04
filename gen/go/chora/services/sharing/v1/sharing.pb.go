@@ -3924,7 +3924,7 @@ const file_services_sharing_v1_sharing_proto_rawDesc = "" +
 	"\x10ListSavedAtomIDs\x122.chora.services.sharing.v1.ListSavedAtomIDsRequest\x1a3.chora.services.sharing.v1.ListSavedAtomIDsResponse\x12x\n" +
 	"\x0fGetReuseContext\x121.chora.services.sharing.v1.GetReuseContextRequest\x1a2.chora.services.sharing.v1.GetReuseContextResponse\x12\x8d\x01\n" +
 	"\x16AuthorizeLiveQuizAtoms\x128.chora.services.sharing.v1.AuthorizeLiveQuizAtomsRequest\x1a9.chora.services.sharing.v1.AuthorizeLiveQuizAtomsResponse\x12\x8a\x01\n" +
-	"\x15GenerateQuizFromTopic\x127.chora.services.sharing.v1.GenerateQuizFromTopicRequest\x1a8.chora.services.sharing.v1.GenerateQuizFromTopicResponseB^Z\\github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/sharing/v1;sharingv1b\x06proto3"
+	"\x15GenerateQuizFromTopic\x127.chora.services.sharing.v1.GenerateQuizFromTopicRequest\x1a8.chora.services.sharing.v1.GenerateQuizFromTopicResponseBTZRgithub.com/apollo-chora/chora-contracts/gen/go/chora/services/sharing/v1;sharingv1b\x06proto3"
 
 var (
 	file_services_sharing_v1_sharing_proto_rawDescOnce sync.Once

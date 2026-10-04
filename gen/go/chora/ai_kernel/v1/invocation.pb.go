@@ -32,7 +32,7 @@
 package aikernelv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -530,7 +530,7 @@ const file_events_ai_kernel_invocation_proto_rawDesc = "" +
 	"\x15MODEL_KIND_GEMINI_PRO\x10\x02\x12 \n" +
 	"\x1cMODEL_KIND_GEMMA_TENANT_LORA\x10\x03\x12\x18\n" +
 	"\x14MODEL_KIND_EMBEDDING\x10\x04\x12\x19\n" +
-	"\x15MODEL_KIND_CLASSIFIER\x10\x05BXZVgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/ai_kernel/v1;aikernelv1b\x06proto3"
+	"\x15MODEL_KIND_CLASSIFIER\x10\x05BNZLgithub.com/apollo-chora/chora-contracts/gen/go/chora/ai_kernel/v1;aikernelv1b\x06proto3"
 
 var (
 	file_events_ai_kernel_invocation_proto_rawDescOnce sync.Once

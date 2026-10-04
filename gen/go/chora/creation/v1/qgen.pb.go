@@ -28,7 +28,7 @@
 package creationv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -1387,7 +1387,7 @@ const file_events_creation_qgen_proto_rawDesc = "" +
 	"\x16MODEL_TIER_UNSPECIFIED\x10\x00\x12\x11\n" +
 	"\rMODEL_TIER_T1\x10\x01\x12\x11\n" +
 	"\rMODEL_TIER_T2\x10\x02\x12\x11\n" +
-	"\rMODEL_TIER_T3\x10\x03BWZUgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/creation/v1;creationv1b\x06proto3"
+	"\rMODEL_TIER_T3\x10\x03BMZKgithub.com/apollo-chora/chora-contracts/gen/go/chora/creation/v1;creationv1b\x06proto3"
 
 var (
 	file_events_creation_qgen_proto_rawDescOnce sync.Once

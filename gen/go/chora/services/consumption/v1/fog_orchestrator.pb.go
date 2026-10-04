@@ -45,7 +45,7 @@
 package consumptionv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/consumption/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/consumption/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -339,7 +339,7 @@ const file_services_consumption_v1_fog_orchestrator_proto_rawDesc = "" +
 	"\rerror_message\x18\b \x01(\tR\ferrorMessage\x12=\n" +
 	"\fgenerated_at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\vgeneratedAt2\x87\x01\n" +
 	"\x0fFogOrchestrator\x12t\n" +
-	"\vGenerateFog\x121.chora.services.consumption.v1.GenerateFogRequest\x1a2.chora.services.consumption.v1.GenerateFogResponseBfZdgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/consumption/v1;consumptionv1b\x06proto3"
+	"\vGenerateFog\x121.chora.services.consumption.v1.GenerateFogRequest\x1a2.chora.services.consumption.v1.GenerateFogResponseB\\ZZgithub.com/apollo-chora/chora-contracts/gen/go/chora/services/consumption/v1;consumptionv1b\x06proto3"
 
 var (
 	file_services_consumption_v1_fog_orchestrator_proto_rawDescOnce sync.Once

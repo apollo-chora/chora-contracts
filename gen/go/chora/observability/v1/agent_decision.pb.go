@@ -27,7 +27,7 @@
 package observabilityv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -407,7 +407,7 @@ const file_events_observability_agent_decision_proto_rawDesc = "" +
 	"\x16DECISION_KIND_GENERATE\x10\x03\x12\x1a\n" +
 	"\x16DECISION_KIND_CRITIQUE\x10\x04\x12\x18\n" +
 	"\x14DECISION_KIND_REFINE\x10\x05\x12\x17\n" +
-	"\x13DECISION_KIND_BLOCK\x10\x06BaZ_github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/observability/v1;observabilityv1b\x06proto3"
+	"\x13DECISION_KIND_BLOCK\x10\x06BWZUgithub.com/apollo-chora/chora-contracts/gen/go/chora/observability/v1;observabilityv1b\x06proto3"
 
 var (
 	file_events_observability_agent_decision_proto_rawDescOnce sync.Once

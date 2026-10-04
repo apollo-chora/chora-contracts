@@ -2017,7 +2017,7 @@ const file_services_governance_v1_governance_proto_rawDesc = "" +
 	"\x10QueryAuditEvents\x125.chora.services.governance.v1.QueryAuditEventsRequest\x1a6.chora.services.governance.v1.QueryAuditEventsResponse\x12\x81\x01\n" +
 	"\x10RecordAssessment\x125.chora.services.governance.v1.RecordAssessmentRequest\x1a6.chora.services.governance.v1.RecordAssessmentResponse\x12\x81\x01\n" +
 	"\x10GetIMDADashboard\x125.chora.services.governance.v1.GetIMDADashboardRequest\x1a6.chora.services.governance.v1.GetIMDADashboardResponse\x12\x99\x01\n" +
-	"\x18GenerateComplianceReport\x12=.chora.services.governance.v1.GenerateComplianceReportRequest\x1a>.chora.services.governance.v1.GenerateComplianceReportResponseBdZbgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/governance/v1;governancev1b\x06proto3"
+	"\x18GenerateComplianceReport\x12=.chora.services.governance.v1.GenerateComplianceReportRequest\x1a>.chora.services.governance.v1.GenerateComplianceReportResponseBZZXgithub.com/apollo-chora/chora-contracts/gen/go/chora/services/governance/v1;governancev1b\x06proto3"
 
 var (
 	file_services_governance_v1_governance_proto_rawDescOnce sync.Once

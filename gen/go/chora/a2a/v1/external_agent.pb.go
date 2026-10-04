@@ -28,7 +28,7 @@
 package a2av1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -471,7 +471,7 @@ const file_events_a2a_external_agent_proto_rawDesc = "" +
 	"\x15TRUST_LEVEL_UNTRUSTED\x10\x01\x12\x15\n" +
 	"\x11TRUST_LEVEL_BASIC\x10\x02\x12\x18\n" +
 	"\x14TRUST_LEVEL_VERIFIED\x10\x03\x12\x17\n" +
-	"\x13TRUST_LEVEL_PARTNER\x10\x04BMZKgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/a2a/v1;a2av1b\x06proto3"
+	"\x13TRUST_LEVEL_PARTNER\x10\x04BCZAgithub.com/apollo-chora/chora-contracts/gen/go/chora/a2a/v1;a2av1b\x06proto3"
 
 var (
 	file_events_a2a_external_agent_proto_rawDescOnce sync.Once

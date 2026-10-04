@@ -249,7 +249,7 @@ const file_services_identity_v1_exp_rule_service_proto_rawDesc = "" +
 	"\aenabled\x18\x05 \x01(\bR\aenabled\x12+\n" +
 	"\x11resolution_source\x18\x06 \x01(\tR\x10resolutionSource2\x89\x01\n" +
 	"\x0eExpRuleService\x12w\n" +
-	"\x0eResolveExpRule\x121.chora.services.identity.v1.ResolveExpRuleRequest\x1a2.chora.services.identity.v1.ResolveExpRuleResponseB`Z^github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/identity/v1;identityv1b\x06proto3"
+	"\x0eResolveExpRule\x121.chora.services.identity.v1.ResolveExpRuleRequest\x1a2.chora.services.identity.v1.ResolveExpRuleResponseBVZTgithub.com/apollo-chora/chora-contracts/gen/go/chora/services/identity/v1;identityv1b\x06proto3"
 
 var (
 	file_services_identity_v1_exp_rule_service_proto_rawDescOnce sync.Once

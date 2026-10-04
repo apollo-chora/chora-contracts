@@ -34,7 +34,7 @@
 package consumptionv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -639,7 +639,7 @@ const file_events_consumption_companion_turn_proto_rawDesc = "" +
 	"\n" +
 	"tool_calls\x18\v \x03(\v2+.chora.consumption.v1.CompanionTurnToolCallR\ttoolCalls\x12%\n" +
 	"\x0erefusal_reason\x18\f \x01(\tR\rrefusalReason\x12=\n" +
-	"\fcompleted_at\x18\r \x01(\v2\x1a.google.protobuf.TimestampR\vcompletedAtB]Z[github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/consumption/v1;consumptionv1b\x06proto3"
+	"\fcompleted_at\x18\r \x01(\v2\x1a.google.protobuf.TimestampR\vcompletedAtBSZQgithub.com/apollo-chora/chora-contracts/gen/go/chora/consumption/v1;consumptionv1b\x06proto3"
 
 var (
 	file_events_consumption_companion_turn_proto_rawDescOnce sync.Once

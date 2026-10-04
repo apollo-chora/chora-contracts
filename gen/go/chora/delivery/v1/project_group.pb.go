@@ -26,7 +26,7 @@
 package deliveryv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -365,7 +365,7 @@ const file_events_delivery_project_group_proto_rawDesc = "" +
 	"\fmember_gcids\x18\x04 \x03(\tR\vmemberGcids\x12\x14\n" +
 	"\x05grade\x18\x05 \x01(\x05R\x05grade\x12$\n" +
 	"\x0egraded_by_gcid\x18\x06 \x01(\tR\fgradedByGcid\x127\n" +
-	"\tgraded_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\bgradedAtBWZUgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/delivery/v1;deliveryv1b\x06proto3"
+	"\tgraded_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\bgradedAtBMZKgithub.com/apollo-chora/chora-contracts/gen/go/chora/delivery/v1;deliveryv1b\x06proto3"
 
 var (
 	file_events_delivery_project_group_proto_rawDescOnce sync.Once

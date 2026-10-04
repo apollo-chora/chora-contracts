@@ -888,7 +888,7 @@ const file_services_agent_executor_proto_rawDesc = "" +
 	")EXECUTION_EVENT_KIND_INTERMEDIATE_THOUGHT\x10\x052\x92\x02\n" +
 	"\rAgentExecutor\x12}\n" +
 	"\fExecuteAgent\x125.chora.services.agent_executor.v1.ExecuteAgentRequest\x1a6.chora.services.agent_executor.v1.ExecuteAgentResponse\x12\x81\x01\n" +
-	"\x14StreamAgentExecution\x125.chora.services.agent_executor.v1.ExecuteAgentRequest\x1a0.chora.services.agent_executor.v1.ExecutionEvent0\x01BlZjgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/agent_executor/v1;agent_executorv1b\x06proto3"
+	"\x14StreamAgentExecution\x125.chora.services.agent_executor.v1.ExecuteAgentRequest\x1a0.chora.services.agent_executor.v1.ExecutionEvent0\x01BbZ`github.com/apollo-chora/chora-contracts/gen/go/chora/services/agent_executor/v1;agent_executorv1b\x06proto3"
 
 var (
 	file_services_agent_executor_proto_rawDescOnce sync.Once

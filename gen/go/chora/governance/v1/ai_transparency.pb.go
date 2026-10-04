@@ -22,7 +22,7 @@
 package governancev1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -190,7 +190,7 @@ const file_events_governance_ai_transparency_proto_rawDesc = "" +
 	"\x06locale\x18\t \x01(\tR\x06locale\x12\x1d\n" +
 	"\n" +
 	"minor_mode\x18\n" +
-	" \x01(\bR\tminorModeB[ZYgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/governance/v1;governancev1b\x06proto3"
+	" \x01(\bR\tminorModeBQZOgithub.com/apollo-chora/chora-contracts/gen/go/chora/governance/v1;governancev1b\x06proto3"
 
 var (
 	file_events_governance_ai_transparency_proto_rawDescOnce sync.Once

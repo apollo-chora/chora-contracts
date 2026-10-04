@@ -581,7 +581,7 @@ const file_services_model_broker_router_proto_rawDesc = "" +
 	"\x1aGUARDRAIL_TIER_MODEL_ARMOR\x10\x03\x12#\n" +
 	"\x1fGUARDRAIL_TIER_OUTPUT_VALIDATOR\x10\x042\x87\x01\n" +
 	"\x11ModelBrokerRouter\x12r\n" +
-	"\x05Route\x123.chora.services.model_broker_router.v1.RouteRequest\x1a4.chora.services.model_broker_router.v1.RouteResponseBvZtgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/model_broker_router/v1;model_broker_routerv1b\x06proto3"
+	"\x05Route\x123.chora.services.model_broker_router.v1.RouteRequest\x1a4.chora.services.model_broker_router.v1.RouteResponseBlZjgithub.com/apollo-chora/chora-contracts/gen/go/chora/services/model_broker_router/v1;model_broker_routerv1b\x06proto3"
 
 var (
 	file_services_model_broker_router_proto_rawDescOnce sync.Once

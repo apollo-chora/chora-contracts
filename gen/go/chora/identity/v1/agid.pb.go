@@ -32,7 +32,7 @@
 package identityv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -334,7 +334,7 @@ const file_events_identity_agid_proto_rawDesc = "" +
 	"\x16AGENT_KIND_UNSPECIFIED\x10\x00\x12\"\n" +
 	"\x1eAGENT_KIND_CHORA_INTERNAL_CREW\x10\x01\x12\x1f\n" +
 	"\x1bAGENT_KIND_EXTERNAL_PARTNER\x10\x02\x12\x13\n" +
-	"\x0fAGENT_KIND_BYOA\x10\x03BWZUgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/identity/v1;identityv1b\x06proto3"
+	"\x0fAGENT_KIND_BYOA\x10\x03BMZKgithub.com/apollo-chora/chora-contracts/gen/go/chora/identity/v1;identityv1b\x06proto3"
 
 var (
 	file_events_identity_agid_proto_rawDescOnce sync.Once

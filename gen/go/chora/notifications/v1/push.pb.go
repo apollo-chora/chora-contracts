@@ -25,7 +25,7 @@
 package notificationsv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -383,7 +383,7 @@ const file_events_notifications_push_proto_rawDesc = "" +
 	"\fpayload_hash\x18\x05 \x01(\tR\vpayloadHash\x12!\n" +
 	"\ffailure_code\x18\x06 \x01(\tR\vfailureCode\x12%\n" +
 	"\x0efailure_detail\x18\a \x01(\tR\rfailureDetail\x127\n" +
-	"\tfailed_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\bfailedAtBaZ_github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/notifications/v1;notificationsv1b\x06proto3"
+	"\tfailed_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\bfailedAtBWZUgithub.com/apollo-chora/chora-contracts/gen/go/chora/notifications/v1;notificationsv1b\x06proto3"
 
 var (
 	file_events_notifications_push_proto_rawDescOnce sync.Once

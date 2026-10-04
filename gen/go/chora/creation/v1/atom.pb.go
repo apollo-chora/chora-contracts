@@ -54,7 +54,7 @@
 package creationv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -1702,7 +1702,7 @@ const file_events_creation_atom_proto_rawDesc = "" +
 	"+IMDA_DIMENSION_TAG_FAIRNESS_HUMAN_OVERSIGHT\x10\x04*\\\n" +
 	"\x12AtomMediaAssetType\x12%\n" +
 	"!ATOM_MEDIA_ASSET_TYPE_UNSPECIFIED\x10\x00\x12\x1f\n" +
-	"\x1bATOM_MEDIA_ASSET_TYPE_IMAGE\x10\x01BWZUgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/creation/v1;creationv1b\x06proto3"
+	"\x1bATOM_MEDIA_ASSET_TYPE_IMAGE\x10\x01BMZKgithub.com/apollo-chora/chora-contracts/gen/go/chora/creation/v1;creationv1b\x06proto3"
 
 var (
 	file_events_creation_atom_proto_rawDescOnce sync.Once

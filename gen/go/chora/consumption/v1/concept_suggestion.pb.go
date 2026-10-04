@@ -51,7 +51,7 @@
 package consumptionv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -585,7 +585,7 @@ const file_events_consumption_concept_suggestion_proto_rawDesc = "" +
 	"\x11input_token_count\x18\v \x01(\x05R\x0finputTokenCount\x12,\n" +
 	"\x12output_token_count\x18\f \x01(\x05R\x10outputTokenCount\x129\n" +
 	"\n" +
-	"emitted_at\x18\r \x01(\v2\x1a.google.protobuf.TimestampR\temittedAtB]Z[github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/consumption/v1;consumptionv1b\x06proto3"
+	"emitted_at\x18\r \x01(\v2\x1a.google.protobuf.TimestampR\temittedAtBSZQgithub.com/apollo-chora/chora-contracts/gen/go/chora/consumption/v1;consumptionv1b\x06proto3"
 
 var (
 	file_events_consumption_concept_suggestion_proto_rawDescOnce sync.Once

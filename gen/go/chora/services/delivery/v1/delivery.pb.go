@@ -2269,7 +2269,7 @@ const file_services_delivery_v1_delivery_proto_rawDesc = "" +
 	"\rScheduleClass\x120.chora.services.delivery.v1.ScheduleClassRequest\x1a1.chora.services.delivery.v1.ScheduleClassResponse\x12}\n" +
 	"\x10RecordAttendance\x123.chora.services.delivery.v1.RecordAttendanceRequest\x1a4.chora.services.delivery.v1.RecordAttendanceResponse\x12\x83\x01\n" +
 	"\x12IssueCertification\x125.chora.services.delivery.v1.IssueCertificationRequest\x1a6.chora.services.delivery.v1.IssueCertificationResponse\x12\xa1\x01\n" +
-	"\x1cListLearnerGradedSubmissions\x12?.chora.services.delivery.v1.ListLearnerGradedSubmissionsRequest\x1a@.chora.services.delivery.v1.ListLearnerGradedSubmissionsResponseB`Z^github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/delivery/v1;deliveryv1b\x06proto3"
+	"\x1cListLearnerGradedSubmissions\x12?.chora.services.delivery.v1.ListLearnerGradedSubmissionsRequest\x1a@.chora.services.delivery.v1.ListLearnerGradedSubmissionsResponseBVZTgithub.com/apollo-chora/chora-contracts/gen/go/chora/services/delivery/v1;deliveryv1b\x06proto3"
 
 var (
 	file_services_delivery_v1_delivery_proto_rawDescOnce sync.Once

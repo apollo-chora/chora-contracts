@@ -40,7 +40,7 @@
 package tenancyv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -208,7 +208,7 @@ const file_events_tenancy_external_egress_policy_proto_rawDesc = "" +
 	"\x17previous_egress_enabled\x18\a \x01(\bR\x15previousEgressEnabled\x12=\n" +
 	"\x1bprevious_daily_call_ceiling\x18\b \x01(\x05R\x18previousDailyCallCeiling\x129\n" +
 	"\n" +
-	"updated_at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAtBUZSgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/tenancy/v1;tenancyv1b\x06proto3"
+	"updated_at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAtBKZIgithub.com/apollo-chora/chora-contracts/gen/go/chora/tenancy/v1;tenancyv1b\x06proto3"
 
 var (
 	file_events_tenancy_external_egress_policy_proto_rawDescOnce sync.Once

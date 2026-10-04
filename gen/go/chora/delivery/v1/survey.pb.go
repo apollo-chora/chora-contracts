@@ -29,7 +29,7 @@
 package deliveryv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -331,7 +331,7 @@ const file_events_delivery_survey_proto_rawDesc = "" +
 	"\tsurvey_id\x18\x02 \x01(\tR\bsurveyId\x12\x1b\n" +
 	"\tcourse_id\x18\x03 \x01(\tR\bcourseId\x12$\n" +
 	"\x0eclosed_by_gcid\x18\x04 \x01(\tR\fclosedByGcid\x127\n" +
-	"\tclosed_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\bclosedAtBWZUgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/delivery/v1;deliveryv1b\x06proto3"
+	"\tclosed_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\bclosedAtBMZKgithub.com/apollo-chora/chora-contracts/gen/go/chora/delivery/v1;deliveryv1b\x06proto3"
 
 var (
 	file_events_delivery_survey_proto_rawDescOnce sync.Once

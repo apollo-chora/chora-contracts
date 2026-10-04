@@ -29,7 +29,7 @@
 package tenancyv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -579,7 +579,7 @@ const file_events_tenancy_billing_proto_rawDesc = "" +
 	"\x06reason\x18\b \x01(\tR\x06reason\x12$\n" +
 	"\x0eissued_by_gcid\x18\t \x01(\tR\fissuedByGcid\x127\n" +
 	"\tissued_at\x18\n" +
-	" \x01(\v2\x1a.google.protobuf.TimestampR\bissuedAtBUZSgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/tenancy/v1;tenancyv1b\x06proto3"
+	" \x01(\v2\x1a.google.protobuf.TimestampR\bissuedAtBKZIgithub.com/apollo-chora/chora-contracts/gen/go/chora/tenancy/v1;tenancyv1b\x06proto3"
 
 var (
 	file_events_tenancy_billing_proto_rawDescOnce sync.Once

@@ -1249,7 +1249,7 @@ const file_services_identity_v1_identity_proto_rawDesc = "" +
 	"GetMeRoles\x12-.chora.services.identity.v1.GetMeRolesRequest\x1a..chora.services.identity.v1.GetMeRolesResponse\x12\x86\x01\n" +
 	"\x13ResolveRoleByCourse\x126.chora.services.identity.v1.ResolveRoleByCourseRequest\x1a7.chora.services.identity.v1.ResolveRoleByCourseResponse\x12z\n" +
 	"\x0fInitiateClosure\x122.chora.services.identity.v1.InitiateClosureRequest\x1a3.chora.services.identity.v1.InitiateClosureResponse\x12w\n" +
-	"\x0eAdvanceClosure\x121.chora.services.identity.v1.AdvanceClosureRequest\x1a2.chora.services.identity.v1.AdvanceClosureResponseB`Z^github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/identity/v1;identityv1b\x06proto3"
+	"\x0eAdvanceClosure\x121.chora.services.identity.v1.AdvanceClosureRequest\x1a2.chora.services.identity.v1.AdvanceClosureResponseBVZTgithub.com/apollo-chora/chora-contracts/gen/go/chora/services/identity/v1;identityv1b\x06proto3"
 
 var (
 	file_services_identity_v1_identity_proto_rawDescOnce sync.Once

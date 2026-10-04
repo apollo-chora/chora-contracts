@@ -19,7 +19,7 @@ import (
 	"strings"
 	"testing"
 
-	consumptionv1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/consumption/v1"
+	consumptionv1 "github.com/apollo-chora/chora-contracts/gen/go/chora/consumption/v1"
 )
 
 type registrySpecies struct {

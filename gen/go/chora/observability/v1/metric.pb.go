@@ -27,7 +27,7 @@
 package observabilityv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -169,7 +169,7 @@ const file_events_observability_metric_proto_rawDesc = "" +
 	"recordedAt\x1a=\n" +
 	"\x0fDimensionsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01BaZ_github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/observability/v1;observabilityv1b\x06proto3"
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01BWZUgithub.com/apollo-chora/chora-contracts/gen/go/chora/observability/v1;observabilityv1b\x06proto3"
 
 var (
 	file_events_observability_metric_proto_rawDescOnce sync.Once

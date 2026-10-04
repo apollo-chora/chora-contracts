@@ -2947,7 +2947,7 @@ const file_services_consumption_v1_companion_growth_service_proto_rawDesc = "" +
 	"\x12ReadLearnerProfile\x128.chora.services.consumption.v1.ReadLearnerProfileRequest\x1a9.chora.services.consumption.v1.ReadLearnerProfileResponse\x12\x9e\x01\n" +
 	"\x19RecordCompanionMemoryNote\x12?.chora.services.consumption.v1.RecordCompanionMemoryNoteRequest\x1a@.chora.services.consumption.v1.RecordCompanionMemoryNoteResponse\x12w\n" +
 	"\fReadWeakness\x122.chora.services.consumption.v1.ReadWeaknessRequest\x1a3.chora.services.consumption.v1.ReadWeaknessResponse\x12n\n" +
-	"\tReadKGMap\x12/.chora.services.consumption.v1.ReadKGMapRequest\x1a0.chora.services.consumption.v1.ReadKGMapResponseBfZdgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/consumption/v1;consumptionv1b\x06proto3"
+	"\tReadKGMap\x12/.chora.services.consumption.v1.ReadKGMapRequest\x1a0.chora.services.consumption.v1.ReadKGMapResponseB\\ZZgithub.com/apollo-chora/chora-contracts/gen/go/chora/services/consumption/v1;consumptionv1b\x06proto3"
 
 var (
 	file_services_consumption_v1_companion_growth_service_proto_rawDescOnce sync.Once

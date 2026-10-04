@@ -25,7 +25,7 @@
 package consumptionv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -289,7 +289,7 @@ const file_events_consumption_dose_recommendation_proto_rawDesc = "" +
 	"\x14recommended_atom_ids\x18\b \x03(\tR\x12recommendedAtomIds\x12\x1c\n" +
 	"\trationale\x18\t \x01(\tR\trationale\x12=\n" +
 	"\fcompleted_at\x18\n" +
-	" \x01(\v2\x1a.google.protobuf.TimestampR\vcompletedAtB]Z[github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/consumption/v1;consumptionv1b\x06proto3"
+	" \x01(\v2\x1a.google.protobuf.TimestampR\vcompletedAtBSZQgithub.com/apollo-chora/chora-contracts/gen/go/chora/consumption/v1;consumptionv1b\x06proto3"
 
 var (
 	file_events_consumption_dose_recommendation_proto_rawDescOnce sync.Once

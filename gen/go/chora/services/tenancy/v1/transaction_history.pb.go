@@ -1958,7 +1958,7 @@ const file_services_tenancy_v1_transaction_history_proto_rawDesc = "" +
 	"\x17StreamTransactionEvents\x129.chora.services.tenancy.v1.StreamTransactionEventsRequest\x1a+.chora.services.tenancy.v1.TransactionEvent0\x01\x12\x85\x01\n" +
 	"\x17CreateTransactionExport\x129.chora.services.tenancy.v1.CreateTransactionExportRequest\x1a/.chora.services.tenancy.v1.TransactionExportJob\x12\x7f\n" +
 	"\x14GetTransactionExport\x126.chora.services.tenancy.v1.GetTransactionExportRequest\x1a/.chora.services.tenancy.v1.TransactionExportJob\x12x\n" +
-	"\x0fListFranchisees\x121.chora.services.tenancy.v1.ListFranchiseesRequest\x1a2.chora.services.tenancy.v1.ListFranchiseesResponseB^Z\\github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/tenancy/v1;tenancyv1b\x06proto3"
+	"\x0fListFranchisees\x121.chora.services.tenancy.v1.ListFranchiseesRequest\x1a2.chora.services.tenancy.v1.ListFranchiseesResponseBTZRgithub.com/apollo-chora/chora-contracts/gen/go/chora/services/tenancy/v1;tenancyv1b\x06proto3"
 
 var (
 	file_services_tenancy_v1_transaction_history_proto_rawDescOnce sync.Once

@@ -2345,7 +2345,7 @@ const file_services_creation_v1_creation_proto_rawDesc = "" +
 	"\x14SnapshotQuestionByID\x127.chora.services.creation.v1.SnapshotQuestionByIDRequest\x1a8.chora.services.creation.v1.SnapshotQuestionByIDResponse\x12\x95\x01\n" +
 	"\x18MintAtomMediaDownloadURL\x12;.chora.services.creation.v1.MintAtomMediaDownloadURLRequest\x1a<.chora.services.creation.v1.MintAtomMediaDownloadURLResponse2\x91\x01\n" +
 	"\x10ContentRetrieval\x12}\n" +
-	"\x10SearchEmbeddings\x123.chora.services.creation.v1.SearchEmbeddingsRequest\x1a4.chora.services.creation.v1.SearchEmbeddingsResponseB`Z^github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/creation/v1;creationv1b\x06proto3"
+	"\x10SearchEmbeddings\x123.chora.services.creation.v1.SearchEmbeddingsRequest\x1a4.chora.services.creation.v1.SearchEmbeddingsResponseBVZTgithub.com/apollo-chora/chora-contracts/gen/go/chora/services/creation/v1;creationv1b\x06proto3"
 
 var (
 	file_services_creation_v1_creation_proto_rawDescOnce sync.Once

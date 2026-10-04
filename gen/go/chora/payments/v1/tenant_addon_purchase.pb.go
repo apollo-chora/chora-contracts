@@ -31,7 +31,7 @@
 package paymentsv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -1310,7 +1310,7 @@ const file_events_payments_tenant_addon_purchase_proto_rawDesc = "" +
 	"\ato_tier\x18\x06 \x01(\tR\x06toTier\x124\n" +
 	"\x16stripe_subscription_id\x18\a \x01(\tR\x14stripeSubscriptionId\x12;\n" +
 	"\vreleased_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\n" +
-	"releasedAtBWZUgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/payments/v1;paymentsv1b\x06proto3"
+	"releasedAtBMZKgithub.com/apollo-chora/chora-contracts/gen/go/chora/payments/v1;paymentsv1b\x06proto3"
 
 var (
 	file_events_payments_tenant_addon_purchase_proto_rawDescOnce sync.Once

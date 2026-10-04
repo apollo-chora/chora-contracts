@@ -24,7 +24,7 @@
 package notificationsv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -476,7 +476,7 @@ const file_events_notifications_email_proto_rawDesc = "" +
 	"\rbounce_reason\x18\x06 \x01(\tR\fbounceReason\x123\n" +
 	"\x15bounce_classification\x18\a \x01(\tR\x14bounceClassification\x129\n" +
 	"\n" +
-	"bounced_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\tbouncedAtBaZ_github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/notifications/v1;notificationsv1b\x06proto3"
+	"bounced_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\tbouncedAtBWZUgithub.com/apollo-chora/chora-contracts/gen/go/chora/notifications/v1;notificationsv1b\x06proto3"
 
 var (
 	file_events_notifications_email_proto_rawDescOnce sync.Once

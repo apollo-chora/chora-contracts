@@ -1754,7 +1754,7 @@ const file_services_model_broker_v1_model_broker_proto_rawDesc = "" +
 	"\fRouteRequest\x122.chora.services.model_broker.v1.RouteStreamRequest\x1a3.chora.services.model_broker.v1.RouteStreamResponse(\x010\x01\x12\x85\x01\n" +
 	"\x10RecordTokenUsage\x127.chora.services.model_broker.v1.RecordTokenUsageRequest\x1a8.chora.services.model_broker.v1.RecordTokenUsageResponse\x12s\n" +
 	"\n" +
-	"ListModels\x121.chora.services.model_broker.v1.ListModelsRequest\x1a2.chora.services.model_broker.v1.ListModelsResponseBhZfgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/model_broker/v1;model_brokerv1b\x06proto3"
+	"ListModels\x121.chora.services.model_broker.v1.ListModelsRequest\x1a2.chora.services.model_broker.v1.ListModelsResponseB^Z\\github.com/apollo-chora/chora-contracts/gen/go/chora/services/model_broker/v1;model_brokerv1b\x06proto3"
 
 var (
 	file_services_model_broker_v1_model_broker_proto_rawDescOnce sync.Once

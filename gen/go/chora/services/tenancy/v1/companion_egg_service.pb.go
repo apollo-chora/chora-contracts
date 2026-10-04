@@ -271,7 +271,7 @@ const file_services_tenancy_v1_companion_egg_service_proto_rawDesc = "" +
 	"\vprobability\x18\x02 \x01(\x01R\vprobability\x12\x16\n" +
 	"\x06rarity\x18\x03 \x01(\tR\x06rarity2\x85\x01\n" +
 	"\fCompanionEgg\x12u\n" +
-	"\x0ePreviewEggOdds\x120.chora.services.tenancy.v1.PreviewEggOddsRequest\x1a1.chora.services.tenancy.v1.PreviewEggOddsResponseB^Z\\github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/tenancy/v1;tenancyv1b\x06proto3"
+	"\x0ePreviewEggOdds\x120.chora.services.tenancy.v1.PreviewEggOddsRequest\x1a1.chora.services.tenancy.v1.PreviewEggOddsResponseBTZRgithub.com/apollo-chora/chora-contracts/gen/go/chora/services/tenancy/v1;tenancyv1b\x06proto3"
 
 var (
 	file_services_tenancy_v1_companion_egg_service_proto_rawDescOnce sync.Once

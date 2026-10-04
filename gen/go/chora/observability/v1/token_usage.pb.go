@@ -47,7 +47,7 @@
 package observabilityv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -400,7 +400,7 @@ const file_events_observability_token_usage_proto_rawDesc = "" +
 	"\x19MODEL_ARMOR_VERDICT_BLOCK\x10\x02\x12 \n" +
 	"\x1cMODEL_ARMOR_VERDICT_SANITISE\x10\x03\x12\x1d\n" +
 	"\x19MODEL_ARMOR_VERDICT_ERROR\x10\x04\x12 \n" +
-	"\x1cMODEL_ARMOR_VERDICT_BYPASSED\x10\x05BaZ_github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/observability/v1;observabilityv1b\x06proto3"
+	"\x1cMODEL_ARMOR_VERDICT_BYPASSED\x10\x05BWZUgithub.com/apollo-chora/chora-contracts/gen/go/chora/observability/v1;observabilityv1b\x06proto3"
 
 var (
 	file_events_observability_token_usage_proto_rawDescOnce sync.Once

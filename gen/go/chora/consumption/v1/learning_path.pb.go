@@ -25,7 +25,7 @@
 package consumptionv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -572,7 +572,7 @@ const file_events_consumption_learning_path_proto_rawDesc = "" +
 	"\bPathMode\x12\x19\n" +
 	"\x15PATH_MODE_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15PATH_MODE_STRAIGHT_UP\x10\x01\x12\x1d\n" +
-	"\x19PATH_MODE_GRAPH_DISCOVERY\x10\x02B]Z[github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/consumption/v1;consumptionv1b\x06proto3"
+	"\x19PATH_MODE_GRAPH_DISCOVERY\x10\x02BSZQgithub.com/apollo-chora/chora-contracts/gen/go/chora/consumption/v1;consumptionv1b\x06proto3"
 
 var (
 	file_events_consumption_learning_path_proto_rawDescOnce sync.Once

@@ -23,7 +23,7 @@
 package creationv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -644,7 +644,7 @@ const file_events_creation_media_proto_rawDesc = "" +
 	"+MEDIA_PROCESSING_STATUS_GENERATING_VARIANTS\x10\x05\x12!\n" +
 	"\x1dMEDIA_PROCESSING_STATUS_READY\x10\x06\x12'\n" +
 	"#MEDIA_PROCESSING_STATUS_QUARANTINED\x10\a\x12\"\n" +
-	"\x1eMEDIA_PROCESSING_STATUS_FAILED\x10\bBWZUgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/creation/v1;creationv1b\x06proto3"
+	"\x1eMEDIA_PROCESSING_STATUS_FAILED\x10\bBMZKgithub.com/apollo-chora/chora-contracts/gen/go/chora/creation/v1;creationv1b\x06proto3"
 
 var (
 	file_events_creation_media_proto_rawDescOnce sync.Once

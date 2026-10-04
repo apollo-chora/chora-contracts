@@ -30,7 +30,7 @@
 package deliveryv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -414,7 +414,7 @@ const file_events_delivery_wbl_proto_rawDesc = "" +
 	"\x0fscheduled_start\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\x0escheduledStart\x12?\n" +
 	"\rscheduled_end\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\fscheduledEnd\x12'\n" +
 	"\x0fhours_completed\x18\b \x01(\x02R\x0ehoursCompleted\x12=\n" +
-	"\fcompleted_at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\vcompletedAtBWZUgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/delivery/v1;deliveryv1b\x06proto3"
+	"\fcompleted_at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\vcompletedAtBMZKgithub.com/apollo-chora/chora-contracts/gen/go/chora/delivery/v1;deliveryv1b\x06proto3"
 
 var (
 	file_events_delivery_wbl_proto_rawDescOnce sync.Once

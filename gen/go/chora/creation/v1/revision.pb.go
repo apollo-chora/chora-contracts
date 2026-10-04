@@ -25,7 +25,7 @@
 package creationv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -256,7 +256,7 @@ const file_events_creation_revision_proto_rawDesc = "" +
 	"\x1aVALIDATION_RULE_TYPE_RANGE\x10\x03\x12 \n" +
 	"\x1cVALIDATION_RULE_TYPE_KEYWORD\x10\x04\x12\x1f\n" +
 	"\x1bVALIDATION_RULE_TYPE_MANUAL\x10\x05\x12#\n" +
-	"\x1fVALIDATION_RULE_TYPE_LLM_GRADED\x10\x06BWZUgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/creation/v1;creationv1b\x06proto3"
+	"\x1fVALIDATION_RULE_TYPE_LLM_GRADED\x10\x06BMZKgithub.com/apollo-chora/chora-contracts/gen/go/chora/creation/v1;creationv1b\x06proto3"
 
 var (
 	file_events_creation_revision_proto_rawDescOnce sync.Once

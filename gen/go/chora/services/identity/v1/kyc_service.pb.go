@@ -360,7 +360,7 @@ const file_services_identity_v1_kyc_service_proto_rawDesc = "" +
 	"\x12KYC_STATUS_EXPIRED\x10\x052\x8f\x01\n" +
 	"\n" +
 	"KycService\x12\x80\x01\n" +
-	"\x15GetVerificationStatus\x128.chora.services.identity.v1.GetVerificationStatusRequest\x1a-.chora.services.identity.v1.KycStatusResponseB`Z^github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/identity/v1;identityv1b\x06proto3"
+	"\x15GetVerificationStatus\x128.chora.services.identity.v1.GetVerificationStatusRequest\x1a-.chora.services.identity.v1.KycStatusResponseBVZTgithub.com/apollo-chora/chora-contracts/gen/go/chora/services/identity/v1;identityv1b\x06proto3"
 
 var (
 	file_services_identity_v1_kyc_service_proto_rawDescOnce sync.Once

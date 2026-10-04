@@ -26,7 +26,7 @@
 package a2av1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -677,7 +677,7 @@ const file_events_a2a_invocation_proto_rawDesc = "" +
 	"*GUARDRAIL_VIOLATION_TYPE_MODEL_ARMOR_BLOCK\x10\x02\x12+\n" +
 	"'GUARDRAIL_VIOLATION_TYPE_SCOPE_EXCEEDED\x10\x03\x12'\n" +
 	"#GUARDRAIL_VIOLATION_TYPE_RATE_LIMIT\x10\x04\x12&\n" +
-	"\"GUARDRAIL_VIOLATION_TYPE_AUTH_FAIL\x10\x05BMZKgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/a2a/v1;a2av1b\x06proto3"
+	"\"GUARDRAIL_VIOLATION_TYPE_AUTH_FAIL\x10\x05BCZAgithub.com/apollo-chora/chora-contracts/gen/go/chora/a2a/v1;a2av1b\x06proto3"
 
 var (
 	file_events_a2a_invocation_proto_rawDescOnce sync.Once

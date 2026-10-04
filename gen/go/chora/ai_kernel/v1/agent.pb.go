@@ -53,7 +53,7 @@
 package aikernelv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -532,7 +532,7 @@ const file_events_ai_kernel_agent_proto_rawDesc = "" +
 	"(AGENT_EXECUTION_RUNTIME_LANGGRAPH_PYTHON\x10\x01\x12\"\n" +
 	"\x1eAGENT_EXECUTION_RUNTIME_ADK_GO\x10\x02\x12&\n" +
 	"\"AGENT_EXECUTION_RUNTIME_ADK_PYTHON\x10\x03\x12'\n" +
-	"#AGENT_EXECUTION_RUNTIME_GO_EXECUTOR\x10\x04BXZVgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/ai_kernel/v1;aikernelv1b\x06proto3"
+	"#AGENT_EXECUTION_RUNTIME_GO_EXECUTOR\x10\x04BNZLgithub.com/apollo-chora/chora-contracts/gen/go/chora/ai_kernel/v1;aikernelv1b\x06proto3"
 
 var (
 	file_events_ai_kernel_agent_proto_rawDescOnce sync.Once

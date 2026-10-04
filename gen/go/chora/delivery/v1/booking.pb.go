@@ -32,7 +32,7 @@
 package deliveryv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -586,7 +586,7 @@ const file_events_delivery_booking_proto_rawDesc = "" +
 	"\x18BOOKING_STATUS_CONFIRMED\x10\x02\x12\x1c\n" +
 	"\x18BOOKING_STATUS_CANCELLED\x10\x03\x12\x1a\n" +
 	"\x16BOOKING_STATUS_NO_SHOW\x10\x04\x12\x1c\n" +
-	"\x18BOOKING_STATUS_COMPLETED\x10\x05BWZUgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/delivery/v1;deliveryv1b\x06proto3"
+	"\x18BOOKING_STATUS_COMPLETED\x10\x05BMZKgithub.com/apollo-chora/chora-contracts/gen/go/chora/delivery/v1;deliveryv1b\x06proto3"
 
 var (
 	file_events_delivery_booking_proto_rawDescOnce sync.Once

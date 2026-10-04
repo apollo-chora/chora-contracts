@@ -3596,7 +3596,7 @@ const file_services_payments_v1_payments_proto_rawDesc = "" +
 	"\x14PaymentsAdminService\x12\x86\x01\n" +
 	"\x13ListPurchaseHistory\x126.chora.services.payments.v1.ListPurchaseHistoryRequest\x1a7.chora.services.payments.v1.ListPurchaseHistoryResponse\x12n\n" +
 	"\vIssueRefund\x12..chora.services.payments.v1.IssueRefundRequest\x1a/.chora.services.payments.v1.IssueRefundResponse\x12y\n" +
-	"\x13StreamPaymentEvents\x126.chora.services.payments.v1.StreamPaymentEventsRequest\x1a(.chora.services.payments.v1.PaymentEvent0\x01B`Z^github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/payments/v1;paymentsv1b\x06proto3"
+	"\x13StreamPaymentEvents\x126.chora.services.payments.v1.StreamPaymentEventsRequest\x1a(.chora.services.payments.v1.PaymentEvent0\x01BVZTgithub.com/apollo-chora/chora-contracts/gen/go/chora/services/payments/v1;paymentsv1b\x06proto3"
 
 var (
 	file_services_payments_v1_payments_proto_rawDescOnce sync.Once

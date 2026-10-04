@@ -652,7 +652,7 @@ const file_services_closure_orchestrator_proto_rawDesc = "" +
 	"\fStartClosure\x12;.chora.services.closure_orchestrator.v1.StartClosureRequest\x1a<.chora.services.closure_orchestrator.v1.StartClosureResponse\x12\x89\x01\n" +
 	"\fGetSagaState\x12;.chora.services.closure_orchestrator.v1.GetSagaStateRequest\x1a<.chora.services.closure_orchestrator.v1.GetSagaStateResponse\x12\x92\x01\n" +
 	"\x17OrchestratePseudonymize\x12:.chora.services.closure_orchestrator.v1.OrchestrateRequest\x1a;.chora.services.closure_orchestrator.v1.OrchestrateResponse\x12\x91\x01\n" +
-	"\x16OrchestrateCryptoShred\x12:.chora.services.closure_orchestrator.v1.OrchestrateRequest\x1a;.chora.services.closure_orchestrator.v1.OrchestrateResponseBxZvgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/closure_orchestrator/v1;closure_orchestratorv1b\x06proto3"
+	"\x16OrchestrateCryptoShred\x12:.chora.services.closure_orchestrator.v1.OrchestrateRequest\x1a;.chora.services.closure_orchestrator.v1.OrchestrateResponseBnZlgithub.com/apollo-chora/chora-contracts/gen/go/chora/services/closure_orchestrator/v1;closure_orchestratorv1b\x06proto3"
 
 var (
 	file_services_closure_orchestrator_proto_rawDescOnce sync.Once

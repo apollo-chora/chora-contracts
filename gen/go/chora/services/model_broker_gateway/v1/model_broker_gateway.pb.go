@@ -602,7 +602,7 @@ const file_services_model_broker_gateway_proto_rawDesc = "" +
 	"\x13FINISH_REASON_ERROR\x10\x042\x8e\x02\n" +
 	"\x12ModelBrokerGateway\x12w\n" +
 	"\x06Invoke\x125.chora.services.model_broker_gateway.v1.InvokeRequest\x1a6.chora.services.model_broker_gateway.v1.InvokeResponse\x12\x7f\n" +
-	"\x0fInvokeStreaming\x125.chora.services.model_broker_gateway.v1.InvokeRequest\x1a3.chora.services.model_broker_gateway.v1.InvokeChunk0\x01BxZvgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/model_broker_gateway/v1;model_broker_gatewayv1b\x06proto3"
+	"\x0fInvokeStreaming\x125.chora.services.model_broker_gateway.v1.InvokeRequest\x1a3.chora.services.model_broker_gateway.v1.InvokeChunk0\x01BnZlgithub.com/apollo-chora/chora-contracts/gen/go/chora/services/model_broker_gateway/v1;model_broker_gatewayv1b\x06proto3"
 
 var (
 	file_services_model_broker_gateway_proto_rawDescOnce sync.Once

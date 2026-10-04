@@ -29,7 +29,7 @@
 package paymentsv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -720,7 +720,7 @@ const file_events_payments_tenant_mana_topup_proto_rawDesc = "" +
 	"\x03sku\x18\x04 \x01(\tR\x03sku\x12*\n" +
 	"\x11stripe_session_id\x18\x05 \x01(\tR\x0fstripeSessionId\x129\n" +
 	"\n" +
-	"expired_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\texpiredAtBWZUgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/payments/v1;paymentsv1b\x06proto3"
+	"expired_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\texpiredAtBMZKgithub.com/apollo-chora/chora-contracts/gen/go/chora/payments/v1;paymentsv1b\x06proto3"
 
 var (
 	file_events_payments_tenant_mana_topup_proto_rawDescOnce sync.Once

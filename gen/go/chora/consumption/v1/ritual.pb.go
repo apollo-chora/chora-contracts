@@ -28,7 +28,7 @@
 package consumptionv1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
@@ -467,7 +467,7 @@ const file_events_consumption_ritual_proto_rawDesc = "" +
 	"\x1bRITUAL_RUN_STATUS_COMPLETED\x10\x02\x12\x1c\n" +
 	"\x18RITUAL_RUN_STATUS_FAILED\x10\x03\x12$\n" +
 	" RITUAL_RUN_STATUS_SKIPPED_BUDGET\x10\x04\x12\x1d\n" +
-	"\x19RITUAL_RUN_STATUS_BLOCKED\x10\x05B]Z[github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/consumption/v1;consumptionv1b\x06proto3"
+	"\x19RITUAL_RUN_STATUS_BLOCKED\x10\x05BSZQgithub.com/apollo-chora/chora-contracts/gen/go/chora/consumption/v1;consumptionv1b\x06proto3"
 
 var (
 	file_events_consumption_ritual_proto_rawDescOnce sync.Once

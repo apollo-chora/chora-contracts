@@ -41,7 +41,7 @@
 package governancev1
 
 import (
-	v1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/common/v1"
+	v1 "github.com/apollo-chora/chora-contracts/gen/go/chora/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -224,7 +224,7 @@ const file_events_governance_bias_test_proto_rawDesc = "" +
 	"judgeModel\x12\x16\n" +
 	"\x06reason\x18\n" +
 	" \x01(\tR\x06reason\x12=\n" +
-	"\fevaluated_at\x18\v \x01(\v2\x1a.google.protobuf.TimestampR\vevaluatedAtB[ZYgithub.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/governance/v1;governancev1b\x06proto3"
+	"\fevaluated_at\x18\v \x01(\v2\x1a.google.protobuf.TimestampR\vevaluatedAtBQZOgithub.com/apollo-chora/chora-contracts/gen/go/chora/governance/v1;governancev1b\x06proto3"
 
 var (
 	file_events_governance_bias_test_proto_rawDescOnce sync.Once
