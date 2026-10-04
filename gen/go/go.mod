@@ -4,7 +4,7 @@
 // .proto under chora-contracts/proto/. Files are produced by `buf generate`
 // + scripts/relocate-flat-services.sh and committed to git (per
 // chora-contracts/README.md "Codegen — gen/ committed").
-module github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go
+module github.com/apollo-chora/chora-contracts/gen/go
 
 go 1.26.1
 
