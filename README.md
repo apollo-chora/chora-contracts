@@ -116,15 +116,15 @@ A bulk proto restructure (move flat protos under `proto/services/{name}/v1/`) wo
 - **Go consumers**:
 
   ```go
-  import executorv1 "github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/chora/services/agent_executor/v1"
+  import executorv1 "github.com/apollo-chora/chora-contracts/gen/go/chora/services/agent_executor/v1"
   ```
 
   Add to your `go.mod`:
 
   ```
-  require github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go v0.0.0-…
+  require github.com/apollo-chora/chora-contracts/gen/go v0.0.0-…
 
-  replace github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go => ../../chora-contracts/gen/go
+  replace github.com/apollo-chora/chora-contracts/gen/go => ../../chora-contracts/gen/go
   ```
 
 - **Python consumers**: `pip install -e ../../chora-contracts` (path-install in the monorepo). Then:

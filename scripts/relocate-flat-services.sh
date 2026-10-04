@@ -83,7 +83,7 @@ extract_go_package() {
 # Move src_dir/src_base.pb.go + src_dir/src_base_grpc.pb.go to tgt_dir/
 # -----------------------------------------------------------------------------
 
-GO_PACKAGE_URL_PREFIX="github.com/locoroco-git/Chora-LMS/chora-contracts/gen/go/"
+GO_PACKAGE_URL_PREFIX="github.com/apollo-chora/chora-contracts/gen/go/"
 
 relocate_proto() {
   local proto_file="$1"
