@@ -2,7 +2,7 @@
 # test_events_flat_up_to_date.sh — CI consistency test for Path C codegen.
 #
 # Asserts that proto/events-flat/ is up-to-date with proto/events/. If any
-# canonical event proto changes without re-running scripts/flatten-pubsub-schemas.sh,
+# canonical event proto changes without re-running scripts/flatten-event-schemas.sh,
 # this test fails — preventing drift between source-of-truth and the committed
 # flat schema artifact.
 #
@@ -30,10 +30,10 @@ buf build proto --as-file-descriptor-set --output "${FDS_PATH}"
 (cd internal/protoflatten && GOWORK=off go run . -fds "${FDS_PATH}" -out "${SHADOW_DIR}" -quiet)
 
 # Materialise the Path-A v2 aliases into the shadow exactly as
-# scripts/flatten-pubsub-schemas.sh does for the committed tree. Without this
+# scripts/flatten-event-schemas.sh does for the committed tree. Without this
 # the diff below flags the 4 committed .v2.proto aliases as stale on EVERY
 # run (the test predates debt D-B's alias step, 2026-05-29). Keep this list
-# identical to V2_FLAT_ALIASES in scripts/flatten-pubsub-schemas.sh.
+# identical to V2_FLAT_ALIASES in scripts/flatten-event-schemas.sh.
 for alias in "creation/atom/created" "creation/atom/updated" \
              "creation/atom/published" "creation/atom/archived"; do
   cp "${SHADOW_DIR}/${alias}.proto" "${SHADOW_DIR}/${alias}.v2.proto"
@@ -42,7 +42,7 @@ done
 # Diff committed flat tree against shadow.
 if ! diff -urN "${OUT_DIR}" "${SHADOW_DIR}" > /tmp/events-flat-diff.$$; then
   echo "FAIL: proto/events-flat/ is OUT OF DATE." >&2
-  echo "Run \`./scripts/flatten-pubsub-schemas.sh\` and commit the updated tree." >&2
+  echo "Run \`./scripts/flatten-event-schemas.sh\` and commit the updated tree." >&2
   echo "" >&2
   echo "Diff:" >&2
   cat /tmp/events-flat-diff.$$ >&2

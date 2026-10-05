@@ -1,5 +1,5 @@
 # Built binary from `go build .` — protoflatten is run via `go run` per
-# scripts/flatten-pubsub-schemas.sh; the binary itself is not committed.
+# scripts/flatten-event-schemas.sh; the binary itself is not committed.
 protoflatten
 
 # go.sum is COMMITTED for this module (ruling 44): it is a build tool and an

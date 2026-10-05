@@ -2,17 +2,17 @@
 //
 // The integration test lives at chora-contracts/tests/test_events_flat_up_to_date.sh
 // (shell) — it re-runs the codegen and asserts no diff against the committed
-// proto/events-flat/ tree. That's the contract the M10 terraform plan depends
+// proto/events-flat/ tree. That's the contract the committed artifact depends
 // on for determinism.
 //
 // This file covers the descriptor-walking logic in isolation (unit tests) and
 // — most importantly — adds the CI guardrail
 // `TestEventsFlat_SingleTopLevelMessage` which scans the entire committed
 // proto/events-flat/ tree and asserts every .proto declares exactly one
-// top-level message. GCP Pub/Sub Schema Registry rejects definitions with
-// more than one top-level message ("Too many message types specified in
-// schema definition"), so this is the regression gate that prevents Path C
-// v1's flat-siblings layout from sneaking back in.
+// top-level message. The flat schema must carry a single top-level message
+// (some registry consumers reject more than one — "Too many message types
+// specified in schema definition"), so this is the regression gate that
+// prevents Path C v1's flat-siblings layout from sneaking back in.
 
 package main
 
@@ -194,7 +194,7 @@ func TestWriteFlatPreservesFieldNumbers(t *testing.T) {
 }
 
 // TestWriteFlatHasNoImports asserts the generator emits no import statements
-// regardless of source imports — Pub/Sub Schema Registry rejects them.
+// regardless of source imports — the flat consumer rejects them.
 func TestWriteFlatHasNoImports(t *testing.T) {
 	envelope := envelopeDescriptor()
 	src, event := singleEventFile(
@@ -245,7 +245,7 @@ func TestWriteFlatNestsEnvelopeAndTimestamp(t *testing.T) {
 
 	// Negative assertion: NO top-level Envelope / Timestamp / EventEnvelope
 	// declaration. Path C v1 emitted siblings; v2 nests them. A regression
-	// to v1 layout is what GCP Schema Registry rejects.
+	// to v1 layout is what the single-top-level constraint forbids.
 	for _, forbid := range []string{
 		"\nmessage EventEnvelope {",
 		"\nmessage Envelope {",
@@ -310,7 +310,7 @@ func TestWriteFlatRendersEnums(t *testing.T) {
 }
 
 // TestWriteFlatSingleTopLevelMessage asserts the generator emits exactly ONE
-// `message Foo {` declaration at column 0 — the GCP Pub/Sub Schema Registry
+// `message Foo {` declaration at column 0 — the single-top-level-message
 // constraint that drove the Path C v2 refactor.
 func TestWriteFlatSingleTopLevelMessage(t *testing.T) {
 	envelope := envelopeDescriptor()
@@ -336,11 +336,11 @@ func TestWriteFlatSingleTopLevelMessage(t *testing.T) {
 // TestEventsFlat_SingleTopLevelMessage walks the committed events-flat tree
 // and asserts every .proto declares exactly ONE top-level message. This is
 // the regression gate against Path C v1 (multi-top-level-message siblings),
-// which GCP Pub/Sub Schema Registry rejects.
+// which the single-top-level constraint forbids.
 //
 // Resilience note (per feedback_resilience_priority): runs as a unit test so
-// CI catches the violation BEFORE terraform plan runs and BEFORE Schema
-// Registry rejects the apply. Faster failure = lower MTTR.
+// CI catches the violation BEFORE the flat consumer sees it. Faster failure =
+// lower MTTR.
 func TestEventsFlat_SingleTopLevelMessage(t *testing.T) {
 	root := findEventsFlatDir(t)
 	walked := 0
@@ -359,7 +359,7 @@ func TestEventsFlat_SingleTopLevelMessage(t *testing.T) {
 		count := countTopLevelMessages(string(raw))
 		if count != 1 {
 			rel, _ := filepath.Rel(root, path)
-			t.Errorf("%s: expected exactly 1 top-level message, got %d (Pub/Sub Schema Registry rejects multi-top-level-message schemas)", rel, count)
+			t.Errorf("%s: expected exactly 1 top-level message, got %d (the flat schema forbids multi-top-level-message schemas)", rel, count)
 		}
 		walked++
 		return nil
@@ -374,7 +374,7 @@ func TestEventsFlat_SingleTopLevelMessage(t *testing.T) {
 }
 
 // TestEventsFlat_NoImports asserts the committed events-flat tree contains
-// zero `import` statements — Pub/Sub Schema Registry does NOT resolve imports.
+// zero `import` statements — the flat consumer does NOT resolve imports.
 func TestEventsFlat_NoImports(t *testing.T) {
 	root := findEventsFlatDir(t)
 	importRe := regexp.MustCompile(`(?m)^\s*import\s+"`)
@@ -391,7 +391,7 @@ func TestEventsFlat_NoImports(t *testing.T) {
 		}
 		if importRe.MatchString(string(raw)) {
 			rel, _ := filepath.Rel(root, path)
-			t.Errorf("%s: contains `import` statement (Schema Registry doesn't resolve imports)", rel)
+			t.Errorf("%s: contains `import` statement (the flat consumer doesn't resolve imports)", rel)
 		}
 		return nil
 	})

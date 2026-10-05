@@ -9,11 +9,10 @@ modules:
   - path: proto
     name: buf.build/chora/contracts
     # proto/events-flat/ is a generated artifact — self-contained per-aggregate
-    # protos for the schema-registry consumption path (Path C, locked
-    # 2026-05-10). It duplicates packages from proto/events/ by design, so
-    # exclude it from the buf module to avoid duplicate-symbol errors during
-    # `buf lint` / `buf build` / codegen. The platform's schema registry
-    # tooling reads the files directly.
+    # flattened protos (Path C, locked 2026-05-10). It duplicates packages from
+    # proto/events/ by design, so exclude it from the buf module to avoid
+    # duplicate-symbol errors during `buf lint` / `buf build` / codegen. The
+    # flatten tooling reads the files directly.
     excludes:
       - proto/events-flat
 

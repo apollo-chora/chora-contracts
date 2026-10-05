@@ -14,7 +14,7 @@ This is the **leaf package** in the dependency graph — it has NO internal depe
 
 - **Protobuf** in `proto/`:
   - `proto/common/envelope.proto` — mandatory `EventEnvelope` for all events
-  - `proto/events/{domain}/*.proto` — domain event payloads (Pub/Sub Schema Registry)
+  - `proto/events/{domain}/*.proto` — domain event payloads (source-of-truth)
   - `proto/services/*.proto` — gRPC inter-service contracts (Python orchestrator ↔ Go executor; service mesh internal calls)
 - **OpenAPI 3.2 YAML** in `openapi/` — REST admin CRUD per service
 - **AsyncAPI 3.0** in `asyncapi/` — human-readable event documentation (one file per topic)
@@ -97,7 +97,7 @@ See `proto/README.md` for full conventions.
 | Notifications | `chora_notifications` | `chora.notifications.*` | Team 3 |
 | AI Kernel | `chora_ai_kernel` | `chora.ai_kernel.*` | Team 3 |
 
-**Cross-DB queries FORBIDDEN** (no `dblink`). Inter-domain communication via Pub/Sub events ONLY (Protobuf Schema Registry validates payloads). See `.claude/rules/ddd-enforcement.md`.
+**Cross-DB queries FORBIDDEN** (no `dblink`). Inter-domain communication via NATS JetStream events ONLY. See `.claude/rules/ddd-enforcement.md`.
 
 ---
 
@@ -108,8 +108,8 @@ See `proto/README.md` for full conventions.
 | Learner-facing reads | **GraphQL** | Knowledge graph traversal, atom queries, persona, discovery, social feeds |
 | Admin CRUD | **REST** (OpenAPI) | Atom mgmt, tenant config, add-ons, rostering, certification, IdP |
 | Service-to-service sync | **gRPC** (Protobuf services) | Internal calls (Python orchestrator ↔ Go executor; service mesh mTLS) |
-| Inter-service async | **Pub/Sub events** (Protobuf Schema Registry) | Cross-domain side effects |
-| External A2A | **REST** via GCP API Gateway → A2A Gateway service | External agents per ADR-132 |
+| Inter-service async | **NATS JetStream events** | Cross-domain side effects |
+| External A2A | **REST** via the API gateway → A2A Gateway service | External agents per ADR-132 |
 | Webhooks | **REST** | Partner event subscriptions |
 
 ---

@@ -1,21 +1,20 @@
-// Command protoflatten emits self-contained per-topic .proto files for
-// Pub/Sub Schema Registry consumption.
+// Command protoflatten emits self-contained per-topic .proto files — the
+// flattened-schema artifact at proto/events-flat/.
 //
-// PROBLEM 1: GCP Pub/Sub Schema Registry validates Protobuf schema definitions
-// without resolving `import` statements. Our canonical event protos at
-// proto/events/{domain}/{aggregate}.proto each `import "chora/common/v1/envelope.proto"`
-// and `import "google/protobuf/timestamp.proto"`.
+// PROBLEM 1: consumers of the flat tree cannot resolve `import` statements.
+// Our canonical event protos at proto/events/{domain}/{aggregate}.proto each
+// `import "chora/common/v1/envelope.proto"` and
+// `import "google/protobuf/timestamp.proto"`.
 //
-// PROBLEM 2: GCP Pub/Sub Schema Registry rejects definitions with more than
-// one TOP-LEVEL message ("Too many message types specified in schema definition").
-// Nested messages are accepted, so EventEnvelope + Timestamp must be inlined
-// as NESTED messages inside the single top-level event message.
+// PROBLEM 2: the flat schema must declare a single TOP-LEVEL message (some
+// registry consumers reject definitions with more than one). Nested messages
+// are accepted, so EventEnvelope + Timestamp are inlined as NESTED messages
+// inside the single top-level event message.
 //
 // SOLUTION (Path C, locked 2026-05-10): generate one self-contained .proto
-// per (domain, aggregate, event_type) tuple = one per topic, at
+// per (domain, aggregate, event_type) tuple = one per event subject, at
 // proto/events-flat/{domain}/{aggregate}.{event_type}.proto. Each file:
-//   - Uses the same package name as the source (chora.{domain}.v1) so existing
-//     topic schema_settings continue to bind correctly.
+//   - Uses the same package name as the source (chora.{domain}.v1).
 //   - Has exactly ONE top-level message, named after the event type
 //     (e.g., BookingCreated).
 //   - Has EventEnvelope + Timestamp NESTED inside that top-level message,
@@ -23,11 +22,13 @@
 //   - Carries an inline-copy of every enum referenced by that message
 //     (also as nested types).
 //   - Drops every `import` statement and language-specific options
-//     (go_package / python_package — Schema Registry doesn't care).
+//     (go_package / python_package — the flat consumer doesn't read them).
 //
 // The source-of-truth at proto/events/ is unchanged. buf-driven Go/Python
 // codegen still consumes proto/events/ directly. proto/events-flat/ is a
-// committed generated artifact.
+// committed generated artifact. The flatten step was introduced for the GCP
+// Pub/Sub Schema Registry (which rejected `import` statements); the platform
+// now uses NATS JetStream, and the artifact is retained broker-neutral.
 //
 // Approach: read a FileDescriptorSet built by `buf build --as-file-descriptor-set`
 // covering all of proto/, then walk every event-domain file's top-level
@@ -55,7 +56,7 @@ import (
 const (
 	envelopeFile      = "chora/common/v1/envelope.proto"
 	envelopeFullName  = ".chora.common.v1.EventEnvelope"
-	envelopeShortName = "Envelope" // inlined nested name (avoid clash with sibling event types in CONSUMER code only — Schema Registry is per-file so collisions don't matter)
+	envelopeShortName = "Envelope" // inlined nested name (avoid clash with sibling event types in consumer code only — the flat file is self-contained so collisions don't matter)
 	wktTimestampFull  = ".google.protobuf.Timestamp"
 	wktTimestampShort = "Timestamp"
 	eventsRootPrefix  = "events/"
@@ -76,12 +77,6 @@ func main() {
 		fdsPath = flag.String("fds", "", "Path to buf-built FileDescriptorSet (binpb)")
 		outDir  = flag.String("out", "proto/events-flat", "Output root directory for flattened protos")
 		quiet   = flag.Bool("quiet", false, "Suppress per-file output")
-		// The REQUIRED set (ruling 44). Terraform derives its file() inputs from
-		// the declared topic list; this tool must produce exactly that set and
-		// say so loudly when it cannot. See requiredset.go.
-		reqTopics = flag.String("require-topics", "", "Path to m10-data-plane main.tf (the declared topic list)")
-		reqEstate = flag.String("require-estate", "", "Path to _root companion_topic_estate.tf (explicit proto list)")
-		checkOnly = flag.Bool("check-only", false, "Run ONLY the required-set check against -out (no generation)")
 		// Frozen-generation sources (ruling 44): event generations whose current
 		// source was renamed or deleted while their topics stayed declared and
 		// LIVE. They are a SEPARATE buf module because a frozen file can
@@ -91,20 +86,6 @@ func main() {
 		fdsFrozen = flag.String("fds-frozen", "", "Path to the FileDescriptorSet built from proto-frozen (optional)")
 	)
 	flag.Parse()
-
-	// The check runs as its own mode against the FINAL tree. It cannot run at
-	// the end of generation: the wrapper materialises the Path-A v2 aliases
-	// AFTER protoflatten returns, and those aliases are part of the required
-	// set, so an early check would fail on files not yet written.
-	if *checkOnly {
-		if *reqTopics == "" || *reqEstate == "" {
-			fatalf("-check-only needs -require-topics and -require-estate")
-		}
-		if err := runRequiredCheck(*outDir, *reqTopics, *reqEstate); err != nil {
-			fatalf("%v", err)
-		}
-		return
-	}
 
 	if *fdsPath == "" {
 		fatalf("missing -fds (path to FileDescriptorSet from `buf build --as-file-descriptor-set`)")
@@ -154,7 +135,7 @@ func main() {
 // generate walks the descriptor set and emits one self-contained flat proto per
 // event message. Split out of main so it can be driven directly by a test:
 // main() is otherwise a 200-line function that no test could reach, which is
-// how the required-set check could have shipped unexercised end to end.
+// how a generator can ship unexercised end to end.
 func generate(fds *descriptorpb.FileDescriptorSet, frozenFiles map[string]bool, outDir string, quiet bool, stdout, stderr io.Writer) (totalFiles, totalMessages int, err error) {
 	envelope := findFile(fds, envelopeFile)
 	if envelope == nil {
@@ -359,7 +340,7 @@ func topicCommentsByMessageIndex(f *descriptorpb.FileDescriptorProto) map[int32]
 }
 
 // splitTopic decomposes a topic name into (domain, aggregate, event_type).
-// Two shapes are recognised (matching the topology in chora-infra/m10-data-plane):
+// Two shapes are recognised:
 //
 //   - chora.{domain}.{aggregate}.{event_type}.v{N}  — 5-component canonical
 //   - chora.{domain}.{event_type}.v{N}              — 4-component (closure saga only;
@@ -367,8 +348,7 @@ func topicCommentsByMessageIndex(f *descriptorpb.FileDescriptorProto) map[int32]
 //     with the domain).
 //
 // For the 4-component form, aggregate defaults to "saga" — matching the
-// terraform topic-catalogue's pubsub_topics map for chora.closure.* topics
-// (domain=closure, aggregate=saga).
+// chora.closure.* saga convention (domain=closure, aggregate=saga).
 //
 // Returns zero values (and version 0) if the topic doesn't conform (defensive
 // — caller falls back to heuristic). version is the parsed major from the
@@ -416,10 +396,10 @@ func splitTopic(topic string) (domain, aggregate, eventType string, version int)
 // unversioned heuristic default, version 0 or 1) keeps the bare
 // {event_type}.proto name so the existing committed flat tree stays
 // byte-identical across regenerations; v2+ gets a {event_type}.v{N}.proto
-// suffix so each major version is registered as its OWN immutable Schema
-// Registry schema and they never overwrite one another (ADR-195 WS7).
+// suffix so each major version is registered as its OWN immutable schema
+// revision and they never overwrite one another (ADR-195 WS7).
 // protoflatten emits the v2 flat directly from the v2 source message — the
-// flatten-pubsub-schemas.sh cp-alias trick only works when v2 wire bytes equal
+// flatten-event-schemas.sh cp-alias trick only works when v2 wire bytes equal
 // v1 (the atom case), which compose-v2 does NOT (it drops job_type and adds the
 // compose trio).
 func flatFileName(eventType string, version int) string {
@@ -565,8 +545,13 @@ func indexMessage(idx map[string]typeRef, f *descriptorpb.FileDescriptorProto, p
 // printed in the header. It is the descriptor's own name for a current-
 // generation source, and the events/-prefixed equivalent for a frozen one, so a
 // frozen generation reproduces the header its LIVE schema already carries
-// ("events/consumption/familiar.proto"). The header is part of the registered
-// definition text, so getting it wrong is a definition diff on every plan.
+// ("events/consumption/familiar.proto").
+//
+// ⚠ The emitted header text below is FROZEN: it is baked into every committed
+// file under proto/events-flat/, so changing it drifts the whole tree against
+// tests/test_events_flat_up_to_date.sh. It still names the GCP Pub/Sub Schema
+// Registry the artifact was originally built for; rewording it is a separate,
+// coordinated change that regenerates the tree.
 func writeFlat(w io.Writer, src *descriptorpb.FileDescriptorProto, sourceLabel string, event *descriptorpb.DescriptorProto, envelope *descriptorpb.DescriptorProto, idx map[string]typeRef) error {
 	pkg := src.GetPackage()
 
@@ -967,30 +952,4 @@ func findMessage(f *descriptorpb.FileDescriptorProto, name string) *descriptorpb
 func fatalf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "protoflatten: "+format+"\n", args...)
 	os.Exit(1)
-}
-
-// runRequiredCheck derives the required flat-proto set from the DECLARED topic
-// list and fails loud when the tree does not satisfy it. See requiredset.go for
-// why the declared set is the driver rather than whatever sources happen to exist.
-func runRequiredCheck(outDir, reqTopics, reqEstate string) error {
-	m10, err := os.ReadFile(reqTopics)
-	if err != nil {
-		return fmt.Errorf("read declared topic list %s: %w", reqTopics, err)
-	}
-	estate, err := os.ReadFile(reqEstate)
-	if err != nil {
-		return fmt.Errorf("read companion estate %s: %w", reqEstate, err)
-	}
-	if err := assertKnownSchemaResources(map[string]string{reqTopics: string(m10), reqEstate: string(estate)}); err != nil {
-		return err
-	}
-	required, err := requiredFromTerraform(string(m10), string(estate))
-	if err != nil {
-		return fmt.Errorf("derive required set: %w", err)
-	}
-	if err := checkRequired(outDir, required); err != nil {
-		return err
-	}
-	fmt.Fprintf(os.Stdout, "protoflatten: required-set OK: all %d declared topics have their flat proto\n", len(required))
-	return nil
 }

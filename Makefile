@@ -15,8 +15,7 @@
 #
 # Hand-edits to gen/ are rejected in review — regenerate via `make codegen`.
 
-.PHONY: regen codegen flatten lint breaking clean-gen verify-reproducible \
-        verify-schema-registry verify-schema-registry-live refresh-schema-snapshot
+.PHONY: regen codegen flatten lint breaking clean-gen verify-reproducible
 
 # ---------------------------------------------------------------------------
 # regen — full reproducible regeneration: Go/Python bindings + flat schema
@@ -52,16 +51,15 @@ breaking:
 	buf breaking --against '.git#branch=main'
 
 # ---------------------------------------------------------------------------
-# flatten — regenerate proto/events-flat/ (self-contained schema tree consumed
-# by the platform's schema registry tooling).
+# flatten — regenerate proto/events-flat/, the self-contained flattened-schema
+# artifact consumed by downstream tooling.
 #
 # Reproducible as of 2026-05-29 (debt D-B fixed): the script materialises the
 # Path-A atom v2 schema aliases (*.v2.proto) deterministically from the
-# V2_FLAT_ALIASES list, so it no longer drops them. Keep that list in sync with
-# terraform local.atom_v2_topics.
+# V2_FLAT_ALIASES list, so it no longer drops them.
 # ---------------------------------------------------------------------------
 flatten:
-	bash scripts/flatten-pubsub-schemas.sh
+	bash scripts/flatten-event-schemas.sh
 
 # verify-reproducible — CI guard: full regen, then assert the working tree is
 # clean under gen/ AND proto/events-flat/ (no modified AND no untracked files).
@@ -73,31 +71,3 @@ verify-reproducible: regen
 		exit 1; \
 	fi
 	@echo "OK: gen/ + proto/events-flat/ reproduce the committed tree byte-for-byte"
-
-# ---------------------------------------------------------------------------
-# verify-schema-registry — CI guard (CHO-2155): every event proto's fields MUST
-# be covered by the topic's COMMITTED schema revision.
-#
-# verify-reproducible above proves  source proto -> flat proto -> generated Go
-# stay in lockstep. It does NOT prove the flat proto matches what is actually
-# COMMITTED in the schema registry — and the event broker rejects a message
-# carrying a field the committed revision lacks with HTTP 400 at publish time.
-# It never dead-letters; it just fails, and only for the messages that populate
-# the new field, so it hides for weeks. That is the gap this target closes.
-#
-# The committed revision is only ever updated by `terraform apply` (never run
-# here — TF is ~228 resources behind) or an out-of-band schema commit. So
-# drift accumulates by default and MUST be gated.
-#
-#   verify-schema-registry       hermetic, no creds — vs the checked-in snapshot
-#   verify-schema-registry-live  vs the LIVE registry (needs cloud credentials)
-#   refresh-schema-snapshot      re-ground the snapshot from deployed reality
-# ---------------------------------------------------------------------------
-verify-schema-registry:
-	bash scripts/verify-schema-registry.sh
-
-verify-schema-registry-live:
-	bash scripts/verify-schema-registry.sh --live
-
-refresh-schema-snapshot:
-	bash scripts/verify-schema-registry.sh --refresh

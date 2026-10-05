@@ -1,4 +1,4 @@
-// protoflatten — codegen tool for Path C self-contained pubsub schemas.
+// protoflatten — codegen tool for the Path C flattened-schema artifact.
 //
 // Reads a buf-built FileDescriptorSet (binpb) covering proto/, walks every
 // per-aggregate event proto, and emits a SELF-CONTAINED .proto file per
@@ -6,14 +6,14 @@
 //   - chora.common.v1.EventEnvelope (from proto/chora/common/v1/envelope.proto)
 //   - google.protobuf.Timestamp (well-known type, inlined as a local message)
 //
-// GCP Pub/Sub Schema Registry rejects schemas with `import` statements, so
-// each registered schema must be self-contained. Source-of-truth remains at
-// proto/events/ for Go/Python codegen via buf.
+// Consumers of the flat tree cannot resolve `import` statements, so each file
+// must be self-contained. Source-of-truth remains at proto/events/ for
+// Go/Python codegen via buf.
 //
 // Run from chora-contracts/ root:
 //   go run ./internal/protoflatten -fds=/tmp/chora-fds.binpb -out=proto/events-flat
 //
-// Or via the wrapper script: scripts/flatten-pubsub-schemas.sh
+// Or via the wrapper script: scripts/flatten-event-schemas.sh
 //
 // Standalone module so it does not pollute the chora-contracts/gen/go go.mod
 // (which is the published codegen module path).

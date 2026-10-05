@@ -9,6 +9,50 @@ Versioning: SemVer at the package level (this CHANGELOG); per-domain proto
 packages carry their own `v1`, `v2` suffix and evolve independently. Major
 bumps cluster cross-domain breaking changes into a single release.
 
+## 2026-10-05 — GCP tooling retirement + NATS documentation reconciliation
+
+Follow-up to the event-transport migration below: removed the remaining
+non-generated GCP tooling and corrected the documentation inventory.
+
+### Removed
+
+- **`internal/schemaguard/`** (module + tests) and **`scripts/verify-schema-registry.sh`** —
+  CI tooling that validated event protos against the GCP Pub/Sub Schema Registry
+  (`google.golang.org/api/pubsub`; live API plus a checked-in snapshot of committed
+  revisions). The platform no longer uses that registry, so the guard had no
+  subject. The Makefile targets `verify-schema-registry`,
+  `verify-schema-registry-live`, and `refresh-schema-snapshot` are removed with it.
+- **`internal/protoflatten/requiredset.go`** (+ tests) and the `-require-topics` /
+  `-require-estate` / `-check-only` flags — the required-set check mirrored the
+  GCP Terraform `google_pubsub_schema` resources and `pubsub_topics` map. With
+  `chora-infra` retired, the mirror had nothing to mirror. The flatten generator
+  itself is broker-neutral and is kept.
+
+### Renamed
+
+- The event-schema flatten wrapper is now **`scripts/flatten-event-schemas.sh`**
+  (broker-neutral name; it previously carried a broker-specific one). Every
+  reference was updated (Makefile, tests, README, tool comments), and the script
+  no longer invokes the removed required-set check.
+
+### Documentation
+
+- **`README.md`** — corrected the AsyncAPI count (218 → 302) and the per-domain
+  coverage table (13 domains; adds `payments`, drops the retired `support` /
+  `closure_orchestrator` rows); refreshed the artefact-inventory counts; rewrote
+  the event narrative around NATS JetStream (the
+  `chora.{domain}.{aggregate}.{event_type}.v{N}` subjects are unchanged) and
+  described `events-flat` as a broker-neutral flattened-schema artifact.
+- **`CLAUDE.md`**, **`buf.yaml`**, **`Makefile`** — event-transport wording moved
+  from Pub/Sub / Schema Registry to NATS JetStream.
+
+### Notes
+
+- `schema-registry/committed-schemas.json` is left on disk (out of scope for this
+  change); it is now an orphaned snapshot with no consumer.
+- `openapi/` still describes Firebase and GCP API Gateway; a dedicated auth unit
+  rewrites those specs.
+
 ## 2026-10-05 — Event transport migration: Google Cloud Pub/Sub → NATS JetStream
 
 The platform event transport is moving from Google Cloud Pub/Sub to NATS
@@ -56,8 +100,8 @@ DEPRECATED AsyncAPI specs under `asyncapi/closure_orchestrator/` have been remov
 The `asyncapi/closure_orchestrator/` directory has also been removed. The v2.0.0 one-release
 migration window has long passed (release was 2026-05-09; decommission deferred to v3.0/M14
 per original plan, but the audit and plan triage approved Apply for B2). Cross-domain consumers
-that still subscribe to `chora.closure_orchestrator.saga.*.v1` will continue to receive Pub/Sub
-messages while producers are migrated; this CHANGELOG change is documentation-only and does not
+that still subscribe to `chora.closure_orchestrator.saga.*.v1` will continue to receive events
+while producers are migrated; this CHANGELOG change is documentation-only and does not
 alter wire-level topic state.
 
 ### Documentation
@@ -200,8 +244,8 @@ Question Authoring CR.
 
 ### Codegen status
 
-- `proto/events-flat/creation/atom/*.proto` regenerated via
-  `scripts/flatten-pubsub-schemas.sh` — 266 self-contained protos validated.
+- `proto/events-flat/creation/atom/*.proto` regenerated via the event-schema
+  flatten script — 266 self-contained protos validated.
 - `gen/go/chora/creation/v1/atom.pb.go` regenerated via `buf generate` +
   `scripts/relocate-flat-services.sh` — includes new fields + renamed
   accessors (`GetQuestionType`, `GetStem`, `GetCognitiveLevel`,
@@ -217,19 +261,24 @@ migration + repo) + B3 (delivery snapshot consumer) + B5 (creation HTTP
 handlers) + B6 (creation gRPC AUTHOR-SAFE projection) land in Wave 1+2 of the
 ATOM Phase 1 dispatch. That is the intended sequencing.
 
-## v2.1.0 — 2026-05-10 (Path C: self-contained Pub/Sub schemas)
+## v2.1.0 — 2026-05-10 (Path C: self-contained event schemas)
+
+> **Historical (GCP Pub/Sub era).** This release introduced the flattening step
+> while the platform's event transport was Google Cloud Pub/Sub. The platform now
+> uses NATS JetStream (see the 2026-10-05 entries); the `proto/events-flat/`
+> artifact and its broker-neutral generator are retained.
 
 ### Added
 
 1. **`proto/events-flat/`** — generated tree of self-contained per-aggregate
-   protos for GCP Pub/Sub Schema Registry consumption. Each file inlines
-   `chora.common.v1.EventEnvelope` + `google.protobuf.Timestamp` (Schema
-   Registry rejects schemas with `import` statements).
+   protos, introduced for GCP Pub/Sub Schema Registry consumption. Each file
+   inlines `chora.common.v1.EventEnvelope` + `google.protobuf.Timestamp` (that
+   registry rejected schemas with `import` statements).
 2. **`internal/protoflatten/`** — Go codegen tool that walks the buf-built
    FileDescriptorSet and emits the flat tree. Field numbers preserved
    exactly to maintain schema-evolution resilience.
-3. **`scripts/flatten-pubsub-schemas.sh`** — wrapper that runs buf +
-   protoflatten + per-file standalone-parse validation.
+3. The event-schema flatten wrapper — runs buf + protoflatten + per-file
+   standalone-parse validation.
 4. **`tests/test_events_flat_up_to_date.sh`** — CI consistency test
    asserting the committed flat tree matches what protoflatten would emit.
 5. **`buf.yaml` `excludes: [proto/events-flat]`** — keeps the flat tree
@@ -238,14 +287,14 @@ ATOM Phase 1 dispatch. That is the intended sequencing.
 
 ### Why
 
-GCP Pub/Sub Schema Registry hard-blocks `import` resolution
+GCP Pub/Sub Schema Registry hard-blocked `import` resolution
 (error: `INVALID_PROTO_SCHEMA: "chora.common.v1.EventEnvelope" is not defined`).
 Path C generates a parallel self-contained tree while preserving the canonical
 `proto/events/` source-of-truth for Go/Python codegen. chora-infra
-m10-data-plane reads from `proto/events-flat/` for
-`google_pubsub_schema.aggregate.definition`. See the m10-data-plane variable
-description (`enable_pubsub_schema_registry`) for the 4-path comparison +
-decision rationale.
+m10-data-plane read from `proto/events-flat/` for
+`google_pubsub_schema.aggregate.definition`; that Terraform wiring is retired
+with GCP. See the m10-data-plane variable description
+(`enable_pubsub_schema_registry`) for the 4-path comparison + decision rationale.
 
 ### No breaking changes
 
