@@ -2972,7 +2972,7 @@ func (x *CompanionSessionStarted) GetStartedAt() *timestamppb.Timestamp {
 // ADR-154 — Companion conversational chat surface (added 2026-05-15)
 //
 // CompanionChatTurnCompleted — emitted at the end of every successful chat
-// turn. Carries the per-turn cost ledger fields so the BigQuery cost-attribution
+// turn. Carries the per-turn cost ledger fields so the analytics cost-attribution
 // export (ai-cost-tracking skill) can sum per-(tenant_id, owner_gcid, model)
 // without joining against the chora_consumption.companion_chat_sessions table.
 //
@@ -2993,10 +2993,10 @@ type CompanionChatTurnCompleted struct {
 	// chora_consumption.companion_chat_sessions.id (UUIDv7).
 	SessionId string `protobuf:"bytes,2,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	// Per-turn UUIDv7 — unique within a session. Stable correlation key for
-	// FE-side traces + BigQuery cost-attribution rows.
+	// FE-side traces + analytics cost-attribution rows.
 	TurnId string `protobuf:"bytes,3,opt,name=turn_id,json=turnId,proto3" json:"turn_id,omitempty"`
 	// The learner-owner. Mirrors envelope.gcid; duplicated for filter-friendly
-	// BigQuery slicing.
+	// analytics slicing.
 	Gcid string `protobuf:"bytes,4,opt,name=gcid,proto3" json:"gcid,omitempty"`
 	// Tenant scope. Mirrors envelope.tenant_id.
 	TenantId string `protobuf:"bytes,5,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`

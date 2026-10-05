@@ -32,7 +32,7 @@
 // will be reconciled in a follow-up M11.2 skill refresh PR.
 //
 // TokenUsageRecorded is the canonical billing-grade ledger event emitted at
-// the Model Gateway via transactional outbox. BigQuery streaming +
+// the Model Gateway via transactional outbox. Analytics streaming +
 // pre-aggregations consume it for cost dashboards + tenant invoicing.
 //
 // EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
@@ -185,7 +185,7 @@ type TokenUsageRecorded struct {
 	ModelArmorVerdictPre  ModelArmorVerdict `protobuf:"varint,15,opt,name=model_armor_verdict_pre,json=modelArmorVerdictPre,proto3,enum=chora.observability.v1.ModelArmorVerdict" json:"model_armor_verdict_pre,omitempty"`
 	ModelArmorVerdictPost ModelArmorVerdict `protobuf:"varint,16,opt,name=model_armor_verdict_post,json=modelArmorVerdictPost,proto3,enum=chora.observability.v1.ModelArmorVerdict" json:"model_armor_verdict_post,omitempty"`
 	// Build identifier of the gateway that emitted this event, e.g.,
-	// "chora-model-gateway:58b28eb". Lets BigQuery cost aggregations
+	// "chora-model-gateway:58b28eb". Lets analytics cost aggregations
 	// attribute anomalies to a specific gateway build.
 	GatewayVersion string `protobuf:"bytes,17,opt,name=gateway_version,json=gatewayVersion,proto3" json:"gateway_version,omitempty"`
 	// Mana units charged for this call (the umbrella-currency debit the gateway

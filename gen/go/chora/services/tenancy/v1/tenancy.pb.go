@@ -12,7 +12,7 @@
 //
 // REST surface in chora-contracts/openapi/tenancy-admin.yaml is the H+
 // admin equivalent; gRPC is for internal service-to-service sync calls
-// (mTLS via Cloud Service Mesh per CLAUDE.md §4 protocol strategy).
+// (mTLS via the service mesh per CLAUDE.md §4 protocol strategy).
 //
 // Aggregates exposed:
 //   - Tenant         — top-level tenant record + hosting mode
@@ -26,7 +26,7 @@
 //
 // CreateSubTenant supports white-label / franchise hierarchies (parent_tenant_id).
 //
-// Deployed in chora-489812 team-platform pool. mTLS via Cloud Service Mesh;
+// Deployed in chora-local team-platform pool. mTLS via the service mesh;
 // SPIFFE identity in mesh; W3C trace context in gRPC metadata.
 // =============================================================================
 
@@ -1951,7 +1951,7 @@ func (x *ListMembershipsByGCIDRequest) GetIncludeSuspended() bool {
 type ListMembershipsByGCIDResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// All TenantMembership rows for the GCID. Empty when the user has no
-	// memberships yet (post-Firebase-create / pre-H+ Setup-Tenant flow).
+	// memberships yet (post-account-create / pre-H+ Setup-Tenant flow).
 	// NOT an error — caller surfaces empty as HTTP 403
 	// AUTH_NO_TENANT_MEMBERSHIP.
 	Memberships []*TenantMembership `protobuf:"bytes,1,rep,name=memberships,proto3" json:"memberships,omitempty"`

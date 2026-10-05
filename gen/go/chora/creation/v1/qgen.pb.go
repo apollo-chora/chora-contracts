@@ -287,8 +287,8 @@ type QGenBatchCompleted struct {
 	// SHOULD fetch full metadata via gRPC if needed; this list is the canonical
 	// handoff to ExamAdmin.
 	ApprovedQuestionIds []string `protobuf:"bytes,9,rep,name=approved_question_ids,json=approvedQuestionIds,proto3" json:"approved_question_ids,omitempty"`
-	// Aggregate cost telemetry (informational; canonical cost lives in BigQuery
-	// billing export per ADR-146 §7).
+	// Aggregate cost telemetry (informational; canonical cost lives in the
+	// analytics warehouse billing export per ADR-146 §7).
 	TotalInputTokens  int64                  `protobuf:"varint,10,opt,name=total_input_tokens,json=totalInputTokens,proto3" json:"total_input_tokens,omitempty"`
 	TotalOutputTokens int64                  `protobuf:"varint,11,opt,name=total_output_tokens,json=totalOutputTokens,proto3" json:"total_output_tokens,omitempty"`
 	CompletedAt       *timestamppb.Timestamp `protobuf:"bytes,12,opt,name=completed_at,json=completedAt,proto3" json:"completed_at,omitempty"`
@@ -1067,10 +1067,10 @@ func (x *QuestionEvaluated) GetEvaluatedAt() *timestamppb.Timestamp {
 //
 // The canonical, replay-safe ledger is chora_creation.qgen_provenance (append-only,
 // trigger-enforced no-UPDATE/DELETE). This event is the streaming projection for
-// BigQuery + O+ dashboards.
+// the analytics warehouse + O+ dashboards.
 //
 // Topic: chora.creation.qgen.provenance_recorded.v1
-// Consumers: Observability (BigQuery streaming insert), O+ (live per-tier +
+// Consumers: Observability (analytics streaming insert), O+ (live per-tier +
 //
 //	per-model cost split dashboards), chora-governance (IMDA D2
 //	evidence stream materialiser).
@@ -1085,7 +1085,7 @@ type QGenProvenanceRecorded struct {
 	ModelTier        ModelTier `protobuf:"varint,5,opt,name=model_tier,json=modelTier,proto3,enum=chora.creation.v1.ModelTier" json:"model_tier,omitempty"`
 	ModelProvider    string    `protobuf:"bytes,6,opt,name=model_provider,json=modelProvider,proto3" json:"model_provider,omitempty"`            // "vertex_ai" | "anthropic" | "vertex_endpoint"
 	ModelId          string    `protobuf:"bytes,7,opt,name=model_id,json=modelId,proto3" json:"model_id,omitempty"`                              // "gemini-3.1-pro-preview" | "claude-opus-4-7" | ...
-	ModelLocation    string    `protobuf:"bytes,8,opt,name=model_location,json=modelLocation,proto3" json:"model_location,omitempty"`            // "global" | "asia-southeast1" | ...
+	ModelLocation    string    `protobuf:"bytes,8,opt,name=model_location,json=modelLocation,proto3" json:"model_location,omitempty"`            // "global" | "<region>" | ...
 	FallbackTierUsed string    `protobuf:"bytes,9,opt,name=fallback_tier_used,json=fallbackTierUsed,proto3" json:"fallback_tier_used,omitempty"` // empty when primary tier worked
 	// Number of provenance rows in this batch.
 	RowsCount int32 `protobuf:"varint,10,opt,name=rows_count,json=rowsCount,proto3" json:"rows_count,omitempty"`

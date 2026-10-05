@@ -136,7 +136,7 @@ message GcidLinked {
 // -----------------------------------------------------------------------------
 //
 // Published each time chora-identity's POST /v1/identity/resolve handler
-// resolves a Firebase-validated identity to a GCID + its active tenant
+// resolves an authenticated identity to a GCID + its active tenant
 // membership set. Emitted by GCIDResolvedPublisher.PublishGCIDResolved as an
 // audit-trail event so downstream domains (Observability sign-in funnel,
 // Governance access audit) can attribute a resolution to a GCID + tenant.
@@ -161,8 +161,11 @@ message GcidResolved {
   // closure per ddd-enforcement closure saga (chora_identity PII_Closure_Map).
   string email = 4;
 
-  // Firebase Authentication UID the resolution keyed on (Identity Platform
-  // subject). Pseudonymise on closure alongside email.
+  // WIRE-COMPAT (history): retained legacy wire name for the federated
+  // subject. The login provider is now local username/password
+  // (POST /v1/auth/verify-credentials); renaming this field would break
+  // existing consumers, so it is kept verbatim. Pseudonymise on closure
+  // alongside email.
   string firebase_uid = 5;
 
   // Count of active tenant memberships resolved for this GCID at resolve time.

@@ -63,7 +63,7 @@ channels:
     address: "chora.creation.ai_assist.started.v2"
     description: |
       Pub/Sub topic for AiAssistStartedV2 events. Topic resides in the
-      centralised platform host project (`chora-489812`) with a paired
+      centralised platform host project (`chora-local`) with a paired
       dead-letter topic `chora.dlq.creation.ai_assist.started.v2`. Schema
       Registry validates the BINARY Protobuf payload at publish time (flat
       schema: proto/events-flat/creation/ai_assist/started.v2.proto).

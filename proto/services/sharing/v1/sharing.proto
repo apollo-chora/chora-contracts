@@ -30,7 +30,7 @@
 // chora_creation; learner profile data is consumed via Pub/Sub-fed
 // projections.
 //
-// Deployed in chora-content (Team 1 pool). mTLS via Cloud Service Mesh;
+// Deployed in chora-content (Team 1 pool). mTLS via the service mesh;
 // SPIFFE identity in mesh; W3C trace context in gRPC metadata.
 // =============================================================================
 

@@ -51,7 +51,7 @@ const (
 // PLATFORM_HOSTED — standard SaaS multi-tenant (Chora hosts, Chora brands)
 // WHITE_LABEL     — Chora hosts, tenant brands the surfaces (custom domain)
 // FRANCHISE       — tenant resells to sub-tenants under their own brand
-// SELF_HOST       — tenant runs Chora in their own GCP project (M17 capability)
+// SELF_HOST       — tenant runs Chora in their own environment (M17 capability)
 type HostingMode int32
 
 const (

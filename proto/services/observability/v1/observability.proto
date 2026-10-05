@@ -42,7 +42,7 @@
 // Cross-DB queries FORBIDDEN — every cross-domain dependency is wired
 // via Pub/Sub events (e.g. token_usage.recorded.v1 outbox row).
 //
-// Deployed in chora-489812 team-platform pool. mTLS via Cloud Service Mesh;
+// Deployed in chora-local team-platform pool. mTLS via the service mesh;
 // SPIFFE identity in mesh; W3C trace context in gRPC metadata.
 // =============================================================================
 

@@ -11,7 +11,7 @@
 // family in Content Consumption (chora_consumption database, Team 1 / Content).
 // REST surface in chora-contracts/openapi/learner-knowledge-graph.yaml is the
 // learner-facing equivalent; gRPC is for internal service-to-service sync
-// calls (mTLS via Cloud Service Mesh per CLAUDE.md §4 protocol strategy).
+// calls (mTLS via the service mesh per CLAUDE.md §4 protocol strategy).
 //
 // Aggregates owned:
 //   - MapCluster   — disconnected per-user knowledge map (the entity that
@@ -31,7 +31,7 @@
 // Idempotency: every mutation RPC requires idempotency_key. Identical keys
 // returning the same result.
 //
-// Deployed in chora-content (Team 1 pool). mTLS via Cloud Service Mesh;
+// Deployed in chora-content (Team 1 pool). mTLS via the service mesh;
 // SPIFFE identity in mesh; W3C trace context in gRPC metadata.
 // =============================================================================
 

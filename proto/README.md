@@ -69,7 +69,7 @@ message AtomPublished {
 
 ## gRPC Service Contracts
 
-Inter-service synchronous calls (Python LangGraph orchestrator ↔ Go executor; service-to-service mTLS via Cloud Service Mesh) use proto definitions in `proto/services/`. Conventions:
+Inter-service synchronous calls (Python LangGraph orchestrator ↔ Go executor; service-to-service mTLS via the service mesh) use proto definitions in `proto/services/`. Conventions:
 
 - **Service name**: `PascalCase`, named after capability (`ModelBrokerRouter`, `AgentExecutor`)
 - **Methods**: `PascalCase` verb-noun (`Route`, `Invoke`, `Classify`, `Execute`, `RunCrew`)

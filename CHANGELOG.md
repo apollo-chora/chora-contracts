@@ -9,22 +9,22 @@ Versioning: SemVer at the package level (this CHANGELOG); per-domain proto
 packages carry their own `v1`, `v2` suffix and evolve independently. Major
 bumps cluster cross-domain breaking changes into a single release.
 
-## 2026-10-05 — GCP tooling retirement + NATS documentation reconciliation
+## 2026-10-05 — legacy cloud tooling retirement + NATS documentation reconciliation
 
 Follow-up to the event-transport migration below: removed the remaining
-non-generated GCP tooling and corrected the documentation inventory.
+non-generated legacy cloud tooling and corrected the documentation inventory.
 
 ### Removed
 
 - **`internal/schemaguard/`** (module + tests) and **`scripts/verify-schema-registry.sh`** —
-  CI tooling that validated event protos against the GCP Pub/Sub Schema Registry
+  CI tooling that validated event protos against the legacy managed schema registry
   (`google.golang.org/api/pubsub`; live API plus a checked-in snapshot of committed
   revisions). The platform no longer uses that registry, so the guard had no
   subject. The Makefile targets `verify-schema-registry`,
   `verify-schema-registry-live`, and `refresh-schema-snapshot` are removed with it.
 - **`internal/protoflatten/requiredset.go`** (+ tests) and the `-require-topics` /
   `-require-estate` / `-check-only` flags — the required-set check mirrored the
-  GCP Terraform `google_pubsub_schema` resources and `pubsub_topics` map. With
+  legacy cloud Terraform `google_pubsub_schema` resources and `pubsub_topics` map. With
   `chora-infra` retired, the mirror had nothing to mirror. The flatten generator
   itself is broker-neutral and is kept.
 
@@ -50,12 +50,12 @@ non-generated GCP tooling and corrected the documentation inventory.
 
 - `schema-registry/committed-schemas.json` is left on disk (out of scope for this
   change); it is now an orphaned snapshot with no consumer.
-- `openapi/` still describes Firebase and GCP API Gateway; a dedicated auth unit
-  rewrites those specs.
+- `openapi/` auth specs are rewritten to the current username/password
+  session-mint flow (see the auth entry above).
 
-## 2026-10-05 — Event transport migration: Google Cloud Pub/Sub → NATS JetStream
+## 2026-10-05 — Event transport migration: the legacy managed pub/sub → NATS JetStream
 
-The platform event transport is moving from Google Cloud Pub/Sub to NATS
+The platform event transport is moving from the legacy managed pub/sub to NATS
 JetStream. The contracts now describe NATS.
 
 ### Changed
@@ -69,8 +69,8 @@ JetStream. The contracts now describe NATS.
 - **Protobuf media type**: `application/vnd.google.protobuf` →
   `application/x-protobuf` in `defaultContentType` and per-message
   `contentType`/`schemaFormat` (991 occurrences).
-- **Descriptions**: GCP product mentions in event descriptions reworded to
-  neutral platform terminology — BigQuery consumers → "the analytics
+- **Descriptions**: legacy cloud product mentions in event descriptions reworded to
+  neutral platform terminology — analytics-warehouse consumers → "the analytics
   warehouse" / "analytics streaming", Vertex AI training/deployment targets →
   "model training job" / "model serving endpoint", and the
   `CHORA_OUTBOX_DISPATCH_PUBSUB` flag reference → "outbox dispatch enabled".
@@ -263,15 +263,15 @@ ATOM Phase 1 dispatch. That is the intended sequencing.
 
 ## v2.1.0 — 2026-05-10 (Path C: self-contained event schemas)
 
-> **Historical (GCP Pub/Sub era).** This release introduced the flattening step
-> while the platform's event transport was Google Cloud Pub/Sub. The platform now
+> **Historical (legacy cloud Pub/Sub era).** This release introduced the flattening step
+> while the platform's event transport was the legacy managed pub/sub. The platform now
 > uses NATS JetStream (see the 2026-10-05 entries); the `proto/events-flat/`
 > artifact and its broker-neutral generator are retained.
 
 ### Added
 
 1. **`proto/events-flat/`** — generated tree of self-contained per-aggregate
-   protos, introduced for GCP Pub/Sub Schema Registry consumption. Each file
+   protos, introduced for the legacy managed schema registry consumption. Each file
    inlines `chora.common.v1.EventEnvelope` + `google.protobuf.Timestamp` (that
    registry rejected schemas with `import` statements).
 2. **`internal/protoflatten/`** — Go codegen tool that walks the buf-built
@@ -287,13 +287,13 @@ ATOM Phase 1 dispatch. That is the intended sequencing.
 
 ### Why
 
-GCP Pub/Sub Schema Registry hard-blocked `import` resolution
+The legacy managed schema registry hard-blocked `import` resolution
 (error: `INVALID_PROTO_SCHEMA: "chora.common.v1.EventEnvelope" is not defined`).
 Path C generates a parallel self-contained tree while preserving the canonical
 `proto/events/` source-of-truth for Go/Python codegen. chora-infra
 m10-data-plane read from `proto/events-flat/` for
 `google_pubsub_schema.aggregate.definition`; that Terraform wiring is retired
-with GCP. See the m10-data-plane variable description
+with legacy cloud. See the m10-data-plane variable description
 (`enable_pubsub_schema_registry`) for the 4-path comparison + decision rationale.
 
 ### No breaking changes

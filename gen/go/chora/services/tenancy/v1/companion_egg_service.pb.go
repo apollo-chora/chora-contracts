@@ -14,7 +14,7 @@
 // Per ddd-enforcement HARD RULE: chora-consumption MUST NOT query the
 // chora_tenancy database directly. PROD-B wired this as a REST GET
 // /api/companion-eggs/{sku}/odds call; PROD-C (this proto) is the
-// typed-RPC successor — faster, mTLS by default via Cloud Service Mesh,
+// typed-RPC successor — faster, mTLS by default via the service mesh,
 // and avoids the JSON round-trip cost.
 //
 // The REST endpoint stays mounted for backward compat + IMDA D2
@@ -25,7 +25,7 @@
 // chora-consumption (CompanionGrowth.HatchEgg). This proto only exposes the
 // catalog projection — never executes the roll.
 //
-// Deployed in chora-489812 team-platform pool. mTLS via Cloud Service
+// Deployed in chora-local team-platform pool. mTLS via Cloud Service
 // Mesh; SPIFFE identity in mesh; W3C trace context in gRPC metadata.
 // =============================================================================
 

@@ -112,7 +112,7 @@ func (DecisionKind) EnumDescriptor() ([]byte, []int) {
 // -----------------------------------------------------------------------------
 //
 // Published when an agent makes a discrete, observable decision. High-volume
-// — expect batching to BigQuery for explainability dashboards + downstream
+// — expect batching to the analytics warehouse for explainability dashboards +
 // LLM-as-Judge eval pipelines.
 type AgentDecisionLogged struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
@@ -179,7 +179,7 @@ type AgentDecisionLogged struct {
 	// free-form string pairs rather than polluting the schema with named
 	// single-agent fields. Examples: qgen quality-gate emits
 	// {"attempt_count":"2","max_retries":"3","quality_warning":"false"}.
-	// Streamed to BigQuery as a REPEATED key/value RECORD column. Additive
+	// Streamed to the analytics warehouse as a REPEATED key/value RECORD column.
 	// v1 evolution — older consumers ignore unknown field 21.
 	Attributes    map[string]string `protobuf:"bytes,21,rep,name=attributes,proto3" json:"attributes,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields

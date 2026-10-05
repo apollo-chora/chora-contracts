@@ -24,8 +24,8 @@
 //   6. Classifier Service fuzzy fallback (rules ambiguous only)
 //
 // Caller flow: executor / orchestrator-node → Router (decide) → Gateway (execute).
-// Router is stateless. Cloud Run scale-to-zero in chora-489812 team-platform.
-// mTLS via Cloud Service Mesh; SPIFFE identity in mesh; W3C trace context in
+// Router is stateless. Cloud Run scale-to-zero in chora-local team-platform.
+// mTLS via the service mesh; SPIFFE identity in mesh; W3C trace context in
 // gRPC metadata (handled outside this contract).
 // =============================================================================
 

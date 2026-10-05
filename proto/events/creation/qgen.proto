@@ -95,8 +95,8 @@ message QGenBatchCompleted {
   // handoff to ExamAdmin.
   repeated string approved_question_ids = 9;
 
-  // Aggregate cost telemetry (informational; canonical cost lives in BigQuery
-  // billing export per ADR-146 §7).
+  // Aggregate cost telemetry (informational; canonical cost lives in the
+  // analytics warehouse billing export per ADR-146 §7).
   int64 total_input_tokens = 10;
   int64 total_output_tokens = 11;
 
@@ -323,10 +323,10 @@ message QuestionEvaluated {
 //
 // The canonical, replay-safe ledger is chora_creation.qgen_provenance (append-only,
 // trigger-enforced no-UPDATE/DELETE). This event is the streaming projection for
-// BigQuery + O+ dashboards.
+// the analytics warehouse + O+ dashboards.
 //
 // Topic: chora.creation.qgen.provenance_recorded.v1
-// Consumers: Observability (BigQuery streaming insert), O+ (live per-tier +
+// Consumers: Observability (analytics streaming insert), O+ (live per-tier +
 //            per-model cost split dashboards), chora-governance (IMDA D2
 //            evidence stream materialiser).
 message QGenProvenanceRecorded {
@@ -342,7 +342,7 @@ message QGenProvenanceRecorded {
   ModelTier model_tier = 5;
   string model_provider = 6;  // "vertex_ai" | "anthropic" | "vertex_endpoint"
   string model_id = 7;        // "gemini-3.1-pro-preview" | "claude-opus-4-7" | ...
-  string model_location = 8;  // "global" | "asia-southeast1" | ...
+  string model_location = 8;  // "global" | "<region>" | ...
   string fallback_tier_used = 9;  // empty when primary tier worked
 
   // Number of provenance rows in this batch.

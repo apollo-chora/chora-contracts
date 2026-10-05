@@ -3,14 +3,14 @@
 // =============================================================================
 //
 // Source-of-truth:
-//   - docs/architecture/adrs/adr-163-model-gateway-gke-asia-southeast1.md
+//   - docs/architecture/adrs/adr-163-model-gateway-region-placement.md
 //     (PROPOSED 2026-05-24 — load-bearing decision document)
 //   - docs/architecture/adrs/adr-146-model-broker-full-retirement.md
 //     (amended by ADR-163 — supersedes the 3-service Model Broker shape)
-//   - docs/architecture/adrs/adr-152-chora-guardrail-superseded-by-cloud-model-armor.md
-//     (Cloud Model Armor SDK direct-call pattern composed inside the gateway)
+//   - docs/architecture/adrs/adr-152-chora-guardrail-superseded-by-model-armor.md
+//     (guardrail SDK direct-call pattern composed inside the gateway)
 //   - docs/m15/continuous-llm-refinement-plan-2026-05-22.md (amended 2026-05-24)
-//   - .claude/skills/cloud-model-armor-guardrails/SKILL.md
+//   - .claude/skills/guardrail-screening/SKILL.md
 //   - .claude/skills/ai-cost-tracking/SKILL.md
 //   - .claude/skills/gemma-lora-tenant/SKILL.md
 //   - .claude/skills/adk-tool-calling-loop/SKILL.md
@@ -23,25 +23,24 @@
 //     |  gRPC Invoke
 //     v
 //   ┌────────────────────────────────────────────────┐
-//   │  chora-model-gateway (asia-southeast1, GKE)    │
+//   │  chora-model-gateway (primary region)          │
 //   │   1. resolve agent + crew routing policy       │
 //   │   2. check per-tenant LLM budget (RLS)         │
-//   │   3. Cloud Model Armor PRE  (input sanitise)   │
+//   │   3. guardrail PRE  (input sanitise)           │
 //   │   4. vendor dispatch (Gemini / Gemma / BYOA)   │
-//   │   5. Cloud Model Armor POST (output sanitise)  │
+//   │   5. guardrail POST (output sanitise)          │
 //   │   6. atomic ledger write + outbox emit on      │
 //   │      chora.observability.token_usage.recorded  │
 //   │      .v1 (canonical topic — never coin a new   │
 //   │      ai_kernel.model_invoked.v1)               │
 //   └────────────────────────────────────────────────┘
 //
-// Per ADR-163 the gateway is hosted on GKE Autopilot chora-prod-cluster in
-// asia-southeast1 to collapse the cross-region tax that the BFF was paying
-// during M14 (BFF asia-southeast1 -> Vertex AI Agent Engine us-central1
-// -> Vertex AI us-central1). The gateway sits in-region with the BFF;
-// agents in us-central1 Agent Engine accept ~150-250 ms one-way RTT during
-// the ADR-148 us-central1 carve-out, then the cost vanishes when Vertex AI
-// Agent Engine GAs in asia-southeast1.
+// Per ADR-163 the gateway is hosted on the managed Kubernetes cluster in the
+// primary region to collapse the cross-region tax that the BFF was paying
+// during M14 (BFF primary region -> remote model-serving endpoints). The
+// gateway sits in-region with the BFF; remote-region agents accept
+// ~150-250 ms one-way RTT during the ADR-148 carve-out, then the cost
+// vanishes once the model-serving endpoints land in the primary region.
 //
 // PORT + APP-PROTOCOL: this service listens on canonical gRPC port :9090
 // named "grpc" with appProtocol: grpc per ADR-140 + the Wave-1.5 mass

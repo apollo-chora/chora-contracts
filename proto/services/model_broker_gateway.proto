@@ -26,7 +26,7 @@
 //   - Invoke: synchronous unary (full completion in one response)
 //   - InvokeStreaming: server-stream of chunks for token-streaming UX
 //
-// Cloud Run scale-to-zero in chora-489812 team-platform. mTLS via Cloud
+// Cloud Run scale-to-zero in chora-local team-platform. mTLS via Cloud
 // Service Mesh; SPIFFE identity in mesh; W3C trace context in gRPC metadata.
 // =============================================================================
 

@@ -1463,7 +1463,7 @@ func (x *KGFogNeighborsRequested) GetRequestedAt() *timestamppb.Timestamp {
 // AI Kernel cost ledger (per ai-cost-tracking skill).
 //
 // Topic: chora.consumption.kg_hexagon_fog.generated.v1
-// Consumers: AI Kernel (cost ledger BigQuery streaming),
+// Consumers: AI Kernel (cost ledger analytics streaming),
 //
 //	Observability (engagement analytics).
 type HexagonFogGenerated struct {

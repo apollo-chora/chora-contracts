@@ -29,7 +29,7 @@
 // deliberate operator/admin choices managed_tenant_id (MASTER selector)
 // and the learner_gcid drill filter (TENANT/MASTER).
 //
-// Deployed in chora-tenancy (Team 3 / Platform). mTLS via Cloud Service Mesh;
+// Deployed in chora-tenancy (Team 3 / Platform). mTLS via the service mesh;
 // SPIFFE identity in mesh; W3C trace context in gRPC metadata. The
 // chora-gateway BFF fronts this with the REST surface in
 // openapi/transaction-history.yaml (learner /me + admin /admin).

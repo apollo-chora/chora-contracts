@@ -10,10 +10,9 @@
 // Topic prefix  : chora.observability.metric.*
 //
 // KPI metrics are business-level (DAU/MAU, atoms-per-learner, completion
-// rates, conversion funnels) emitted via Pub/Sub for BigQuery streaming
-// and Looker Studio dashboards. Distinct from Cloud Monitoring's
-// infra-level metrics (CPU, memory, request rate) which flow direct to
-// Cloud Monitoring without Pub/Sub.
+// rates, conversion funnels) emitted via the event bus for analytics
+// streaming and dashboarding. Distinct from infrastructure monitoring
+// (CPU, memory, request rate), which is scraped separately.
 //
 // EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
 // =============================================================================

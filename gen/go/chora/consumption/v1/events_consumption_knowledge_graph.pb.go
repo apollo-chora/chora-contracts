@@ -257,7 +257,7 @@ type KGClusterMerged struct {
 	// Number of overlap nodes that were de-duplicated during merge.
 	DedupCount int32 `protobuf:"varint,7,opt,name=dedup_count,json=dedupCount,proto3" json:"dedup_count,omitempty"`
 	// Cold-storage URI for the absorbed cluster's pre-merge snapshot.
-	// gs://chora-489812-kg-cold/{tenant_id}/{owner_gcid}/{absorbed_cluster_id}.json.gz
+	// gs://chora-local-kg-cold/{tenant_id}/{owner_gcid}/{absorbed_cluster_id}.json.gz
 	ColdArchiveUri string                 `protobuf:"bytes,8,opt,name=cold_archive_uri,json=coldArchiveUri,proto3" json:"cold_archive_uri,omitempty"`
 	MergedAt       *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=merged_at,json=mergedAt,proto3" json:"merged_at,omitempty"`
 	unknownFields  protoimpl.UnknownFields

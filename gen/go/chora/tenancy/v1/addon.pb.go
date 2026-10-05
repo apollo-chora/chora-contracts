@@ -689,7 +689,7 @@ func (x *AddonDowngraded) GetRequestedByGcid() string {
 // active learner consumed a seat, AI tokens consumed beyond the included
 // quota, a certification issuance against a metered cert pack).
 //
-// High-volume topic — consumers (BigQuery streaming, billing aggregation,
+// High-volume topic — consumers (analytics streaming, billing aggregation,
 // observability dashboards) should expect bursts.
 type AddonUsageRecorded struct {
 	state       protoimpl.MessageState `protogen:"open.v1"`

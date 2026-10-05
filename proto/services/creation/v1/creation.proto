@@ -29,7 +29,7 @@
 // Cross-DB queries FORBIDDEN — references to other domains use UUIDs
 // without FK constraints (aggregate-invariant #3).
 //
-// Deployed in chora-content (Team 1 pool). mTLS via Cloud Service Mesh;
+// Deployed in chora-content (Team 1 pool). mTLS via the service mesh;
 // SPIFFE identity in mesh; W3C trace context in gRPC metadata.
 // =============================================================================
 

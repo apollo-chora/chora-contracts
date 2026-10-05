@@ -1154,7 +1154,7 @@ paths:
       summary: Agent-eval crew-run index for the O+ surface
       description: |
         Pass-through to
-        `chora-observability:/api/v1/observability/eval-runs` (the BigQuery
+        `chora-observability:/api/v1/observability/eval-runs` (the analytics-warehouse
         `agent_eval_evidence` view). Wraps the producer response in the
         OPlusEnvelope so the FE observes `state` + `fetched_at` uniformly.
         Each crew run (`candidate_label`) carries a `bigquery_url` deep-link
@@ -2587,7 +2587,7 @@ components:
       type: object
       description: |
         One crew run keyed by `candidate_label` (shared by all members).
-        `bigquery_url` powers the "View in BigQuery ↗" deep-link to the
+        `bigquery_url` powers the "View in the analytics warehouse ↗" deep-link to the
         `agent_eval_evidence` view.
       required: [candidate_label, last_recorded_at, members]
       properties:

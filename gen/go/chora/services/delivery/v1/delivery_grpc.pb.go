@@ -26,7 +26,7 @@
 // "Udemy moment" (Comic Ch5 P10) — public discovery + same-identity
 // enrollment without creating a new user record.
 //
-// Deployed in chora-delivery (Team 2 pool). mTLS via Cloud Service Mesh;
+// Deployed in chora-delivery (Team 2 pool). mTLS via the service mesh;
 // SPIFFE identity in mesh; W3C trace context in gRPC metadata.
 // =============================================================================
 

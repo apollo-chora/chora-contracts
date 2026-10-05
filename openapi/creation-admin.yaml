@@ -402,7 +402,7 @@ paths:
         ADR-156 Phase 1 atom-media support. FE PUTs the image directly to GCS
         using the returned signed URL — the BFF / API path never proxies the
         bytes themselves (only the small JSON envelope). Bucket is
-        `chora-atom-media-dev` in `asia-southeast1` per E2E-INFRA-ATOM-1
+        `chora-atom-media-dev` per E2E-INFRA-ATOM-1
         (provisioned at Infra commit `4df66f51`); env var `ATOM_MEDIA_BUCKET`
         sources the bucket name on the chora-creation pod.
 

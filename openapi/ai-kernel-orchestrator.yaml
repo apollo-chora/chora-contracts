@@ -8,7 +8,7 @@ info:
 
     Owning domain : AI Kernel (`chora_ai_kernel` database)
     Owning team   : Team 3 (Platform)
-    Project       : `chora-489812` (platform host) — `team-platform` namespace
+    Project       : `chora-local` (platform host) — `team-platform` namespace
                     in `chora-prod-cluster` (always-on, leader-elected).
     Surface       : O+ Observability+ (admin/auditor read on traces;
                     `/orchestrate` is BFF-internal — invoked by chora-bff-gateway

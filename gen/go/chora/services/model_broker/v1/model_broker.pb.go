@@ -45,7 +45,7 @@
 // adapter URIs in GenerationRequest.adapter_uri MUST belong to the caller's
 // tenant_id; mismatch = INVALID_ARGUMENT.
 //
-// Deployed in chora-489812 team-platform pool. mTLS via Cloud Service Mesh;
+// Deployed in chora-local team-platform pool. mTLS via the service mesh;
 // SPIFFE identity in mesh; W3C trace context in gRPC metadata.
 // =============================================================================
 

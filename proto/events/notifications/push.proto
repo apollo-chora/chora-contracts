@@ -3,15 +3,16 @@
 // =============================================================================
 //
 // Source-of-truth: docs/architecture-review-inputs-2026-05-07.md Tier 4 D16
-//   (tablet-first; FCM for push to A+ Reader / C+ Connect+ install variants)
+//   (tablet-first; push delivery to A+ Reader / C+ Connect+ install variants)
 //
 // Owning domain : Notifications (chora_notifications database)
 // Owning team   : Team 3 (Platform)
 // Topic prefix  : chora.notifications.push.*
 //
-// Push notifications use Firebase Cloud Messaging (FCM). Because FCM tokens
-// are PII-adjacent, this proto carries only a SHA-256 hash of the token.
-// The plaintext token lives in chora_notifications.fcm_tokens with RLS.
+// Push notifications are delivered through the platform's push provider.
+// Because device push tokens are PII-adjacent, this proto carries only a
+// SHA-256 hash of the token. The plaintext token lives in
+// chora_notifications.fcm_tokens with RLS.
 //
 // EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
 // =============================================================================
@@ -29,7 +30,7 @@ import "chora/common/v1/envelope.proto";
 // PushQueued — chora.notifications.push.queued.v1
 // -----------------------------------------------------------------------------
 //
-// Published when a push notification is enqueued for FCM dispatch
+// Published when a push notification is enqueued for push dispatch
 // (transactional outbox).
 message PushQueued {
   chora.common.v1.EventEnvelope envelope = 1;

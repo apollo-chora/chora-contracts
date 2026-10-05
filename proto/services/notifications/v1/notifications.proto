@@ -12,7 +12,7 @@
 // (chora_notifications database, Team 3 / Platform). REST surfaces in
 // services/chora-notifications/internal/adapter/http are the user-facing
 // equivalents; gRPC is for internal service-to-service sync calls only
-// (mTLS via Cloud Service Mesh per CLAUDE.md §4 protocol strategy).
+// (mTLS via the service mesh per CLAUDE.md §4 protocol strategy).
 //
 // Primary callers (per docs/m13/grpc-mass-remediation-2026-05-16.md §4):
 //   - chora-gateway BFF — proxies FE in-app notification routes
@@ -35,7 +35,7 @@
 // UUIDs referenced without FK constraint. Inter-domain side effects flow
 // via Pub/Sub events (Protobuf Schema Registry validated).
 //
-// Deployed in chora-489812 team-platform pool. mTLS via Cloud Service Mesh;
+// Deployed in chora-local team-platform pool. mTLS via the service mesh;
 // SPIFFE identity in mesh; W3C trace context in gRPC metadata.
 // =============================================================================
 

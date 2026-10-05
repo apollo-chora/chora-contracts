@@ -605,7 +605,7 @@ func (x *UserManaRefunded) GetRecordedAt() *timestamppb.Timestamp {
 // reconciliation / federated closure saga audit. Does NOT mutate the
 // ledger.
 //
-// Consumers: BigQuery streaming (mana_balance_history fact table),
+// Consumers: analytics streaming (mana_balance_history fact table),
 // Observability (per-tier balance distributions), Closure Orchestrator
 // (saga step evidence).
 type UserManaSnapshotTaken struct {

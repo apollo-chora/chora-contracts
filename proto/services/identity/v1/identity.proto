@@ -12,7 +12,7 @@
 // (chora_identity database, Team 3 / Platform). REST surfaces in
 // chora-contracts/openapi/identity*.yaml are the user-facing equivalents;
 // gRPC is for internal service-to-service sync calls only (mTLS via
-// Cloud Service Mesh per CLAUDE.md §4 protocol strategy).
+// the service mesh per CLAUDE.md §4 protocol strategy).
 //
 // Aggregates exposed:
 //   - GlobalChoraID (GCID)        — opaque UUIDv7, cross-tenant portable
@@ -29,7 +29,7 @@
 // asynchronously via Pub/Sub events fanned out by the AI-Kernel-owned
 // ClosureOrchestrator (see proto/services/closure_orchestrator.proto).
 //
-// Deployed in chora-489812 team-platform pool. mTLS via Cloud Service Mesh;
+// Deployed in chora-local team-platform pool. mTLS via the service mesh;
 // SPIFFE identity in mesh; W3C trace context in gRPC metadata.
 // =============================================================================
 

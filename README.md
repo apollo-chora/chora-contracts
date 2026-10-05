@@ -16,7 +16,7 @@ chora-contracts/
 │   ├── common/                       # Shared types (EventEnvelope — mandatory wrapper)
 │   ├── events/{domain}/              # Per-domain event payloads (source-of-truth)
 │   ├── events-flat/{domain}/         # Self-contained flattened payloads (generated)
-│   └── services/                     # gRPC inter-service contracts (mTLS via Cloud Service Mesh)
+│   └── services/                     # gRPC inter-service contracts (mTLS via the service mesh)
 ├── asyncapi/{domain}/                # Human-readable AsyncAPI 3.0 docs (one per topic)
 ├── openapi/                          # REST admin CRUD specs (per-domain admin services)
 ├── graphql/                          # Learner-facing GraphQL SDL (Creation/Consumption/Sharing/Companion)
@@ -96,7 +96,7 @@ Hand-edits to `gen/` and `proto/events-flat/` are rejected.
 
 ### Why the proto-flatten step (Path C)
 
-Every canonical event proto under `proto/events/{domain}/{aggregate}.proto` imports `chora.common.v1.EventEnvelope` and `google.protobuf.Timestamp`. The `protoflatten` tool reads the buf-built FileDescriptorSet and emits a parallel SELF-CONTAINED tree at `proto/events-flat/{domain}/{aggregate}.proto` that inlines both types into every per-aggregate file — a flattened-schema artifact, not a broker payload. Source-of-truth at `proto/events/` is unchanged — Go/Python codegen continues from there. The step was introduced for the GCP Pub/Sub Schema Registry, which rejected `import` statements (history — the platform now uses NATS JetStream); it is retained broker-neutral.
+Every canonical event proto under `proto/events/{domain}/{aggregate}.proto` imports `chora.common.v1.EventEnvelope` and `google.protobuf.Timestamp`. The `protoflatten` tool reads the buf-built FileDescriptorSet and emits a parallel SELF-CONTAINED tree at `proto/events-flat/{domain}/{aggregate}.proto` that inlines both types into every per-aggregate file — a flattened-schema artifact, not a broker payload. Source-of-truth at `proto/events/` is unchanged — Go/Python codegen continues from there. The step was introduced for a legacy managed schema registry, which rejected `import` statements (history — the platform now uses NATS JetStream); it is retained broker-neutral.
 
 The subject taxonomy `chora.{domain}.{aggregate}.{event_type}.v{N}` means each (domain, aggregate) tuple maps to exactly one flattened schema in `proto/events-flat/`. Multiple subject event_types share that schema. For schema versioning resilience, field numbers are preserved exactly across the flattening — never renumbered. New event types within `v1` are additive (proto3 default) so old subscribers keep working.
 

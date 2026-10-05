@@ -10,7 +10,7 @@
 #
 # The flat tree is a self-contained flattened-schema artifact: consumers that
 # cannot resolve `import` statements read each file directly. It was introduced
-# for the GCP Pub/Sub Schema Registry, which rejected `import` statements
+# for a legacy managed schema registry, which rejected `import` statements
 # (history — the platform now uses NATS JetStream); the artifact is retained
 # broker-neutral. The canonical proto/events/ tree is unchanged and remains the
 # source-of-truth for Go/Python codegen via `buf generate`.

@@ -28,13 +28,14 @@ info:
     documented here retroactively with its ADR-182 semantics.
 
     Architecture notes (ADR-181 / ADR-182):
-      - Identity Platform (GCIP) is the SOLE credential store. Email+password
-        and Google/Microsoft sign-ins happen in the FE via the Firebase SDK;
-        the BFF only ever sees a Firebase ID token at mint. There are NO
+      - chora-identity is the SOLE credential store. The FE POSTs
+        {username, password} to /api/v1/auth/session/mint; the BFF calls
+        chora-identity POST /v1/auth/verify-credentials and mints the Chora
+        session JWT from the returned claims. There are NO
         /api/v1/auth/login or /api/v1/auth/register endpoints by design.
-      - WebAuthn passkeys are the one non-Firebase factor: the 4 ceremony
+      - WebAuthn passkeys are the one non-password factor: the 4 ceremony
         routes below proxy to chora-identity and, on login/finish, mint the
-        same Chora session JWT shape as the Firebase mint path
+        same Chora session JWT shape as the password mint path
         (gcid + tenant_id + roles).
       - Mint always resolves to a tenant-scoped session: users with zero
         private memberships are auto-enrolled into the public `chora-master`
@@ -53,13 +54,13 @@ info:
 
 servers:
   - url: "https://api.chora.site"
-    description: "chora-gateway BFF (GCLB, chora-489812)"
+    description: "chora-gateway BFF"
   - url: "http://localhost:8081"
     description: "Local development"
 
 tags:
   - name: Session
-    description: "Chora session mint (Firebase ID token exchange)"
+    description: "Chora session mint (username/password exchange)"
   - name: WebAuthn
     description: "Passkey registration + login ceremonies (proxied to chora-identity)"
   - name: Closure
@@ -69,15 +70,16 @@ paths:
   /api/v1/auth/session/mint:
     post:
       operationId: mintSession
-      summary: "Exchange a verified Firebase ID token for a Chora session JWT"
+      summary: "Exchange username/password credentials for a Chora session JWT"
       description: |
         Anonymous endpoint — this IS the auth-establishing surface.
 
-        Pipeline: validate Firebase JWT (signature/issuer/audience/exp +
-        email_verified=true) → email match → registration gate (allowlist
-        while REGISTRATION_MODE=allowlist) → identity resolve (lookup-or-create
-        GCID; auto-enrol into chora-master when zero memberships, ADR-182 D2)
-        → mint HS256 session JWT carrying gcid, tenant_id, roles.
+        Pipeline: decode {username, password} → chora-identity
+        POST /v1/auth/verify-credentials (Argon2id credential check, active
+        account, active tenant resolution) → mint HS256 session JWT carrying
+        gcid, tenant_id, roles. Zero active memberships is rejected by
+        chora-identity as 401 INVALID_CREDENTIALS (never a tenant-less
+        principal).
       tags: [Session]
       security: []
       requestBody:
@@ -96,19 +98,19 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
-          description: "Firebase JWT invalid / email unverified (AUTH_INVALID_TOKEN, AUTH_EMAIL_UNVERIFIED)"
+          description: "Invalid username/password (INVALID_CREDENTIALS)"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
         "403":
-          description: "Email not admitted by the registration gate (AUTH_EMAIL_NOT_ALLOWLISTED)"
+          description: "Account not active (ACCOUNT_DISABLED)"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
-        "502":
-          description: "Identity resolve unreachable (AUTH_RESOLVE_UNAVAILABLE)"
+        "503":
+          description: "chora-identity verify-credentials unreachable (AUTH_IDENTITY_UPSTREAM_UNAVAILABLE)"
           content:
             application/json:
               schema:
@@ -222,7 +224,7 @@ paths:
         Anonymous. chora-identity verifies the assertion (W3C WebAuthn L3
         §7.2 against the stored REAL COSE key; challenge single-use;
         sign-count replay protection), then the gateway composes the SAME
-        session-mint pipeline as the Firebase path (identity resolve →
+        session-mint pipeline as the password path (identity resolve →
         memberships → tenant-scoped JWT). The dev HS256 tenant-less token
         path is RETIRED (ADR-181 D2).
       tags: [WebAuthn]
@@ -491,15 +493,15 @@ components:
   schemas:
     MintRequest:
       type: object
-      required: [firebase_id_token, email]
+      required: [username, password]
       properties:
-        firebase_id_token:
+        username:
           type: string
-          description: "Firebase ID token from ANY Identity Platform sign-in (Google popup, Microsoft popup, email+password, post-TOTP-challenge)"
-        email:
+          description: "Globally unique, case-normalised login name"
+        password:
           type: string
-          format: email
-          description: "Must match the token's email claim (case-insensitive)"
+          format: password
+          description: "Cleartext over TLS only; capped at 1024 bytes by chora-identity"
         active_tenant_id:
           type: string
           format: uuid

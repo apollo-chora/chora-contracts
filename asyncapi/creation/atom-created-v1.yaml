@@ -34,7 +34,7 @@ channels:
     address: "chora.creation.atom.created.v1"
     description: |
       Pub/Sub topic for AtomCreated events. Topic resides in the centralised
-      platform host project (`chora-489812`); subscriptions are owned by
+      platform host project (`chora-local`); subscriptions are owned by
       consuming projects (chora-content, chora-delivery) via cross-project
       IAM. Schema Registry validates the Protobuf payload at publish time.
     messages:

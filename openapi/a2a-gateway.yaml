@@ -5,7 +5,7 @@ info:
   description: |
     Agent-to-Agent (A2A) Gateway external-facing REST API per ADR-132.
 
-    This contract is served via GCP API Gateway (NOT the primary GCLB
+    This contract is served via the API gateway (NOT the primary GCLB
     ingress). External agents call here to:
       1. Declare contracts (outbound capability registration).
       2. Invoke Chora-side agent capabilities.
@@ -39,7 +39,7 @@ info:
 
 servers:
   - url: https://a2a.chora.site
-    description: Production (GCP API Gateway)
+    description: Production (the API gateway)
   - url: http://localhost:8095
     description: Local development
 

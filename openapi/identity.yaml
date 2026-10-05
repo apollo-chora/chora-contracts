@@ -20,7 +20,7 @@ info:
     `identity-admin.yaml`.
 
     Authorization (MVP): `Authorization: Bearer <gcid>`. The bearer value is
-    the user's GCID; full Identity Platform OIDC validation lands at M12+.
+    the user's GCID; full session-JWT validation lands at M12+.
     Unknown / missing GCIDs → 401.
   contact:
     name: "Chora Platform Team (Team 3)"
@@ -29,7 +29,7 @@ info:
 
 servers:
   - url: "https://chora-identity-7b33ycv73q-as.a.run.app"
-    description: "Cloud Run (chora-489812, asia-southeast1) — dev"
+    description: "Cloud Run (chora-local) — dev"
   - url: "http://localhost:8080"
     description: "Local development"
 
@@ -46,12 +46,12 @@ paths:
   /v1/identity/resolve:
     post:
       operationId: resolveIdentity
-      summary: "Resolve a Firebase-verified user to GCID + tenant memberships"
+      summary: "Resolve an authenticated user to GCID + tenant memberships"
       description: |
         Called by chora-gateway during POST /api/v1/auth/session/mint AFTER
-        the Firebase ID token has been signature-validated. Returns the
-        user's GCID + the full list of tenant memberships they hold (one
-        GCID, many tenants, many roles per tenant — per the 2026-05-14
+        the credential/assertion has been verified. Returns the user's
+        GCID + the full list of tenant memberships they hold (one GCID,
+        many tenants, many roles per tenant — per the 2026-05-14
         multi-tenant identity arch-correct invariant).
 
         Flow:
@@ -59,7 +59,7 @@ paths:
           1. Lookup-or-create the GlobalChoraIdentity row by
              (email, firebase_uid). Soft-delete + UUIDv7 + GCID-stable.
           2. gRPC call to chora-tenancy's ListMembershipsByGCID over
-             Cloud Service Mesh mTLS. The membership table lives in
+             service-mesh mTLS. The membership table lives in
              chora_tenancy; chora-identity MUST NOT query it directly.
           3. ADR-182 D2 — when the user holds ZERO memberships, auto-enrol
              the GCID into the public `chora-master` tenant as
@@ -73,8 +73,8 @@ paths:
              sha256(email+firebase_uid)) for the audit trail.
 
         Authentication: NONE at this endpoint — chora-gateway is the
-        upstream trust boundary that gates the Firebase ID token. The
-        endpoint is mesh-internal only; production deployment binds it
+        upstream trust boundary that verifies the credential/assertion.
+        The endpoint is mesh-internal only; production deployment binds it
         to the mesh-internal SVC_IDENTITY_URL.
 
         Out-of-scope (M14+):
@@ -302,12 +302,12 @@ components:
         email:
           type: string
           format: email
-          description: "Email from the Firebase ID token (already verified by chora-gateway)"
+          description: "Email from the verified credential (already checked by chora-gateway)"
           example: "phyllis@mightymind.sg"
         firebase_uid:
           type: string
-          description: "Firebase sub claim (federated subject)"
-          example: "firebase-uid-abc-123"
+          description: "WIRE-COMPAT (history): retained legacy wire name for the federated subject"
+          example: "federated-subject-abc-123"
         active_tenant_id:
           type: string
           format: uuid
@@ -345,7 +345,7 @@ components:
           example: "phyllis@mightymind.sg"
         firebase_uid:
           type: string
-          example: "firebase-uid-abc-123"
+          example: "federated-subject-abc-123"
 
     TenantMembership:
       type: object

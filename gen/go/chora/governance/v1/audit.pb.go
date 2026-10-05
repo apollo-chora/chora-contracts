@@ -102,7 +102,7 @@ func (AuditResult) EnumDescriptor() ([]byte, []int) {
 // -----------------------------------------------------------------------------
 //
 // Published whenever any auditable action occurs. High-volume topic —
-// expect batched ingestion to BigQuery for compliance reporting.
+// expect batched ingestion to the analytics warehouse for compliance reporting.
 //
 // Distinguish actor types via lookup in chora_identity:
 //   - Human actor: actor_gcid resolves to a GCID record

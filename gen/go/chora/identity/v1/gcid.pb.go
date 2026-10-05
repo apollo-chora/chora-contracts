@@ -419,7 +419,7 @@ func (x *GcidLinked) GetLinkedAt() *timestamppb.Timestamp {
 // -----------------------------------------------------------------------------
 //
 // Published each time chora-identity's POST /v1/identity/resolve handler
-// resolves a Firebase-validated identity to a GCID + its active tenant
+// resolves an authenticated identity to a GCID + its active tenant
 // membership set. Emitted by GCIDResolvedPublisher.PublishGCIDResolved as an
 // audit-trail event so downstream domains (Observability sign-in funnel,
 // Governance access audit) can attribute a resolution to a GCID + tenant.
@@ -441,8 +441,11 @@ type GcidResolved struct {
 	// Federated email address the resolution keyed on. PII — pseudonymise on
 	// closure per ddd-enforcement closure saga (chora_identity PII_Closure_Map).
 	Email string `protobuf:"bytes,4,opt,name=email,proto3" json:"email,omitempty"`
-	// Firebase Authentication UID the resolution keyed on (Identity Platform
-	// subject). Pseudonymise on closure alongside email.
+	// WIRE-COMPAT (history): retained legacy wire name for the federated
+	// subject. The login provider is now local username/password
+	// (POST /v1/auth/verify-credentials); renaming this field would break
+	// existing consumers, so it is kept verbatim. Pseudonymise on closure
+	// alongside email.
 	FirebaseUid string `protobuf:"bytes,5,opt,name=firebase_uid,json=firebaseUid,proto3" json:"firebase_uid,omitempty"`
 	// Count of active tenant memberships resolved for this GCID at resolve time.
 	MembershipsCount int32 `protobuf:"varint,6,opt,name=memberships_count,json=membershipsCount,proto3" json:"memberships_count,omitempty"`

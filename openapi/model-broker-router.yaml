@@ -8,7 +8,7 @@ info:
 
     Owning domain : AI Kernel (`chora_ai_kernel` database)
     Owning team   : Team 3 (Platform)
-    Project       : `chora-489812` (platform host)
+    Project       : `chora-local` (platform host)
     Surface       : O+ Observability+ (admin only); /generate is BFF-internal
                     (called by chora-bff-gateway for AI Assist on A+).
 

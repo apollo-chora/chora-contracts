@@ -112,7 +112,7 @@ message KGClusterMerged {
   int32 dedup_count = 7;
 
   // Cold-storage URI for the absorbed cluster's pre-merge snapshot.
-  // gs://chora-489812-kg-cold/{tenant_id}/{owner_gcid}/{absorbed_cluster_id}.json.gz
+  // gs://chora-local-kg-cold/{tenant_id}/{owner_gcid}/{absorbed_cluster_id}.json.gz
   string cold_archive_uri = 8;
 
   google.protobuf.Timestamp merged_at = 9;

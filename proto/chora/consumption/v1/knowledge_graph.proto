@@ -354,7 +354,7 @@ message KGFogNeighborsRequested {
 // AI Kernel cost ledger (per ai-cost-tracking skill).
 //
 // Topic: chora.consumption.kg_hexagon_fog.generated.v1
-// Consumers: AI Kernel (cost ledger BigQuery streaming),
+// Consumers: AI Kernel (cost ledger analytics streaming),
 //            Observability (engagement analytics).
 message HexagonFogGenerated {
   chora.common.v1.EventEnvelope envelope = 1;

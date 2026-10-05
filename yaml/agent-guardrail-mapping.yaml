@@ -14,7 +14,7 @@
 # Template resource format:
 #   projects/{project}/locations/{location}/templates/{template_id}
 # where:
-#   project  = chora-489812 (build-out single-project per ADR-144)
+#   project  = chora-local (build-out single-project per ADR-144)
 #   location = us-central1 (agentic region per ADR-148)
 #
 # The LLM-issuing service constructs the full resource name at runtime by

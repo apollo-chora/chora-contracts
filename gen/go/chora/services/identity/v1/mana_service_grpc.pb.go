@@ -10,7 +10,7 @@
 // supporting domain, chora_identity database, Team 3 / Platform).
 // REST surface in chora-contracts/openapi/learner-economy.yaml is the
 // user-facing equivalent; gRPC is for internal service-to-service sync
-// calls (mTLS via Cloud Service Mesh per CLAUDE.md §4 protocol strategy).
+// calls (mTLS via the service mesh per CLAUDE.md §4 protocol strategy).
 //
 // Primary callers:
 //   - chora-model-broker-gateway  — pre-flight DeductMana from middleware
@@ -22,7 +22,7 @@
 // returning the same result; ledger entries are append-only and dedup on
 // (gcid, idempotency_key).
 //
-// Deployed in chora-489812 team-platform pool. mTLS via Cloud Service Mesh;
+// Deployed in chora-local team-platform pool. mTLS via the service mesh;
 // SPIFFE identity in mesh; W3C trace context in gRPC metadata.
 // =============================================================================
 

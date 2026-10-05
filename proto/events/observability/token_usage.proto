@@ -32,7 +32,7 @@
 // will be reconciled in a follow-up M11.2 skill refresh PR.
 //
 // TokenUsageRecorded is the canonical billing-grade ledger event emitted at
-// the Model Gateway via transactional outbox. BigQuery streaming +
+// the Model Gateway via transactional outbox. Analytics streaming +
 // pre-aggregations consume it for cost dashboards + tenant invoicing.
 //
 // EVERY event message embeds chora.common.v1.EventEnvelope as field 1.
@@ -103,7 +103,7 @@ message TokenUsageRecorded {
   // ---------------------------------------------------------------------------
   // ADR-163 additive v1 fields — added 2026-05-24 for the M15 Model Gateway.
   //
-  // The Model Gateway (asia-southeast1, GKE Autopilot) is the sole producer
+  // The Model Gateway (primary region, managed container platform) is the sole producer
   // of this event post-cutover; the legacy TokenUsageLedgerOutboxWriter
   // in chora-ai-kernel-orchestrator is on its retirement path. These
   // fields are OPTIONAL on the wire — pre-gateway producers MAY omit
@@ -132,7 +132,7 @@ message TokenUsageRecorded {
   ModelArmorVerdict model_armor_verdict_post = 16;
 
   // Build identifier of the gateway that emitted this event, e.g.,
-  // "chora-model-gateway:58b28eb". Lets BigQuery cost aggregations
+  // "chora-model-gateway:58b28eb". Lets analytics cost aggregations
   // attribute anomalies to a specific gateway build.
   string gateway_version = 17;
 

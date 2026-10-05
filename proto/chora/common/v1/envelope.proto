@@ -57,8 +57,8 @@ message EventEnvelope {
   string traceparent = 7;
   string tracestate = 8;
 
-  // Provenance — which GCP project + service emitted this.
-  // source_project ∈ {chora-content, chora-delivery, chora-489812, chora-golden}
+  // Provenance — which project + service emitted this.
+  // source_project ∈ {chora-content, chora-delivery, chora-local, chora-golden}
   string source_project = 9;
   string source_service = 10;
 

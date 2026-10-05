@@ -12,8 +12,8 @@ info:
     Tenancy: X-Chora-Tenant-ID header.
 
 servers:
-  - url: https://chora-parent.chora-489812.run.app
-    description: Cloud Run (chora-489812 platform host)
+  - url: https://chora-parent.chora-local.run.app
+    description: Cloud Run (chora-local platform host)
 
 tags:
   - name: parent-links

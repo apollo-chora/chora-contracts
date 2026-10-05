@@ -2,11 +2,12 @@
 // GENERATED — DO NOT EDIT.
 // Source : events/sharing/post.proto message PostApproved
 // Tool   : chora-contracts/internal/protoflatten
-// Why    : GCP Pub/Sub Schema Registry rejects (a) schemas with `import`
-//          statements and (b) schemas with more than one top-level message.
-//          This flat copy contains exactly ONE top-level message;
-//          EventEnvelope + Timestamp + transitive deps are nested inside.
-// Path C : see chora-contracts/CHANGELOG.md and m10-data-plane main.tf.
+// Why    : Legacy managed schema-registry consumers reject (a) schemas
+//          with `import` statements and (b) schemas with more than one
+//          top-level message. This flat copy contains exactly ONE
+//          top-level message; EventEnvelope + Timestamp + transitive
+//          deps are nested inside.
+// Path C : see chora-contracts/CHANGELOG.md and the flatten tooling docs.
 // =============================================================================
 
 syntax = "proto3";

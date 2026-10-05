@@ -7,7 +7,7 @@ info:
     external AI agents (e.g., Claude Desktop, ChatGPT plugins, custom
     LLM-driven copilots).
 
-    This contract is served via GCP API Gateway (in parallel with the A2A
+    This contract is served via the API gateway (in parallel with the A2A
     Gateway per ADR-132). The MCP Gateway is the **MCP-as-a-Service**
     deliverable referenced by CHO-27 and `domain-a2a` skill (MCP Gateway
     add-on).
@@ -54,7 +54,7 @@ info:
 
 servers:
   - url: https://mcp.chora.site
-    description: Production (GCP API Gateway)
+    description: Production (the API gateway)
   - url: http://localhost:8096
     description: Local development
 

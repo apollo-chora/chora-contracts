@@ -16,7 +16,7 @@ info:
        message `chora.observability.v1.TokenUsageRecorded`
 
     v1.1.0 — 2026-05-24, ADR-163. Additive proto v1 extension for the
-    M15 Model Gateway (asia-southeast1, GKE Autopilot). New optional
+    M15 Model Gateway (primary region, managed container platform). New optional
     fields on `TokenUsageRecorded`:
       - `vendor` (string) — resolved vendor identifier (e.g.
         "vertex_ai_gemini", "openai_byoa")

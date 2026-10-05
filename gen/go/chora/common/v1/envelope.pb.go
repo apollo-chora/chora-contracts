@@ -67,8 +67,8 @@ type EventEnvelope struct {
 	// See docs/architecture-review-inputs-2026-05-07.md Tier 3 D11.
 	Traceparent string `protobuf:"bytes,7,opt,name=traceparent,proto3" json:"traceparent,omitempty"`
 	Tracestate  string `protobuf:"bytes,8,opt,name=tracestate,proto3" json:"tracestate,omitempty"`
-	// Provenance — which GCP project + service emitted this.
-	// source_project ∈ {chora-content, chora-delivery, chora-489812, chora-golden}
+	// Provenance — which project + service emitted this.
+	// source_project ∈ {chora-content, chora-delivery, chora-local, chora-golden}
 	SourceProject string `protobuf:"bytes,9,opt,name=source_project,json=sourceProject,proto3" json:"source_project,omitempty"`
 	SourceService string `protobuf:"bytes,10,opt,name=source_service,json=sourceService,proto3" json:"source_service,omitempty"`
 	// Schema major version of the event payload (matches v{N} in topic).

@@ -27,7 +27,7 @@
 // Read-only + side-effect free: no idempotency key needed. Callers MAY
 // cache responses briefly (rules change via rare H+ editor actions).
 //
-// Deployed in chora-489812 team-platform pool. mTLS via Cloud Service Mesh;
+// Deployed in chora-local team-platform pool. mTLS via the service mesh;
 // SPIFFE identity in mesh; W3C trace context in gRPC metadata.
 // =============================================================================
 

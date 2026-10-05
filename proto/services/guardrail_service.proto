@@ -22,8 +22,8 @@
 // the Guardrail Service itself; this RPC contract does not require the caller
 // to do the logging.
 //
-// Deployed in chora-489812 team-platform pool (separate from Model Broker).
-// mTLS via Cloud Service Mesh; SPIFFE identity in mesh.
+// Deployed in chora-local team-platform pool (separate from Model Broker).
+// mTLS via the service mesh; SPIFFE identity in mesh.
 // =============================================================================
 
 syntax = "proto3";

@@ -26,8 +26,8 @@
 //
 // The source-of-truth at proto/events/ is unchanged. buf-driven Go/Python
 // codegen still consumes proto/events/ directly. proto/events-flat/ is a
-// committed generated artifact. The flatten step was introduced for the GCP
-// Pub/Sub Schema Registry (which rejected `import` statements); the platform
+// committed generated artifact. The flatten step was introduced for a legacy
+// managed schema registry (which rejected `import` statements); the platform
 // now uses NATS JetStream, and the artifact is retained broker-neutral.
 //
 // Approach: read a FileDescriptorSet built by `buf build --as-file-descriptor-set`
@@ -547,11 +547,10 @@ func indexMessage(idx map[string]typeRef, f *descriptorpb.FileDescriptorProto, p
 // frozen generation reproduces the header its LIVE schema already carries
 // ("events/consumption/familiar.proto").
 //
-// ⚠ The emitted header text below is FROZEN: it is baked into every committed
-// file under proto/events-flat/, so changing it drifts the whole tree against
-// tests/test_events_flat_up_to_date.sh. It still names the GCP Pub/Sub Schema
-// Registry the artifact was originally built for; rewording it is a separate,
-// coordinated change that regenerates the tree.
+// ⚠ The emitted header text below is baked into every committed file under
+// proto/events-flat/. Changing it requires re-running the flatten step so the
+// whole tree is regenerated together (tests/test_events_flat_up_to_date.sh
+// re-runs the generator and diffs the committed tree).
 func writeFlat(w io.Writer, src *descriptorpb.FileDescriptorProto, sourceLabel string, event *descriptorpb.DescriptorProto, envelope *descriptorpb.DescriptorProto, idx map[string]typeRef) error {
 	pkg := src.GetPackage()
 
@@ -566,11 +565,12 @@ func writeFlat(w io.Writer, src *descriptorpb.FileDescriptorProto, sourceLabel s
 	fmt.Fprintf(w, "// GENERATED — DO NOT EDIT.\n")
 	fmt.Fprintf(w, "// Source : %s message %s\n", sourceLabel, event.GetName())
 	fmt.Fprintf(w, "// Tool   : chora-contracts/internal/protoflatten\n")
-	fmt.Fprintf(w, "// Why    : GCP Pub/Sub Schema Registry rejects (a) schemas with `import`\n")
-	fmt.Fprintf(w, "//          statements and (b) schemas with more than one top-level message.\n")
-	fmt.Fprintf(w, "//          This flat copy contains exactly ONE top-level message;\n")
-	fmt.Fprintf(w, "//          EventEnvelope + Timestamp + transitive deps are nested inside.\n")
-	fmt.Fprintf(w, "// Path C : see chora-contracts/CHANGELOG.md and m10-data-plane main.tf.\n")
+	fmt.Fprintf(w, "// Why    : Legacy managed schema-registry consumers reject (a) schemas\n")
+	fmt.Fprintf(w, "//          with `import` statements and (b) schemas with more than one\n")
+	fmt.Fprintf(w, "//          top-level message. This flat copy contains exactly ONE\n")
+	fmt.Fprintf(w, "//          top-level message; EventEnvelope + Timestamp + transitive\n")
+	fmt.Fprintf(w, "//          deps are nested inside.\n")
+	fmt.Fprintf(w, "// Path C : see chora-contracts/CHANGELOG.md and the flatten tooling docs.\n")
 	fmt.Fprintf(w, "// =============================================================================\n\n")
 	fmt.Fprintf(w, "syntax = \"proto3\";\n\n")
 	fmt.Fprintf(w, "package %s;\n\n", pkg)

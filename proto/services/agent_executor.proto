@@ -42,7 +42,7 @@
 //   - StreamAgentExecution: server-stream of ExecutionEvents for long-running
 //     agents (browser interactions, multi-tool reasoning)
 //
-// mTLS via Cloud Service Mesh; SPIFFE identity in mesh; W3C trace context in
+// mTLS via the service mesh; SPIFFE identity in mesh; W3C trace context in
 // gRPC metadata propagated from the orchestrator.
 // =============================================================================
 

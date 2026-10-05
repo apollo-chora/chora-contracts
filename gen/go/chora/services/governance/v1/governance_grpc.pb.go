@@ -14,7 +14,7 @@
 // /api/policies, /api/gatekeeper/evaluate, /api/audit, /api/imda/*,
 // /api/compliance/reports remain the human / admin-facing equivalents;
 // this gRPC contract is for internal service-to-service sync calls only
-// (mTLS via Cloud Service Mesh per CLAUDE.md §4 protocol strategy).
+// (mTLS via the service mesh per CLAUDE.md §4 protocol strategy).
 //
 // HTTP→gRPC RPC mapping (G-FULL Wave-1 closes the systemic ADR-140
 // violation tracked in docs/m13/grpc-mass-remediation-2026-05-16.md):
@@ -39,8 +39,8 @@
 // Append-only invariant: AuditEvent is append-only — NO UpdateAuditEvent /
 // DeleteAuditEvent RPC by design; gRPC reads only.
 //
-// Deployed in chora-489812 namespace `governance` (Team 3 Platform pool).
-// mTLS via Cloud Service Mesh; SPIFFE identity in mesh; W3C trace context
+// Deployed in chora-local namespace `governance` (Team 3 Platform pool).
+// mTLS via the service mesh; SPIFFE identity in mesh; W3C trace context
 // propagated through gRPC metadata. Authorization scoped via
 // chora-infra/k8s/services/chora-governance/authz-allow-governance-grpc.yaml.
 // =============================================================================

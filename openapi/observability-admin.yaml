@@ -244,7 +244,7 @@ paths:
       operationId: listEvalRuns
       summary: "List agent-eval crew runs grouped by candidate_label"
       description: |
-        Reads the BigQuery view
+        Reads the analytics warehouse view
         `chora_observability_analytics.agent_eval_evidence` (per-row eval
         evidence written by the agent CI/CD eval gate — ADR-169 / CHO-1674)
         and returns one entry per crew run (`candidate_label`), each with its
@@ -259,7 +259,7 @@ paths:
         middleware but is NOT applied as a query filter. Auditor/admin-role
         gated upstream at the BFF.
 
-        Per `feedback-no-stubs-real-wiring`: a real BigQuery read. An empty
+        Per `feedback-no-stubs-real-wiring`: a real analytics-warehouse read. An empty
         list is honest; query errors surface as 500.
       tags: [AgentEval]
       parameters:
