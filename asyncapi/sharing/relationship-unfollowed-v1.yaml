@@ -18,17 +18,12 @@ info:
   license:
     name: "Proprietary"
 
-defaultContentType: application/vnd.google.protobuf
+defaultContentType: application/x-protobuf
 
 servers:
-  production:
-    host: "pubsub.googleapis.com"
-    protocol: googlepubsub
-    description: "Google Cloud Pub/Sub (production)"
-  emulator:
-    host: "localhost:8085"
-    protocol: googlepubsub
-    description: "Cloud Pub/Sub Emulator (local dev)"
+  nats:
+    host: nats://localhost:4222
+    protocol: nats
 
 channels:
   relationshipUnfollowed:
@@ -55,10 +50,10 @@ components:
       name: "RelationshipUnfollowed"
       title: "Relationship Unfollowed"
       summary: "A learner unfollowed another learner"
-      contentType: application/vnd.google.protobuf
-      schemaFormat: application/vnd.google.protobuf;version=3
+      contentType: application/x-protobuf
+      schemaFormat: application/x-protobuf;version=3
       payload:
-        schemaFormat: "application/vnd.google.protobuf;version=3"
+        schemaFormat: "application/x-protobuf;version=3"
         schema:
           protoFile: "proto/events/sharing/relationship.proto"
           messageName: "chora.sharing.v1.RelationshipUnfollowed"

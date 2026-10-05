@@ -20,12 +20,12 @@ info:
   license:
     name: Proprietary
 
-defaultContentType: application/vnd.google.protobuf
+defaultContentType: application/x-protobuf
 
 servers:
-  pubsub:
-    host: pubsub.googleapis.com
-    protocol: googlepubsub
+  nats:
+    host: nats://localhost:4222
+    protocol: nats
 
 channels:
   closurePseudonymisePerDomainComplete:
@@ -59,9 +59,9 @@ components:
     ClosurePseudonymisePerDomainComplete:
       name: ClosurePseudonymisePerDomainComplete
       title: All domains acked pseudonymisation
-      contentType: application/vnd.google.protobuf
-      schemaFormat: application/vnd.google.protobuf
+      contentType: application/x-protobuf
+      schemaFormat: application/x-protobuf
       payload:
-        schemaFormat: application/vnd.google.protobuf
+        schemaFormat: application/x-protobuf
         schema:
           $ref: '../../proto/events/closure/saga.proto#/chora.closure.v1.ClosurePseudonymisePerDomainComplete'

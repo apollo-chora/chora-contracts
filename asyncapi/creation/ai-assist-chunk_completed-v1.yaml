@@ -42,17 +42,12 @@ info:
   license:
     name: "Proprietary"
 
-defaultContentType: application/vnd.google.protobuf
+defaultContentType: application/x-protobuf
 
 servers:
-  production:
-    host: "pubsub.googleapis.com"
-    protocol: googlepubsub
-    description: "Google Cloud Pub/Sub (production)"
-  emulator:
-    host: "localhost:8085"
-    protocol: googlepubsub
-    description: "Cloud Pub/Sub Emulator (local dev via PUBSUB_EMULATOR_HOST)"
+  nats:
+    host: nats://localhost:4222
+    protocol: nats
 
 channels:
   aiAssistChunkCompleted:

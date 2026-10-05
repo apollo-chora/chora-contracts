@@ -41,10 +41,9 @@ info:
 defaultContentType: application/json
 
 servers:
-  pubsub:
-    host: pubsub.googleapis.com
-    protocol: googlepubsub
-    description: Google Cloud Pub/Sub (chora-489812 platform host)
+  nats:
+    host: nats://localhost:4222
+    protocol: nats
 
 channels:
   userProfileUpdated:

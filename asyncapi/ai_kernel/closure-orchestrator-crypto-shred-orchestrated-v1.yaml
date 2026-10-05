@@ -24,12 +24,12 @@ info:
   license:
     name: Proprietary
 
-defaultContentType: application/vnd.google.protobuf
+defaultContentType: application/x-protobuf
 
 servers:
-  pubsub:
-    host: pubsub.googleapis.com
-    protocol: googlepubsub
+  nats:
+    host: nats://localhost:4222
+    protocol: nats
 
 channels:
   closureSagaCryptoShredOrchestrated:
@@ -63,9 +63,9 @@ components:
       name: ClosureSagaCryptoShredOrchestrated
       title: Closure Saga Crypto-Shred Orchestrated
       summary: Terminal crypto-shred has been executed (DEK deleted)
-      contentType: application/vnd.google.protobuf
-      schemaFormat: application/vnd.google.protobuf
+      contentType: application/x-protobuf
+      schemaFormat: application/x-protobuf
       payload:
-        schemaFormat: application/vnd.google.protobuf
+        schemaFormat: application/x-protobuf
         schema:
           $ref: '../../proto/events/ai_kernel/closure_orchestrator.proto#/chora.ai_kernel.v1.ClosureSagaCryptoShredOrchestrated'

@@ -26,14 +26,9 @@ info:
 defaultContentType: application/x-protobuf
 
 servers:
-  local:
-    host: "localhost:8085"
-    protocol: googlepubsub
-    description: "Cloud Pub/Sub Emulator"
-  production:
-    host: "pubsub.googleapis.com"
-    protocol: googlepubsub
-    description: "Google Cloud Pub/Sub"
+  nats:
+    host: nats://localhost:4222
+    protocol: nats
 
 channels:
   enrollmentCancelled:

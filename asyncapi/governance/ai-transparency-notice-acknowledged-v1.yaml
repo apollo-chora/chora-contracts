@@ -17,12 +17,12 @@ info:
   license:
     name: Proprietary
 
-defaultContentType: application/vnd.google.protobuf
+defaultContentType: application/x-protobuf
 
 servers:
-  pubsub:
-    host: pubsub.googleapis.com
-    protocol: googlepubsub
+  nats:
+    host: nats://localhost:4222
+    protocol: nats
 
 channels:
   aiTransparencyNoticeAcknowledged:
@@ -55,9 +55,9 @@ components:
       name: AiTransparencyNoticeAcknowledged
       title: AI Transparency Notice Acknowledged
       summary: A learner acknowledged the AI Transparency Notice
-      contentType: application/vnd.google.protobuf
-      schemaFormat: application/vnd.google.protobuf
+      contentType: application/x-protobuf
+      schemaFormat: application/x-protobuf
       payload:
-        schemaFormat: application/vnd.google.protobuf
+        schemaFormat: application/x-protobuf
         schema:
           $ref: '../../proto/events/governance/ai_transparency.proto#/chora.governance.v1.AiTransparencyNoticeAcknowledged'

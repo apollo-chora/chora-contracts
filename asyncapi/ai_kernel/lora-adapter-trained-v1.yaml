@@ -3,7 +3,7 @@ info:
   title: Chora AI Kernel — LoraAdapterTrained
   version: 1.0.0
   description: |
-    Published when LoRA training completes (Vertex AI Custom Training job
+    Published when LoRA training completes (model training job
     terminates successfully). Carries eval metrics for go/no-go review.
 
     - Domain: AI Kernel (`chora_ai_kernel` DB)
@@ -15,12 +15,12 @@ info:
   license:
     name: Proprietary
 
-defaultContentType: application/vnd.google.protobuf
+defaultContentType: application/x-protobuf
 
 servers:
-  pubsub:
-    host: pubsub.googleapis.com
-    protocol: googlepubsub
+  nats:
+    host: nats://localhost:4222
+    protocol: nats
 
 channels:
   loraAdapterTrained:
@@ -53,9 +53,9 @@ components:
       name: LoraAdapterTrained
       title: LoRA Adapter Trained
       summary: A LoRA adapter training run has completed
-      contentType: application/vnd.google.protobuf
-      schemaFormat: application/vnd.google.protobuf
+      contentType: application/x-protobuf
+      schemaFormat: application/x-protobuf
       payload:
-        schemaFormat: application/vnd.google.protobuf
+        schemaFormat: application/x-protobuf
         schema:
           $ref: '../../proto/events/ai_kernel/lora.proto#/chora.ai_kernel.v1.LoraAdapterTrained'

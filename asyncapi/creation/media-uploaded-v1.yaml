@@ -23,17 +23,12 @@ info:
   license:
     name: "Proprietary"
 
-defaultContentType: application/vnd.google.protobuf
+defaultContentType: application/x-protobuf
 
 servers:
-  production:
-    host: "pubsub.googleapis.com"
-    protocol: googlepubsub
-    description: "Google Cloud Pub/Sub (production)"
-  emulator:
-    host: "localhost:8085"
-    protocol: googlepubsub
-    description: "Cloud Pub/Sub Emulator (local dev)"
+  nats:
+    host: nats://localhost:4222
+    protocol: nats
 
 channels:
   mediaUploaded:
@@ -65,10 +60,10 @@ components:
       name: "MediaUploaded"
       title: "Media Uploaded"
       summary: "A media asset has been uploaded to staging — pipeline pending"
-      contentType: application/vnd.google.protobuf
-      schemaFormat: application/vnd.google.protobuf;version=3
+      contentType: application/x-protobuf
+      schemaFormat: application/x-protobuf;version=3
       payload:
-        schemaFormat: "application/vnd.google.protobuf;version=3"
+        schemaFormat: "application/x-protobuf;version=3"
         schema:
           protoFile: "proto/events/creation/media.proto"
           messageName: "chora.creation.v1.MediaUploaded"

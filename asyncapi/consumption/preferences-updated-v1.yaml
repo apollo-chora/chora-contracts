@@ -39,13 +39,12 @@ info:
   license:
     name: Proprietary
 
-defaultContentType: application/vnd.google.protobuf
+defaultContentType: application/x-protobuf
 
 servers:
-  pubsub:
-    host: pubsub.googleapis.com
-    protocol: googlepubsub
-    description: Google Cloud Pub/Sub (chora-489812 platform host)
+  nats:
+    host: nats://localhost:4222
+    protocol: nats
 
 channels:
   preferencesUpdated:
@@ -55,7 +54,7 @@ channels:
       preferencesUpdated:
         name: PreferencesUpdated
         title: Learner preferences updated
-        contentType: application/vnd.google.protobuf
+        contentType: application/x-protobuf
         payload:
           type: object
           required: [envelope, learner_gcid, preferences, occurred_at]

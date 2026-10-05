@@ -9,6 +9,35 @@ Versioning: SemVer at the package level (this CHANGELOG); per-domain proto
 packages carry their own `v1`, `v2` suffix and evolve independently. Major
 bumps cluster cross-domain breaking changes into a single release.
 
+## 2026-10-05 — Event transport migration: Google Cloud Pub/Sub → NATS JetStream
+
+The platform event transport is moving from Google Cloud Pub/Sub to NATS
+JetStream. The contracts now describe NATS.
+
+### Changed
+
+- **AsyncAPI** (`asyncapi/`, 302 specs): the `servers` block now describes the
+  NATS transport — `nats://localhost:4222`, protocol `nats` — instead of
+  `pubsub.googleapis.com` / `googlepubsub` (including the production/emulator
+  variants, which collapse to the single local NATS server). Channel addresses
+  are unchanged: the `chora.{domain}.{aggregate}.{event_type}.v{N}` taxonomy
+  is already valid NATS subject syntax, so no event was renamed.
+- **Protobuf media type**: `application/vnd.google.protobuf` →
+  `application/x-protobuf` in `defaultContentType` and per-message
+  `contentType`/`schemaFormat` (991 occurrences).
+- **Descriptions**: GCP product mentions in event descriptions reworded to
+  neutral platform terminology — BigQuery consumers → "the analytics
+  warehouse" / "analytics streaming", Vertex AI training/deployment targets →
+  "model training job" / "model serving endpoint", and the
+  `CHORA_OUTBOX_DISPATCH_PUBSUB` flag reference → "outbox dispatch enabled".
+
+### Unchanged
+
+- Protobuf wire format, field numbers, and the `proto/` source-of-truth.
+- `proto-frozen/` (frozen wire for retired event generations).
+- The `proto/events-flat/` tree and its generators — still generated, but no
+  longer describes the platform's event transport.
+
 ## 2026-05-23 — Documentation refresh + consistency audit + closure_orchestrator decommission
 
 Plan: `~/.claude/plans/transient-hugging-dewdrop.md` (Phase G + reconciliation B2).

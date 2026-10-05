@@ -27,9 +27,9 @@ info:
 defaultContentType: application/json
 
 servers:
-  pubsub:
-    host: pubsub.googleapis.com
-    protocol: googlepubsub
+  nats:
+    host: nats://localhost:4222
+    protocol: nats
 
 channels:
   companionTurnRequested:
@@ -92,7 +92,7 @@ components:
         protojson UseProtoNames=true (snake_case keys).
       contentType: application/json
       payload:
-        schemaFormat: application/vnd.google.protobuf
+        schemaFormat: application/x-protobuf
         schema:
           $ref: '../../proto/events/consumption/companion_turn.proto#/chora.consumption.v1.CompanionTurnRequested'
     CompanionTurnCompleted:
@@ -100,6 +100,6 @@ components:
       title: Companion turn completed (whole reply)
       contentType: application/json
       payload:
-        schemaFormat: application/vnd.google.protobuf
+        schemaFormat: application/x-protobuf
         schema:
           $ref: '../../proto/events/consumption/companion_turn.proto#/chora.consumption.v1.CompanionTurnCompleted'

@@ -31,9 +31,9 @@ info:
 defaultContentType: application/json
 
 servers:
-  pubsub:
-    host: pubsub.googleapis.com
-    protocol: googlepubsub
+  nats:
+    host: nats://localhost:4222
+    protocol: nats
 
 channels:
   companionSuspensionChanged:
@@ -78,7 +78,7 @@ components:
       summary: One audit record per operator engage / release of a companion suspension
       contentType: application/json
       payload:
-        schemaFormat: application/vnd.google.protobuf
+        schemaFormat: application/x-protobuf
         schema:
           $ref: '../../proto/events/governance/audit.proto#/chora.governance.v1.CompanionSuspensionChanged'
       examples:

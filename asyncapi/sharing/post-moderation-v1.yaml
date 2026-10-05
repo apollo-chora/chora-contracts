@@ -17,9 +17,9 @@ info:
 defaultContentType: application/json
 
 servers:
-  pubsub:
-    host: pubsub.googleapis.com
-    protocol: googlepubsub
+  nats:
+    host: nats://localhost:4222
+    protocol: nats
 
 channels:
   postModerationRequested:
@@ -38,7 +38,7 @@ operations:
     action: send
     channel:
       $ref: '#/channels/postModerationRequested'
-    description: chora-sharing outbox (CHORA_OUTBOX_DISPATCH_PUBSUB=1), same transaction as the pending post.
+    description: chora-sharing outbox (outbox dispatch enabled), same transaction as the pending post.
     messages:
       - $ref: '#/channels/postModerationRequested/messages/postModerationRequested'
   consumePostModerationRequested:
@@ -69,13 +69,13 @@ components:
       name: PostModerationRequested
       contentType: application/json
       payload:
-        schemaFormat: application/vnd.google.protobuf
+        schemaFormat: application/x-protobuf
         schema:
           $ref: '../../proto/events/sharing/post_moderation.proto#/chora.sharing.v1.PostModerationRequested'
     PostModerationCompleted:
       name: PostModerationCompleted
       contentType: application/json
       payload:
-        schemaFormat: application/vnd.google.protobuf
+        schemaFormat: application/x-protobuf
         schema:
           $ref: '../../proto/events/sharing/post_moderation.proto#/chora.sharing.v1.PostModerationCompleted'

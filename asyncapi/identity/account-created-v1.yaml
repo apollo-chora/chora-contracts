@@ -16,12 +16,12 @@ info:
   license:
     name: Proprietary
 
-defaultContentType: application/vnd.google.protobuf
+defaultContentType: application/x-protobuf
 
 servers:
-  pubsub:
-    host: pubsub.googleapis.com
-    protocol: googlepubsub
+  nats:
+    host: nats://localhost:4222
+    protocol: nats
 
 channels:
   accountCreated:
@@ -54,9 +54,9 @@ components:
       name: AccountCreated
       title: Account Created
       summary: An Account record has been provisioned
-      contentType: application/vnd.google.protobuf
-      schemaFormat: application/vnd.google.protobuf
+      contentType: application/x-protobuf
+      schemaFormat: application/x-protobuf
       payload:
-        schemaFormat: application/vnd.google.protobuf
+        schemaFormat: application/x-protobuf
         schema:
           $ref: '../../proto/events/identity/account.proto#/chora.identity.v1.AccountCreated'

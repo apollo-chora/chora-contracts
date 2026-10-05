@@ -17,9 +17,9 @@ info:
 defaultContentType: application/json
 
 servers:
-  pubsub:
-    host: pubsub.googleapis.com
-    protocol: googlepubsub
+  nats:
+    host: nats://localhost:4222
+    protocol: nats
 
 channels:
   duelRoundAtomsRequested:
@@ -69,13 +69,13 @@ components:
       name: DuelRoundAtomsRequested
       contentType: application/json
       payload:
-        schemaFormat: application/vnd.google.protobuf
+        schemaFormat: application/x-protobuf
         schema:
           $ref: '../../proto/events/sharing/duel_round_atoms.proto#/chora.sharing.v1.DuelRoundAtomsRequested'
     DuelRoundAtomsCompleted:
       name: DuelRoundAtomsCompleted
       contentType: application/json
       payload:
-        schemaFormat: application/vnd.google.protobuf
+        schemaFormat: application/x-protobuf
         schema:
           $ref: '../../proto/events/sharing/duel_round_atoms.proto#/chora.sharing.v1.DuelRoundAtomsCompleted'

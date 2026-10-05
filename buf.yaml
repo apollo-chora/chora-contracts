@@ -9,15 +9,15 @@ modules:
   - path: proto
     name: buf.build/chora/contracts
     # proto/events-flat/ is a generated artifact — self-contained per-aggregate
-    # protos for GCP Pub/Sub Schema Registry consumption (Path C, locked
+    # protos for the schema-registry consumption path (Path C, locked
     # 2026-05-10). It duplicates packages from proto/events/ by design, so
     # exclude it from the buf module to avoid duplicate-symbol errors during
-    # `buf lint` / `buf build` / codegen. Schema Registry reads the files
-    # directly via google_pubsub_schema.aggregate.definition.
+    # `buf lint` / `buf build` / codegen. The platform's schema registry
+    # tooling reads the files directly.
     excludes:
       - proto/events-flat
 
-  # proto-frozen/ — FROZEN WIRE for event generations still live in Pub/Sub whose
+  # proto-frozen/ — FROZEN WIRE for event generations still live on the wire whose
   # current-generation source was renamed or deleted (ruling 44). A SEPARATE
   # module, not a subdirectory of proto/, because a frozen file can legitimately
   # redeclare a helper message that the rename never touched: proto-frozen/

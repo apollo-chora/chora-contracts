@@ -16,12 +16,12 @@ info:
   license:
     name: Proprietary
 
-defaultContentType: application/vnd.google.protobuf
+defaultContentType: application/x-protobuf
 
 servers:
-  pubsub:
-    host: pubsub.googleapis.com
-    protocol: googlepubsub
+  nats:
+    host: nats://localhost:4222
+    protocol: nats
 
 channels:
   addonDowngraded:
@@ -45,7 +45,7 @@ operations:
     description: |
       Consumers: ALL surfaces (entitlement shrink), AI Kernel (LoRA
       quota shrink + adapter retirement triggers), Notifications,
-      Billing (credit + BigQuery streaming for downgrade funnel).
+      Billing (credit + analytics streaming for downgrade funnel).
     messages:
       - $ref: '#/channels/addonDowngraded/messages/addonDowngraded'
 
@@ -55,9 +55,9 @@ components:
       name: AddonDowngraded
       title: Add-On Downgraded
       summary: A tenant has downgraded an add-on tier in place
-      contentType: application/vnd.google.protobuf
-      schemaFormat: application/vnd.google.protobuf
+      contentType: application/x-protobuf
+      schemaFormat: application/x-protobuf
       payload:
-        schemaFormat: application/vnd.google.protobuf
+        schemaFormat: application/x-protobuf
         schema:
           $ref: '../../proto/events/tenancy/addon.proto#/chora.tenancy.v1.AddonDowngraded'

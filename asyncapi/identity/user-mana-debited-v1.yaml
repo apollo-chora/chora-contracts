@@ -9,7 +9,7 @@ info:
     touched (deterministic FIFO spend order per ADR-142).
 
     HIGH-VOLUME topic. Consumers MUST be idempotent on entry_id and
-    SHOULD batch-aggregate at the BigQuery streaming layer.
+    SHOULD batch-aggregate at the analytics streaming layer.
 
     - Domain: Identity (`chora_identity` DB)
     - Topic: `chora.identity.user_mana.debited.v1`
@@ -20,12 +20,12 @@ info:
   license:
     name: Proprietary
 
-defaultContentType: application/vnd.google.protobuf
+defaultContentType: application/x-protobuf
 
 servers:
-  pubsub:
-    host: pubsub.googleapis.com
-    protocol: googlepubsub
+  nats:
+    host: nats://localhost:4222
+    protocol: nats
 
 channels:
   userManaDebited:
@@ -48,7 +48,7 @@ operations:
       $ref: '#/channels/userManaDebited'
     description: |
       Consumers: Observability (mana spend dashboards + per-action
-      cost analysis), BigQuery streaming, Tenancy (mark
+      cost analysis), analytics streaming, Tenancy (mark
       TenantManaAllocation `claimed` when source_allocation_id set),
       AI Kernel (cost-tracking dual-axis ledger correlation).
     messages:
@@ -60,9 +60,9 @@ components:
       name: UserManaDebited
       title: User Mana Debited
       summary: Mana has been debited from a user's wallet (Companion action)
-      contentType: application/vnd.google.protobuf
-      schemaFormat: application/vnd.google.protobuf
+      contentType: application/x-protobuf
+      schemaFormat: application/x-protobuf
       payload:
-        schemaFormat: application/vnd.google.protobuf
+        schemaFormat: application/x-protobuf
         schema:
           $ref: '../../proto/events/identity/user_mana.proto#/chora.identity.v1.UserManaDebited'

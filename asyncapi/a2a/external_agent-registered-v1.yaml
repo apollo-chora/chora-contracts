@@ -15,17 +15,12 @@ info:
   license:
     name: "Proprietary"
 
-defaultContentType: application/vnd.google.protobuf
+defaultContentType: application/x-protobuf
 
 servers:
-  production:
-    host: "pubsub.googleapis.com"
-    protocol: googlepubsub
-    description: "Google Cloud Pub/Sub (production)"
-  emulator:
-    host: "localhost:8085"
-    protocol: googlepubsub
-    description: "Cloud Pub/Sub Emulator (local dev)"
+  nats:
+    host: nats://localhost:4222
+    protocol: nats
 
 channels:
   externalAgentRegistered:
@@ -55,10 +50,10 @@ components:
       name: "ExternalAgentRegistered"
       title: "External Agent Registered"
       summary: "An external agent has been registered (trust UNTRUSTED)"
-      contentType: application/vnd.google.protobuf
-      schemaFormat: application/vnd.google.protobuf;version=3
+      contentType: application/x-protobuf
+      schemaFormat: application/x-protobuf;version=3
       payload:
-        schemaFormat: "application/vnd.google.protobuf;version=3"
+        schemaFormat: "application/x-protobuf;version=3"
         schema:
           protoFile: "proto/events/a2a/external_agent.proto"
           messageName: "chora.a2a.v1.ExternalAgentRegistered"

@@ -4,7 +4,7 @@ info:
   version: 1.0.0
   description: |
     Published when usage-metered add-on activity is recorded.
-    HIGH-VOLUME — expect bursts; consumers (BigQuery streaming, billing
+    HIGH-VOLUME — expect bursts; consumers (analytics streaming, billing
     aggregation, observability dashboards) must be idempotent.
 
     - Domain: Tenancy + Billing (`chora_tenancy` DB)
@@ -16,12 +16,12 @@ info:
   license:
     name: Proprietary
 
-defaultContentType: application/vnd.google.protobuf
+defaultContentType: application/x-protobuf
 
 servers:
-  pubsub:
-    host: pubsub.googleapis.com
-    protocol: googlepubsub
+  nats:
+    host: nats://localhost:4222
+    protocol: nats
 
 channels:
   addonUsageRecorded:
@@ -43,7 +43,7 @@ operations:
     channel:
       $ref: '#/channels/addonUsageRecorded'
     description: |
-      Consumers: BigQuery streaming (cost analytics), Billing
+      Consumers: analytics streaming (cost analytics), Billing
       aggregator (Stripe metered billing), O+ KPI dashboards.
     messages:
       - $ref: '#/channels/addonUsageRecorded/messages/addonUsageRecorded'
@@ -54,9 +54,9 @@ components:
       name: AddonUsageRecorded
       title: Add-On Usage Recorded
       summary: Metered add-on usage event
-      contentType: application/vnd.google.protobuf
-      schemaFormat: application/vnd.google.protobuf
+      contentType: application/x-protobuf
+      schemaFormat: application/x-protobuf
       payload:
-        schemaFormat: application/vnd.google.protobuf
+        schemaFormat: application/x-protobuf
         schema:
           $ref: '../../proto/events/tenancy/addon.proto#/chora.tenancy.v1.AddonUsageRecorded'

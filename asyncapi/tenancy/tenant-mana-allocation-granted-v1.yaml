@@ -18,12 +18,12 @@ info:
   license:
     name: Proprietary
 
-defaultContentType: application/vnd.google.protobuf
+defaultContentType: application/x-protobuf
 
 servers:
-  pubsub:
-    host: pubsub.googleapis.com
-    protocol: googlepubsub
+  nats:
+    host: nats://localhost:4222
+    protocol: nats
 
 channels:
   tenantManaAllocationGranted:
@@ -57,9 +57,9 @@ components:
       name: TenantManaAllocationGranted
       title: Tenant Mana Allocation Granted
       summary: A learner has been granted mana from the tenant's pool
-      contentType: application/vnd.google.protobuf
-      schemaFormat: application/vnd.google.protobuf
+      contentType: application/x-protobuf
+      schemaFormat: application/x-protobuf
       payload:
-        schemaFormat: application/vnd.google.protobuf
+        schemaFormat: application/x-protobuf
         schema:
           $ref: '../../proto/events/tenancy/tenant_mana_allocation.proto#/chora.tenancy.v1.TenantManaAllocationGranted'

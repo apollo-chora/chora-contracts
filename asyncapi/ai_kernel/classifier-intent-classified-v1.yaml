@@ -17,12 +17,12 @@ info:
   license:
     name: Proprietary
 
-defaultContentType: application/vnd.google.protobuf
+defaultContentType: application/x-protobuf
 
 servers:
-  pubsub:
-    host: pubsub.googleapis.com
-    protocol: googlepubsub
+  nats:
+    host: nats://localhost:4222
+    protocol: nats
 
 channels:
   intentClassified:
@@ -45,4 +45,4 @@ components:
       name: IntentClassified
       title: Intent Classified
       summary: A routing request was classified by the Classifier Service
-      contentType: application/vnd.google.protobuf
+      contentType: application/x-protobuf

@@ -19,7 +19,7 @@
         verify-schema-registry verify-schema-registry-live refresh-schema-snapshot
 
 # ---------------------------------------------------------------------------
-# regen — full reproducible regeneration: Go/Python bindings + Pub/Sub flat
+# regen — full reproducible regeneration: Go/Python bindings + flat schema
 # tree. Run this on any proto change.
 # ---------------------------------------------------------------------------
 regen: codegen flatten
@@ -52,8 +52,8 @@ breaking:
 	buf breaking --against '.git#branch=main'
 
 # ---------------------------------------------------------------------------
-# flatten — regenerate proto/events-flat/ (Pub/Sub Schema Registry input;
-# terraform reads it via google_pubsub_schema.aggregate.definition + .atom_v2).
+# flatten — regenerate proto/events-flat/ (self-contained schema tree consumed
+# by the platform's schema registry tooling).
 #
 # Reproducible as of 2026-05-29 (debt D-B fixed): the script materialises the
 # Path-A atom v2 schema aliases (*.v2.proto) deterministically from the
@@ -76,21 +76,21 @@ verify-reproducible: regen
 
 # ---------------------------------------------------------------------------
 # verify-schema-registry — CI guard (CHO-2155): every event proto's fields MUST
-# be covered by the topic's COMMITTED Pub/Sub schema revision.
+# be covered by the topic's COMMITTED schema revision.
 #
 # verify-reproducible above proves  source proto -> flat proto -> generated Go
 # stay in lockstep. It does NOT prove the flat proto matches what is actually
-# COMMITTED in the GCP Schema Registry — and Pub/Sub rejects a message carrying
-# a field the committed revision lacks with HTTP 400 at publish time. It never
-# dead-letters; it just fails, and only for the messages that populate the new
-# field, so it hides for weeks. That is the gap this target closes.
+# COMMITTED in the schema registry — and the event broker rejects a message
+# carrying a field the committed revision lacks with HTTP 400 at publish time.
+# It never dead-letters; it just fails, and only for the messages that populate
+# the new field, so it hides for weeks. That is the gap this target closes.
 #
 # The committed revision is only ever updated by `terraform apply` (never run
-# here — TF is ~228 resources behind) or an out-of-band `gcloud pubsub schemas
-# commit`. So drift accumulates by default and MUST be gated.
+# here — TF is ~228 resources behind) or an out-of-band schema commit. So
+# drift accumulates by default and MUST be gated.
 #
 #   verify-schema-registry       hermetic, no creds — vs the checked-in snapshot
-#   verify-schema-registry-live  vs the LIVE registry (needs GCP credentials)
+#   verify-schema-registry-live  vs the LIVE registry (needs cloud credentials)
 #   refresh-schema-snapshot      re-ground the snapshot from deployed reality
 # ---------------------------------------------------------------------------
 verify-schema-registry:

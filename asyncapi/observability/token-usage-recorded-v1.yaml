@@ -4,7 +4,7 @@ info:
   version: 1.2.0
   description: |
     Canonical billing-grade ledger event emitted at the Model Gateway via
-    transactional outbox. BigQuery streaming + pre-aggregations consume
+    transactional outbox. analytics streaming + pre-aggregations consume
     it for cost dashboards + tenant invoicing.
 
     Note: gcid field carries either learner GCID OR agent AGID
@@ -52,12 +52,12 @@ info:
   license:
     name: Proprietary
 
-defaultContentType: application/vnd.google.protobuf
+defaultContentType: application/x-protobuf
 
 servers:
-  pubsub:
-    host: pubsub.googleapis.com
-    protocol: googlepubsub
+  nats:
+    host: nats://localhost:4222
+    protocol: nats
 
 channels:
   tokenUsageRecorded:
@@ -79,7 +79,7 @@ operations:
     channel:
       $ref: '#/channels/tokenUsageRecorded'
     description: |
-      Consumers: BigQuery (cost ledger), Tenancy (metered billing
+      Consumers: the analytics warehouse (cost ledger), Tenancy (metered billing
       AddonUsageRecorded translation; ADR-205 transaction_ledger projection —
       folds into mana_spend_daily + transaction_ledger_detail), Looker Studio
       dashboards, O+ cost watchdog (anomaly detection).
@@ -92,9 +92,9 @@ components:
       name: TokenUsageRecorded
       title: Token Usage Recorded
       summary: Canonical billing-grade token + cost ledger entry
-      contentType: application/vnd.google.protobuf
-      schemaFormat: application/vnd.google.protobuf
+      contentType: application/x-protobuf
+      schemaFormat: application/x-protobuf
       payload:
-        schemaFormat: application/vnd.google.protobuf
+        schemaFormat: application/x-protobuf
         schema:
           $ref: '../../proto/events/observability/token_usage.proto#/chora.observability.v1.TokenUsageRecorded'

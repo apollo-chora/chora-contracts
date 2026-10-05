@@ -26,13 +26,12 @@ info:
   license:
     name: Proprietary
 
-defaultContentType: application/vnd.google.protobuf
+defaultContentType: application/x-protobuf
 
 servers:
-  pubsub:
-    host: pubsub.googleapis.com
-    protocol: googlepubsub
-    description: Google Cloud Pub/Sub (chora-489812 platform host)
+  nats:
+    host: nats://localhost:4222
+    protocol: nats
 
 channels:
   campaignNodeWon:
@@ -75,9 +74,9 @@ components:
       name: CampaignNodeWon
       title: Campaign node won (permanent ratchet)
       summary: A learner won a concept node — all 6 rungs cleared
-      contentType: application/vnd.google.protobuf
-      schemaFormat: application/vnd.google.protobuf
+      contentType: application/x-protobuf
+      schemaFormat: application/x-protobuf
       payload:
-        schemaFormat: application/vnd.google.protobuf
+        schemaFormat: application/x-protobuf
         schema:
           $ref: '../../proto/events/consumption/campaign.proto#/chora.consumption.v1.CampaignNodeWon'

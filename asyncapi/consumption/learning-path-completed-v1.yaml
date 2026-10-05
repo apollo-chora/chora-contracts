@@ -24,13 +24,12 @@ info:
   license:
     name: Proprietary
 
-defaultContentType: application/vnd.google.protobuf
+defaultContentType: application/x-protobuf
 
 servers:
-  pubsub:
-    host: pubsub.googleapis.com
-    protocol: googlepubsub
-    description: Google Cloud Pub/Sub (chora-489812 platform host)
+  nats:
+    host: nats://localhost:4222
+    protocol: nats
 
 channels:
   learningPathCompleted:
@@ -66,7 +65,7 @@ components:
       name: LearningPathCompleted
       title: Learning Path Completed
       summary: A LearningPath has reached its final atom.
-      contentType: application/vnd.google.protobuf
+      contentType: application/x-protobuf
       payload:
         type: object
         description: Mirrors chora.consumption.v1.LearningPathCompleted

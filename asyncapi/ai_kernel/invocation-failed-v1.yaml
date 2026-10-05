@@ -15,12 +15,12 @@ info:
   license:
     name: Proprietary
 
-defaultContentType: application/vnd.google.protobuf
+defaultContentType: application/x-protobuf
 
 servers:
-  pubsub:
-    host: pubsub.googleapis.com
-    protocol: googlepubsub
+  nats:
+    host: nats://localhost:4222
+    protocol: nats
 
 channels:
   modelInvocationFailed:
@@ -54,9 +54,9 @@ components:
       name: ModelInvocationFailed
       title: Model Invocation Failed
       summary: A model invocation has failed after retry exhaustion
-      contentType: application/vnd.google.protobuf
-      schemaFormat: application/vnd.google.protobuf
+      contentType: application/x-protobuf
+      schemaFormat: application/x-protobuf
       payload:
-        schemaFormat: application/vnd.google.protobuf
+        schemaFormat: application/x-protobuf
         schema:
           $ref: '../../proto/events/ai_kernel/invocation.proto#/chora.ai_kernel.v1.ModelInvocationFailed'

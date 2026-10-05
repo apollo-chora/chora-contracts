@@ -16,9 +16,9 @@ info:
 defaultContentType: application/json
 
 servers:
-  pubsub:
-    host: pubsub.googleapis.com
-    protocol: googlepubsub
+  nats:
+    host: nats://localhost:4222
+    protocol: nats
 
 channels:
   doseRecommendationRequested:
@@ -68,13 +68,13 @@ components:
       name: DoseRecommendationRequested
       contentType: application/json
       payload:
-        schemaFormat: application/vnd.google.protobuf
+        schemaFormat: application/x-protobuf
         schema:
           $ref: '../../proto/events/consumption/dose_recommendation.proto#/chora.consumption.v1.DoseRecommendationRequested'
     DoseRecommendationCompleted:
       name: DoseRecommendationCompleted
       contentType: application/json
       payload:
-        schemaFormat: application/vnd.google.protobuf
+        schemaFormat: application/x-protobuf
         schema:
           $ref: '../../proto/events/consumption/dose_recommendation.proto#/chora.consumption.v1.DoseRecommendationCompleted'

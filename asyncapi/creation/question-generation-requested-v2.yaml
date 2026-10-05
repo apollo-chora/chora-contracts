@@ -50,17 +50,12 @@ info:
   license:
     name: "Proprietary"
 
-defaultContentType: application/vnd.google.protobuf
+defaultContentType: application/x-protobuf
 
 servers:
-  production:
-    host: "pubsub.googleapis.com"
-    protocol: googlepubsub
-    description: "Google Cloud Pub/Sub (production)"
-  emulator:
-    host: "localhost:8085"
-    protocol: googlepubsub
-    description: "Cloud Pub/Sub Emulator (local dev via PUBSUB_EMULATOR_HOST)"
+  nats:
+    host: nats://localhost:4222
+    protocol: nats
 
 channels:
   questionGenerationRequested:
@@ -173,10 +168,10 @@ components:
               of: "prompt" (pure-LLM) | "source_files" (RAG / grounding) |
               "by_hand" (author-inline, no LLM). Folded from Input via precedence
               by_hand > source_files > prompt.
-      contentType: application/vnd.google.protobuf
-      schemaFormat: application/vnd.google.protobuf;version=3
+      contentType: application/x-protobuf
+      schemaFormat: application/x-protobuf;version=3
       payload:
-        schemaFormat: "application/vnd.google.protobuf;version=3"
+        schemaFormat: "application/x-protobuf;version=3"
         schema:
           protoFile: "proto/events/creation/question.proto"
           messageName: "chora.creation.v1.QuestionGenerationRequestedV2"

@@ -3,8 +3,8 @@
 #
 # Asserts that proto/events-flat/ is up-to-date with proto/events/. If any
 # canonical event proto changes without re-running scripts/flatten-pubsub-schemas.sh,
-# this test fails — preventing terraform plan drift between source-of-truth
-# and Schema Registry artifact.
+# this test fails — preventing drift between source-of-truth and the committed
+# flat schema artifact.
 #
 # Run from chora-contracts/ root.
 
