@@ -1,6 +1,6 @@
 # Chora Protobuf Contracts
 
-Source-of-truth: `docs/architecture-review-inputs-2026-05-07.md` Tier 2 D8 (Pub/Sub Protobuf Schema Registry) + Tier 1 D2 (5 core + 6 supporting domains).
+Source-of-truth: `docs/architecture-review-inputs-2026-05-07.md` Tier 2 D8 (Pub/Sub Protobuf Schema Registry) + Tier 1 D2 (5 core + 8 supporting domains).
 
 ## Layout
 
@@ -19,7 +19,9 @@ proto/
 │   ├── governance/                 # Governance supporting domain
 │   ├── observability/              # Observability supporting domain
 │   ├── notifications/              # Notifications supporting domain
-│   └── ai_kernel/                  # AI Kernel supporting domain
+│   ├── ai_kernel/                  # AI Kernel supporting domain
+│   ├── payments/                   # Payments supporting domain
+│   └── closure/                    # Closure (PII) supporting domain
 └── services/
     ├── model_broker_router.proto       # Rules-based routing
     ├── model_broker_gateway.proto      # Model invocation execution
@@ -34,7 +36,7 @@ proto/
 
 `chora.{domain}.{aggregate}.{event_type}.v{N}`
 
-- `domain` ∈ 11-domain set (5 core + 6 supporting); see `.claude/rules/ddd-enforcement.md`
+- `domain` ∈ 13-domain set (5 core + 8 supporting); see `.claude/rules/ddd-enforcement.md`
 - `aggregate` and `event_type` are `snake_case`
 - `event_type` is past tense: `created`, `published`, `completed`, `started`, `failed`, `detected`, `recorded`, `logged`
 - Major version `v{N}` starts at `v1`. Breaking change → new topic with `v{N+1}`; parallel-publish during migration; drain old subscriptions; deprecate.

@@ -10,7 +10,7 @@ info:
     - Aggregate root: `MapCluster` (kg_user_map_clusters table)
     - Topic: `chora.consumption.kg_map_cluster.merged.v1`
     - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
-    - Source proto: `proto/events/consumption/knowledge_graph.proto`
+    - Source proto: `proto/chora/consumption/v1/knowledge_graph.proto`
        message `chora.consumption.v1.MapClusterMerged`
 
     The smaller cluster (by node_count) is marked MERGED_INTO; the larger
@@ -66,4 +66,4 @@ components:
       payload:
         schemaFormat: application/x-protobuf
         schema:
-          $ref: '../../proto/events/consumption/knowledge_graph.proto#/chora.consumption.v1.MapClusterMerged'
+          $ref: '../../proto/chora/consumption/v1/knowledge_graph.proto#/chora.consumption.v1.MapClusterMerged'

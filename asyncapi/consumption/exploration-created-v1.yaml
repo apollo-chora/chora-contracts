@@ -14,7 +14,7 @@ info:
     - Aggregate root: `Exploration` (kg_user_explorations table)
     - Topic: `chora.consumption.kg_exploration.created.v1`
     - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
-    - Source proto: `proto/events/consumption/knowledge_graph.proto`
+    - Source proto: `proto/chora/consumption/v1/knowledge_graph.proto`
        message `chora.consumption.v1.ExplorationCreated`
 
     Embeds the mandatory `chora.common.v1.EventEnvelope` as field 1.
@@ -65,4 +65,4 @@ components:
       payload:
         schemaFormat: application/x-protobuf
         schema:
-          $ref: '../../proto/events/consumption/knowledge_graph.proto#/chora.consumption.v1.ExplorationCreated'
+          $ref: '../../proto/chora/consumption/v1/knowledge_graph.proto#/chora.consumption.v1.ExplorationCreated'

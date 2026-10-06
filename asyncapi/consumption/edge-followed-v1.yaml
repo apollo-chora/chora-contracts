@@ -10,7 +10,7 @@ info:
     - Aggregate root: `KnowledgeGraphEdge`
     - Topic: `chora.consumption.knowledge_graph.edge_followed.v1`
     - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
-    - Source proto: `proto/events/consumption/knowledge_graph.proto`
+    - Source proto: `proto/chora/consumption/v1/knowledge_graph.proto`
        message `chora.consumption.v1.EdgeFollowed`
 
     Per Tier 2 D7, KG traversal uses PostgreSQL Recursive CTEs in
@@ -77,4 +77,4 @@ components:
       payload:
         schemaFormat: application/x-protobuf
         schema:
-          $ref: '../../proto/events/consumption/knowledge_graph.proto#/chora.consumption.v1.EdgeFollowed'
+          $ref: '../../proto/chora/consumption/v1/knowledge_graph.proto#/chora.consumption.v1.EdgeFollowed'

@@ -2,6 +2,25 @@
 // Chora Content Consumption — per-user Knowledge Graph events (per ADR-143)
 // =============================================================================
 //
+// ⚠ DEPRECATED — SUPERSEDED. DO NOT USE FOR NEW WORK.
+//
+// Canonical source: proto/chora/consumption/v1/knowledge_graph.proto
+// (14 messages: NodeTraversed, EdgeFollowed, CuriosityScoreUpdated,
+// HexagonNeighbor, MapClusterCreated, MapClusterMerged, MapClusterArchived,
+// ExplorationCreated, ExplorationFocalNodeChanged, ExplorationArchived,
+// KGFogNeighborsRequested, HexagonFogGenerated, HexagonFogInvalidated,
+// JunctionDetected).
+//
+// What the services actually emit (chora-consumption,
+// internal/adapter/events/publisher.go + kg_publisher.go):
+//   JunctionDetected  → chora.consumption.kg_junction.detected.v1
+//   MapClusterMerged  → chora.consumption.kg_map_cluster.merged.v1
+// This file's declared topics (chora.consumption.kg.junction_detected.v1,
+// chora.consumption.kg.cluster_merged.v1) and message names (KGJunctionDetected,
+// KGClusterMerged) match nothing live. Retained only because
+// proto/events-flat/consumption/kg/{junction_detected,cluster_merged}.proto
+// are still generated from it for legacy schema-registry consumers.
+//
 // Aggregate root : MapCluster (chora_consumption.MapCluster — 1:N per user)
 // Owning domain  : Content Consumption (chora_consumption DB)
 // Topic prefix   : chora.consumption.kg.*

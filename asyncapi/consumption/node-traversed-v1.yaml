@@ -10,7 +10,7 @@ info:
     - Aggregate root: `KnowledgeGraphNode`
     - Topic: `chora.consumption.knowledge_graph.node_traversed.v1`
     - Schema format: Protobuf binary, validated by Pub/Sub Schema Registry
-    - Source proto: `proto/events/consumption/knowledge_graph.proto`
+    - Source proto: `proto/chora/consumption/v1/knowledge_graph.proto`
        message `chora.consumption.v1.NodeTraversed`
 
     Per Tier 2 D7, KG traversal uses PostgreSQL Recursive CTEs in
@@ -69,4 +69,4 @@ components:
       payload:
         schemaFormat: application/x-protobuf
         schema:
-          $ref: '../../proto/events/consumption/knowledge_graph.proto#/chora.consumption.v1.NodeTraversed'
+          $ref: '../../proto/chora/consumption/v1/knowledge_graph.proto#/chora.consumption.v1.NodeTraversed'

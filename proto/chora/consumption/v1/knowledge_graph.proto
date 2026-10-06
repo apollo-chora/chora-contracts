@@ -23,6 +23,11 @@
 // These events surface curiosity signals to Sharing (reputation, leaderboards)
 // and Observability (engagement analytics), and feed the AI Kernel cost
 // ledger via HexagonFogGenerated.total_cost_micros.
+//
+// CANONICAL for this aggregate: chora-consumption emits these topics
+// (internal/adapter/events/publisher.go). The legacy 2-message predecessor
+// at proto/events/consumption/knowledge_graph.proto (KGJunctionDetected,
+// KGClusterMerged) is DEPRECATED — its topics match nothing live.
 // =============================================================================
 
 syntax = "proto3";

@@ -46,7 +46,7 @@ all services    ← depend directly on chora-contracts/gen/* + Pydantic models
 
 `chora.{domain}.{aggregate}.{event_type}.v{N}`
 
-- **domain** — one of 11: `creation`, `consumption`, `delivery`, `sharing`, `a2a` (5 core) + `identity`, `tenancy`, `governance`, `observability`, `notifications`, `ai_kernel` (6 supporting)
+- **domain** — one of 13: `creation`, `consumption`, `delivery`, `sharing`, `a2a` (5 core) + `identity`, `tenancy`, `governance`, `observability`, `notifications`, `ai_kernel`, `payments`, `closure` (8 supporting)
 - **aggregate** — `snake_case` aggregate root name
 - **event_type** — `snake_case`, past tense: `created`, `published`, `completed`, `started`, `failed`, `detected`
 - **major version** — `v1`, `v2` (breaking change → new topic; never reuse)

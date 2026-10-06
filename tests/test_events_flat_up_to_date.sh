@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # test_events_flat_up_to_date.sh — CI consistency test for Path C codegen.
 #
-# Asserts that proto/events-flat/ is up-to-date with proto/events/. If any
-# canonical event proto changes without re-running scripts/flatten-event-schemas.sh,
-# this test fails — preventing drift between source-of-truth and the committed
+# Asserts that proto/events-flat/ is up-to-date with proto/events/ AND
+# proto-frozen/ (ruling 44: frozen sources still feed live topics, so the
+# generator must see both descriptor sets). If any canonical event proto
+# changes without re-running scripts/flatten-event-schemas.sh, this test
+# fails — preventing drift between source-of-truth and the committed
 # flat schema artifact.
 #
 # Run from chora-contracts/ root.
@@ -22,12 +24,19 @@ mkdir -p "${SHADOW_DIR}"
 
 # Build FileDescriptorSet via buf (excludes events-flat per buf.yaml excludes).
 FDS_PATH="${TMPDIR:-/tmp}/chora-fds-test-$$.binpb"
-trap 'rm -f "${FDS_PATH}"; rm -rf "${SHADOW_DIR}"' EXIT
+FDS_FROZEN_PATH="${TMPDIR:-/tmp}/chora-fds-frozen-test-$$.binpb"
+trap 'rm -f "${FDS_PATH}" "${FDS_FROZEN_PATH}"; rm -rf "${SHADOW_DIR}"' EXIT
 buf build proto --as-file-descriptor-set --output "${FDS_PATH}"
+
+# proto-frozen/ is a SEPARATE buf module (ruling 44) holding sources for
+# event generations still live on the wire. The generator merges both
+# descriptor sets; without the frozen one the shadow lacks the frozen
+# generations and the diff below false-fails on a clean checkout.
+buf build proto-frozen --as-file-descriptor-set --output "${FDS_FROZEN_PATH}"
 
 # Run protoflatten into a shadow directory. SHADOW_DIR is absolute (mktemp-style)
 # so do not prefix with ROOT_DIR.
-(cd internal/protoflatten && GOWORK=off go run . -fds "${FDS_PATH}" -out "${SHADOW_DIR}" -quiet)
+(cd internal/protoflatten && GOWORK=off go run . -fds "${FDS_PATH}" -fds-frozen "${FDS_FROZEN_PATH}" -out "${SHADOW_DIR}" -quiet)
 
 # Materialise the Path-A v2 aliases into the shadow exactly as
 # scripts/flatten-event-schemas.sh does for the committed tree. Without this
