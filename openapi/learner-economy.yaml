@@ -1,7 +1,7 @@
 openapi: "3.2.0"
 info:
   title: "Chora Learner Economy API"
-  version: "1.0.0"
+  version: "1.1.0"
   description: |
     Per-user economy REST API for the Identity supporting domain.
 
@@ -262,6 +262,71 @@ paths:
           $ref: "#/components/responses/ValidationError"
         "423":
           $ref: "#/components/responses/Locked"
+
+  /api/v1/me/mana/demo-grant:
+    post:
+      operationId: grantDemoManaToSelf
+      summary: "Demo-only: grant a fixed mana amount to the caller"
+      description: |
+        Mints a fixed, server-configured quantity of mana to the caller's
+        personal balance. DEMO DEPLOYMENTS ONLY — there is no real-money
+        settlement anywhere in this path.
+
+        NOT a payment, NOT a purchase, NOT a subscription grant. The caller
+        cannot choose or influence the amount: the request body is empty and
+        any body sent is ignored. The credited quantity comes from server
+        configuration, never from the client.
+
+        Gated on an explicitly-enabled demo environment (default OFF). It is
+        deliberately NOT keyed on `CHORA_ENV` alone — a demo deployment is
+        one where an operator has turned the demo surface on. Outside such a
+        deployment the operation is unavailable and returns 404.
+
+        Ledger-backed and idempotent: the credit is an additive entry on the
+        caller's append-only mana ledger, so a replay returns the original
+        result and NEVER re-credits or resets an already-spent balance. The
+        `Idempotency-Key` header is REQUIRED — a request without it is a 400,
+        not a silently-keyed retry.
+
+        Subject to a per-caller demo quota. Once the caller's demo budget is
+        exhausted the operation returns 429 until the budget window rolls.
+      tags: [Mana]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: "Client-supplied idempotency key (UUIDv7 recommended). REQUIRED — the operation is not safe to auto-key."
+          schema:
+            type: string
+            maxLength: 64
+      responses:
+        "200":
+          description: "Mana granted (or an idempotent replay of a prior grant)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManaDemoGrantResponse"
+        "400":
+          description: "Idempotency-Key header missing"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: |
+            Demo surface unavailable — this deployment has not enabled it.
+            Distinct from a missing resource: the route exists but the demo
+            capability is off, so the caller cannot mint free mana here.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: "Demo quota / budget exhausted for this caller"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /api/v1/me/kyc/status:
     get:
@@ -864,6 +929,48 @@ components:
         recorded_at:
           type: string
           format: date-time
+
+    ManaDemoGrantResponse:
+      type: object
+      required: [granted_units, balance_units, replayed, reason]
+      description: |
+        Result of grantDemoManaToSelf. `balance_units` is the authoritative
+        post-grant balance read back from the ledger, NOT a client-supplied
+        or incremented value, so it stays correct across replays and
+        concurrent spend. `replayed` is true when `Idempotency-Key` matched
+        a previously-completed grant: `granted_units` is then the amount the
+        ORIGINAL grant credited (zero if the original grant pre-dated this
+        field), and no further mana moved.
+      properties:
+        granted_units:
+          type: integer
+          format: int64
+          minimum: 0
+          description: "Units credited by the grant this key identifies (server-configured, never client-chosen)"
+        balance_units:
+          type: integer
+          format: int64
+          minimum: 0
+          description: "Authoritative spendable balance after the grant (or after the replayed grant)"
+        replayed:
+          type: boolean
+          description: "True when this Idempotency-Key completed before and the stored result was returned"
+        reason:
+          type: string
+          description: |
+            Ledger reason code for the credit. Demo-only reason identifying
+            this as a demonstration grant rather than a purchase, subscription
+            allocation, subsidy or refund.
+          example: "demo_grant"
+        ledger_entry_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: "ID of the additive mana_ledger row written by the original grant"
+        recorded_at:
+          type: string
+          format: date-time
+          nullable: true
 
     KycMethod:
       type: string
